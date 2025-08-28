@@ -12,6 +12,7 @@ import tempfile
 from typing import List, Dict, Tuple, Optional
 import exifread
 
+#start
 class ConverterThread(QThread):
     log_signal = pyqtSignal(list)
     progress_signal = pyqtSignal(int)
