@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QRadioButton, QComboBox, QSpinBox, QDoubleSpinBox,
                              QTreeView, QHeaderView, QDialog, QTabWidget, QDialogButtonBox,
                              QListWidget, QAbstractItemView, QTableWidget, QTableWidgetItem,
-                             QHeaderView, QListWidgetItem)
+                             QGridLayout)
 from PyQt5.QtCore import Qt, QDir, QSortFilterProxyModel, QSettings, QStandardPaths
 from PyQt5.QtGui import QStandardItemModel, QStandardItem, QIcon, QBrush, QColor, QFont
 
@@ -110,7 +110,7 @@ class RealityScanBatchGenerator(QMainWindow):
         script_dir = os.path.dirname(os.path.abspath(__file__))
         config_path = os.path.join(script_dir, "RealityScanBatchGenerator.ini")
         
-        # Инициализируем QSettings с INI-форматом
+        # Инициализируем QSettings с INI-формат
         self.settings = QSettings(config_path, QSettings.IniFormat)
         
         # Загрузка настроек
@@ -150,7 +150,7 @@ class RealityScanBatchGenerator(QMainWindow):
         self.apply_font(mode_group)
         for widget in [self.mode_noscale, self.mode_scale]:
             self.apply_font(widget)
-        
+               
         # Путь к RealityScan
         realityscan_layout = QHBoxLayout()
         realityscan_label = QLabel("Путь к RealityScan:")
@@ -306,53 +306,60 @@ class RealityScanBatchGenerator(QMainWindow):
         # Если папки уже указаны, загружаем подпапки
         if self.input_list.count() > 0:
             self.update_folders_model()
+
+
+
+        # Общие настройки для обоих режимов
+        common_settings_group = QGroupBox("Общие настройки")
+        self.apply_font(common_settings_group)
+        common_layout = QHBoxLayout()
         
+        # AI Masks
+        self.common_ai_masks_check = QCheckBox("Маски -generateAIMasks")
+        self.common_ai_masks_check.setChecked(self.settings.value("common_ai_masks", self.use_ai_masks, type=bool))
+        self.apply_font(self.common_ai_masks_check)
+        common_layout.addWidget(self.common_ai_masks_check)
+        
+        # Prior Groups
+        prior_group_layout = QHBoxLayout()
+        
+        self.common_prior_calibration_check = QCheckBox("-setPriorCalibrationGroup -1")
+        self.common_prior_calibration_check.setChecked(self.settings.value("common_prior_calibration", True, type=bool))
+        self.apply_font(self.common_prior_calibration_check)
+        
+        self.common_prior_lens_check = QCheckBox("-setPriorLensGroup -1")
+        self.common_prior_lens_check.setChecked(self.settings.value("common_prior_lens", True, type=bool))
+        self.apply_font(self.common_prior_lens_check)
+        
+        prior_group_layout.addWidget(self.common_prior_calibration_check)
+        prior_group_layout.addWidget(self.common_prior_lens_check)
+        common_layout.addLayout(prior_group_layout)
+        
+        # Simplify
+        simplify_layout = QHBoxLayout()
+        simplify_label = QLabel("Количество полигонов:")
+        self.apply_font(simplify_label)
+        
+        self.common_simplify_edit = QSpinBox()
+        self.common_simplify_edit.setRange(1, 100000000)
+        self.common_simplify_edit.setValue(self.settings.value("common_simplify", self.simplify_value, type=int))
+        self.apply_font(self.common_simplify_edit)
+        
+        simplify_layout.addWidget(simplify_label)
+        simplify_layout.addWidget(self.common_simplify_edit)
+        simplify_layout.addStretch()
+        common_layout.addLayout(simplify_layout)
+        
+        common_settings_group.setLayout(common_layout)
+        main_layout.addWidget(common_settings_group)
+
+
+
+
         # Настройки для режима Scale
         self.scale_settings_group = QGroupBox("Настройки Scale режима")
         self.apply_font(self.scale_settings_group)
         scale_settings_layout = QVBoxLayout()
-        
-        # Общие настройки для Scale режима
-        scale_common_group = QGroupBox("Общие настройки")
-        self.apply_font(scale_common_group)
-        scale_common_layout = QVBoxLayout()
-        
-        self.scale_ai_masks_check = QCheckBox("Использовать AI маски (-generateAIMasks)")
-        self.scale_ai_masks_check.setChecked(self.settings.value("scale_ai_masks", self.use_ai_masks, type=bool))
-        self.apply_font(self.scale_ai_masks_check)
-        
-        # Чекбоксы для приоритетных групп (добавлены)
-        prior_group_layout = QHBoxLayout()
-        
-        self.scale_prior_calibration_check = QCheckBox("Использовать приоритетную калибровочную группу (-setPriorCalibrationGroup -1)")
-        self.scale_prior_calibration_check.setChecked(self.settings.value("scale_prior_calibration", True, type=bool))
-        self.apply_font(self.scale_prior_calibration_check)
-        
-        self.scale_prior_lens_check = QCheckBox("Использовать приоритетную группу линз (-setPriorLensGroup -1)")
-        self.scale_prior_lens_check.setChecked(self.settings.value("scale_prior_lens", True, type=bool))
-        self.apply_font(self.scale_prior_lens_check)
-        
-        prior_group_layout.addWidget(self.scale_prior_calibration_check)
-        prior_group_layout.addWidget(self.scale_prior_lens_check)
-        
-        scale_simplify_layout = QHBoxLayout()
-        scale_simplify_label = QLabel("Количество полигонов после упрощения:")
-        self.apply_font(scale_simplify_label)
-        
-        self.scale_simplify_edit = QSpinBox()
-        # Изменён диапазон: от 1 до 100000000
-        self.scale_simplify_edit.setRange(1, 100000000)
-        self.scale_simplify_edit.setValue(self.settings.value("scale_simplify", self.simplify_value, type=int))
-        self.apply_font(self.scale_simplify_edit)
-        
-        scale_simplify_layout.addWidget(scale_simplify_label)
-        scale_simplify_layout.addWidget(self.scale_simplify_edit)
-        scale_simplify_layout.addStretch()
-        
-        scale_common_layout.addWidget(self.scale_ai_masks_check)
-        scale_common_layout.addLayout(prior_group_layout)  # Добавлены чекбоксы
-        scale_common_layout.addLayout(scale_simplify_layout)
-        scale_common_group.setLayout(scale_common_layout)
         
         # Настройки маркеров
         marker_group = QGroupBox("Настройки маркеров")
@@ -456,24 +463,27 @@ class RealityScanBatchGenerator(QMainWindow):
         markers_table_layout.addWidget(self.markers_table)
         markers_table_group.setLayout(markers_table_layout)
         
-        # Добавляем группу для выбора маркеров, которые не нужно удалять
+        # Добавляем группу для выбора маркеров, которые не нужно удалять (в виде сетки)
         white_list_group = QGroupBox("Маркеры, которые не удалять (белый список)")
         self.apply_font(white_list_group)
         white_list_layout = QVBoxLayout()
         
-        # Инициализируем white_list_widget
-        self.white_list_widget = QListWidget()
-        self.white_list_widget.setSelectionMode(QAbstractItemView.MultiSelection)
-        # Заполняем список маркерами с порядковыми номерами
-        for idx, marker in enumerate(self.marker_points):
-            item = QListWidgetItem(f"{idx}-{marker}")
-            item.setData(Qt.UserRole, marker)  # Сохраняем оригинальное имя маркера
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Unchecked)
-            self.white_list_widget.addItem(item)
-            self.apply_font(item)
+        # Создаем виджет для сетки
+        grid_widget = QWidget()
+        grid_layout = QGridLayout()
+        grid_widget.setLayout(grid_layout)
         
-        white_list_layout.addWidget(self.white_list_widget)
+        # Создаем чекбоксы для каждого маркера
+        self.white_list_checkboxes = []
+        for idx, marker in enumerate(self.marker_points):
+            checkbox = QCheckBox(f"{idx}-{marker}")
+            checkbox.setFont(QFont("", self.FONT_SIZE))
+            row = idx // 10  # 10 колонок в строке
+            col = idx % 10   # остаток от деления - колонка
+            grid_layout.addWidget(checkbox, row, col)
+            self.white_list_checkboxes.append(checkbox)
+        
+        white_list_layout.addWidget(grid_widget)
         
         # Кнопки для управления белым списком
         white_list_buttons_layout = QHBoxLayout()
@@ -504,41 +514,13 @@ class RealityScanBatchGenerator(QMainWindow):
         self.apply_font(self.noscale_settings_group)
         noscale_settings_layout = QVBoxLayout()
         
-        self.noscale_ai_masks_check = QCheckBox("Использовать AI маски (-generateAIMasks)")
-        self.noscale_ai_masks_check.setChecked(self.settings.value("noscale_ai_masks", self.use_ai_masks, type=bool))
-        self.apply_font(self.noscale_ai_masks_check)
+        noscale_info_label = QLabel("Для NoScale режима используются общие настройки")
+        self.apply_font(noscale_info_label)
+        noscale_settings_layout.addWidget(noscale_info_label)
         
-        # Чекбоксы для приоритетных групп (добавлены)
-        noscale_prior_group_layout = QHBoxLayout()
-        
-        self.noscale_prior_calibration_check = QCheckBox("Использовать приоритетную калибровочную группу (-setPriorCalibrationGroup -1)")
-        self.noscale_prior_calibration_check.setChecked(self.settings.value("noscale_prior_calibration", True, type=bool))
-        self.apply_font(self.noscale_prior_calibration_check)
-        
-        self.noscale_prior_lens_check = QCheckBox("Использовать приоритетную группу линз (-setPriorLensGroup -1)")
-        self.noscale_prior_lens_check.setChecked(self.settings.value("noscale_prior_lens", True, type=bool))
-        self.apply_font(self.noscale_prior_lens_check)
-        
-        noscale_prior_group_layout.addWidget(self.noscale_prior_calibration_check)
-        noscale_prior_group_layout.addWidget(self.noscale_prior_lens_check)
-        
-        noscale_simplify_label = QLabel("Количество полигонов после упрощения:")
-        self.apply_font(noscale_simplify_label)
-        
-        self.noscale_simplify_edit = QSpinBox()
-        # Изменён диапазон: от 1 до 100000000
-        self.noscale_simplify_edit.setRange(1, 100000000)
-        self.noscale_simplify_edit.setValue(self.settings.value("noscale_simplify", self.simplify_value, type=int))
-        self.apply_font(self.noscale_simplify_edit)
-        
-        noscale_settings_layout.addWidget(self.noscale_ai_masks_check)
-        noscale_settings_layout.addLayout(noscale_prior_group_layout)  # Добавлены чекбоксы
-        noscale_settings_layout.addWidget(noscale_simplify_label)
-        noscale_settings_layout.addWidget(self.noscale_simplify_edit)
         self.noscale_settings_group.setLayout(noscale_settings_layout)
         
         # Добавляем группы настроек в основной layout
-        scale_settings_layout.addWidget(scale_common_group)
         scale_settings_layout.addWidget(marker_group)
         self.scale_settings_group.setLayout(scale_settings_layout)
         
@@ -599,16 +581,17 @@ class RealityScanBatchGenerator(QMainWindow):
         
         # Обновляем таблицу маркеров после инициализации UI
         self.update_markers_table()
+        
+        # Загружаем состояние белого списка маркеров
+        self.load_white_list_settings()
     
     def select_all_white_list(self):
-        for i in range(self.white_list_widget.count()):
-            item = self.white_list_widget.item(i)
-            item.setCheckState(Qt.Checked)
+        for checkbox in self.white_list_checkboxes:
+            checkbox.setChecked(True)
 
     def deselect_all_white_list(self):
-        for i in range(self.white_list_widget.count()):
-            item = self.white_list_widget.item(i)
-            item.setCheckState(Qt.Unchecked)
+        for checkbox in self.white_list_checkboxes:
+            checkbox.setChecked(False)
     
     def update_mode_settings(self):
         if self.mode_noscale.isChecked():
@@ -823,7 +806,7 @@ class RealityScanBatchGenerator(QMainWindow):
                             
                             objects_to_process.append((folder_name, folder_path, mod_date, file_count))
                 else:
-                    # Если нет подпапок - добавляем саму корневую папку как объект
+                    # Если нет подпапки - добавляем саму корневую папку как объект
                     folder_name = os.path.basename(root_folder.rstrip('\\/'))
                     folder_path = root_folder
                     mod_date = datetime.fromtimestamp(os.path.getmtime(root_folder)).strftime("%Y-%m-%d %H:%M:%S")
@@ -861,7 +844,7 @@ class RealityScanBatchGenerator(QMainWindow):
                 date_item.setEditable(False)
                 date_item.setFont(QFont("", self.FONT_SIZE))
                 
-                # Добавляем строкя
+                # Добавляем строку
                 self.folders_model.appendRow([name_item, count_item, date_item])
             
             # Сортировка по имени по умолчанию
@@ -990,12 +973,12 @@ class RealityScanBatchGenerator(QMainWindow):
             return None
     
     def generate_noscale_bat_content(self, output_folder, realityscan_path, selected_folders):
-        simplify_value = self.noscale_simplify_edit.value()
-        use_ai_masks = self.noscale_ai_masks_check.isChecked()
+        simplify_value = self.common_simplify_edit.value()
+        use_ai_masks = self.common_ai_masks_check.isChecked()
         
         # Добавляем параметры для приоритетных групп
-        prior_calibration_param = " -setPriorCalibrationGroup -1" if self.noscale_prior_calibration_check.isChecked() else ""
-        prior_lens_param = " -setPriorLensGroup -1" if self.noscale_prior_lens_check.isChecked() else ""
+        prior_calibration_param = " -setPriorCalibrationGroup -1" if self.common_prior_calibration_check.isChecked() else ""
+        prior_lens_param = " -setPriorLensGroup -1" if self.common_prior_lens_check.isChecked() else ""
         
         # Генерация первого BAT-файла
         bat_content1 = "@echo off\n"
@@ -1051,12 +1034,12 @@ class RealityScanBatchGenerator(QMainWindow):
         return {"Step1.bat": bat_content1, "Step2.bat": bat_content2}
     
     def generate_scale_bat_content(self, output_folder, realityscan_path, selected_folders):
-        use_ai_masks = self.scale_ai_masks_check.isChecked()
-        simplify_value = self.scale_simplify_edit.value()
+        use_ai_masks = self.common_ai_masks_check.isChecked()
+        simplify_value = self.common_simplify_edit.value()
         
         # Добавляем параметры для приоритетных групп
-        prior_calibration_param = " -setPriorCalibrationGroup -1" if self.scale_prior_calibration_check.isChecked() else ""
-        prior_lens_param = " -setPriorLensGroup -1" if self.scale_prior_lens_check.isChecked() else ""
+        prior_calibration_param = " -setPriorCalibrationGroup -1" if self.common_prior_calibration_check.isChecked() else ""
+        prior_lens_param = " -setPriorLensGroup -1" if self.common_prior_lens_check.isChecked() else ""
         
         # Преобразуем список команд в строку для BAT-файла
         distance_commands_list = []
@@ -1073,10 +1056,9 @@ class RealityScanBatchGenerator(QMainWindow):
         
         # Получаем список маркеров, которые не нужно удалять (белый список)
         white_list = set()
-        for i in range(self.white_list_widget.count()):
-            item = self.white_list_widget.item(i)
-            if item.checkState() == Qt.Checked:
-                white_list.add(item.data(Qt.UserRole))  # Получаем оригинальное имя маркера
+        for idx, checkbox in enumerate(self.white_list_checkboxes):
+            if checkbox.isChecked():
+                white_list.add(self.marker_points[idx])
         
         # Объединяем маркеры из defineDistance и белого списка
         keep_markers = white_list.union(markers_in_define_distance)
@@ -1134,17 +1116,11 @@ class RealityScanBatchGenerator(QMainWindow):
         # Сохраняем параметры маркеров
         self.settings.setValue("distance_commands", json.dumps(self.distance_commands))
         
-        # Сохраняем другие настройки
-        self.settings.setValue("noscale_ai_masks", self.noscale_ai_masks_check.isChecked())
-        self.settings.setValue("noscale_simplify", self.noscale_simplify_edit.value())
-        self.settings.setValue("scale_ai_masks", self.scale_ai_masks_check.isChecked())
-        self.settings.setValue("scale_simplify", self.scale_simplify_edit.value())
-        
-        # Сохраняем настройки приоритетных групп
-        self.settings.setValue("noscale_prior_calibration", self.noscale_prior_calibration_check.isChecked())
-        self.settings.setValue("noscale_prior_lens", self.noscale_prior_lens_check.isChecked())
-        self.settings.setValue("scale_prior_calibration", self.scale_prior_calibration_check.isChecked())
-        self.settings.setValue("scale_prior_lens", self.scale_prior_lens_check.isChecked())
+        # Сохраняем общие настройки
+        self.settings.setValue("common_ai_masks", self.common_ai_masks_check.isChecked())
+        self.settings.setValue("common_simplify", self.common_simplify_edit.value())
+        self.settings.setValue("common_prior_calibration", self.common_prior_calibration_check.isChecked())
+        self.settings.setValue("common_prior_lens", self.common_prior_lens_check.isChecked())
         
         # Сохраняем состояние чекбокса обрезки даты
         self.settings.setValue("trim_date", self.trim_date_checkbox.isChecked())
@@ -1160,10 +1136,9 @@ class RealityScanBatchGenerator(QMainWindow):
         
         # Сохраняем белый список маркеров
         white_list = []
-        for i in range(self.white_list_widget.count()):
-            item = self.white_list_widget.item(i)
-            if item.checkState() == Qt.Checked:
-                white_list.append(item.data(Qt.UserRole))
+        for idx, checkbox in enumerate(self.white_list_checkboxes):
+            if checkbox.isChecked():
+                white_list.append(self.marker_points[idx])
         self.settings.setValue("white_list_markers", white_list)
     
     def load_settings(self):
@@ -1187,17 +1162,14 @@ class RealityScanBatchGenerator(QMainWindow):
                             })
                 except:
                     self.distance_commands = []
-        
+    
+    def load_white_list_settings(self):
         # Загрузка белого списка маркеров
         white_list = self.settings.value("white_list_markers", [])
-        if white_list and hasattr(self, 'white_list_widget'):
-            for i in range(self.white_list_widget.count()):
-                item = self.white_list_widget.item(i)
-                marker_name = item.data(Qt.UserRole)
-                if marker_name in white_list:
-                    item.setCheckState(Qt.Checked)
-                else:
-                    item.setCheckState(Qt.Unchecked)
+        if white_list:
+            for idx, checkbox in enumerate(self.white_list_checkboxes):
+                marker = self.marker_points[idx]
+                checkbox.setChecked(marker in white_list)
     
     def closeEvent(self, event):
         # При закрытии приложения сохраняем настройки
