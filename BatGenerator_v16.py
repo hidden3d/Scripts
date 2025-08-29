@@ -2,21 +2,21 @@ import os
 import sys
 import json
 from datetime import datetime
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QLineEdit, QPushButton, QCheckBox, QTextEdit, 
                              QGroupBox, QFileDialog, QMessageBox, QScrollArea,
                              QRadioButton, QComboBox, QSpinBox, QDoubleSpinBox,
                              QTreeView, QHeaderView, QDialog, QTabWidget, QDialogButtonBox,
                              QListWidget, QAbstractItemView, QTableWidget, QTableWidgetItem,
-                             QHeaderView, QListWidgetItem)
-from PyQt5.QtCore import Qt, QDir, QSortFilterProxyModel, QSettings, QStandardPaths
-from PyQt5.QtGui import QStandardItemModel, QStandardItem, QIcon, QBrush, QColor, QFont
+                             QListWidgetItem)
+from PyQt6.QtCore import Qt, QDir, QSortFilterProxyModel, QSettings, QStandardPaths
+from PyQt6.QtGui import QStandardItemModel, QStandardItem, QIcon, QBrush, QColor, QFont, QPalette
 
 class NumericSortProxyModel(QSortFilterProxyModel):
     def lessThan(self, left_index, right_index):
         if left_index.column() == 1:  # Столбец с количеством файлов
-            left_data = self.sourceModel().data(left_index, Qt.UserRole)
-            right_data = self.sourceModel().data(right_index, Qt.UserRole)
+            left_data = self.sourceModel().data(left_index, Qt.ItemDataRole.UserRole)
+            right_data = self.sourceModel().data(right_index, Qt.ItemDataRole.UserRole)
             try:
                 return int(left_data) < int(right_data)
             except:
@@ -41,6 +41,8 @@ class PreviewDialog(QDialog):
                 text_edit.setPlainText(content)
                 text_edit.setReadOnly(True)
                 text_edit.setFontFamily("Courier New")
+                # Устанавливаем черный цвет текста
+                text_edit.setStyleSheet("color: black;")
                 tab_widget.addTab(text_edit, name)
         else:
             # Для режима Scale одна вкладка
@@ -48,11 +50,13 @@ class PreviewDialog(QDialog):
             text_edit.setPlainText(bat_content)
             text_edit.setReadOnly(True)
             text_edit.setFontFamily("Courier New")
+            # Устанавливаем черный цвет текста
+            text_edit.setStyleSheet("color: black;")
             tab_widget.addTab(text_edit, "Scale BAT")
         
         layout.addWidget(tab_widget)
         
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -111,7 +115,7 @@ class RealityScanBatchGenerator(QMainWindow):
         config_path = os.path.join(script_dir, "RealityScanBatchGenerator.ini")
         
         # Инициализируем QSettings с INI-форматом
-        self.settings = QSettings(config_path, QSettings.IniFormat)
+        self.settings = QSettings(config_path, QSettings.Format.IniFormat)
         
         # Загрузка настроек
         self.load_settings()
@@ -133,13 +137,18 @@ class RealityScanBatchGenerator(QMainWindow):
         
         # Режим работы
         mode_group = QGroupBox("Режим работы")
+        mode_group.setStyleSheet("color: black;")
         mode_layout = QHBoxLayout()
         
         self.mode_noscale = QRadioButton("NoScale (два BAT-файла)")
         self.mode_noscale.setChecked(self.settings.value("mode_noscale", True, type=bool))
+        # Устанавливаем черный цвет текста
+        self.mode_noscale.setStyleSheet("color: black;")
         
         self.mode_scale = QRadioButton("Scale (один BAT-файл с маркерами)")
         self.mode_scale.setChecked(self.settings.value("mode_scale", False, type=bool))
+        # Устанавливаем черный цвет текста
+        self.mode_scale.setStyleSheet("color: black;")
         
         mode_layout.addWidget(self.mode_noscale)
         mode_layout.addWidget(self.mode_scale)
@@ -154,9 +163,17 @@ class RealityScanBatchGenerator(QMainWindow):
         # Путь к RealityScan
         realityscan_layout = QHBoxLayout()
         realityscan_label = QLabel("Путь к RealityScan:")
+        # Устанавливаем черный цвет текста
+        realityscan_label.setStyleSheet("color: black;")
+        
         self.realityscan_edit = QLineEdit(self.settings.value("realityscan_path", self.realityscan_path))
+        # Устанавливаем черный цвет текста
+        self.realityscan_edit.setStyleSheet("color: black; background-color: #f0f0f0;")
+        
         realityscan_btn = QPushButton("Обзор...")
         realityscan_btn.clicked.connect(self.select_realityscan_path)
+        # Устанавливаем черный цвет текста
+        realityscan_btn.setStyleSheet("color: black;")
         
         realityscan_layout.addWidget(realityscan_label)
         realityscan_layout.addWidget(self.realityscan_edit)
@@ -170,12 +187,15 @@ class RealityScanBatchGenerator(QMainWindow):
         # Входные папки
         input_group = QGroupBox("Папки с фотографиями")
         self.apply_font(input_group)
+        input_group.setStyleSheet("color: black;")
         input_layout = QVBoxLayout()
         
         # Список добавленных папок
         self.input_list = QListWidget()
-        self.input_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.input_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.apply_font(self.input_list)
+        # Устанавливаем черный цвет текста
+        self.input_list.setStyleSheet("color: black; background-color: #f0f0f0;")
         
         # Загрузка сохраненных папок
         saved_folders = self.settings.value("input_folders", [])
@@ -194,10 +214,14 @@ class RealityScanBatchGenerator(QMainWindow):
         add_input_btn = QPushButton("Добавить папку")
         add_input_btn.clicked.connect(self.add_input_folder)
         self.apply_font(add_input_btn)
+        # Устанавливаем черный цвет текста
+        add_input_btn.setStyleSheet("color: black;")
         
         remove_input_btn = QPushButton("Удалить выбранные")
         remove_input_btn.clicked.connect(self.remove_input_folders)
         self.apply_font(remove_input_btn)
+        # Устанавливаем черный цвет текста
+        remove_input_btn.setStyleSheet("color: black;")
         
         input_buttons_layout.addWidget(add_input_btn)
         input_buttons_layout.addWidget(remove_input_btn)
@@ -208,6 +232,8 @@ class RealityScanBatchGenerator(QMainWindow):
         self.trim_date_checkbox = QCheckBox("Убрать дату из имени подпапки (если начинается с 8 цифр)")
         self.trim_date_checkbox.setChecked(self.settings.value("trim_date", False, type=bool))
         self.apply_font(self.trim_date_checkbox)
+        # Устанавливаем черный цвет текста
+        self.trim_date_checkbox.setStyleSheet("color: black;")
         input_layout.addWidget(self.trim_date_checkbox)
         
         input_group.setLayout(input_layout)
@@ -216,9 +242,17 @@ class RealityScanBatchGenerator(QMainWindow):
         # Выходная папка для проектов
         output_layout = QHBoxLayout()
         output_label = QLabel("Папка для проектов:")
+        # Устанавливаем черный цвет текста
+        output_label.setStyleSheet("color: black;")
+        
         self.output_edit = QLineEdit(self.settings.value("output_folder", ""))
+        # Устанавливаем черный цвет текста
+        self.output_edit.setStyleSheet("color: black;")
+        
         output_btn = QPushButton("Обзор...")
         output_btn.clicked.connect(self.select_output_folder)
+        # Устанавливаем черный цвет текста
+        output_btn.setStyleSheet("color: black;")
         
         output_layout.addWidget(output_label)
         output_layout.addWidget(self.output_edit)
@@ -232,9 +266,17 @@ class RealityScanBatchGenerator(QMainWindow):
         # Файл BAT
         bat_layout = QHBoxLayout()
         bat_label = QLabel("BAT файл для сохранения:")
+        # Устанавливаем черный цвет текста
+        bat_label.setStyleSheet("color: black;")
+        
         self.bat_edit = QLineEdit(self.settings.value("bat_file", ""))
+        # Устанавливаем черный цвет текста
+        self.bat_edit.setStyleSheet("color: black;")
+        
         bat_btn = QPushButton("Обзор...")
         bat_btn.clicked.connect(self.select_bat_file)
+        # Устанавливаем черный цвет текста
+        bat_btn.setStyleSheet("color: black;")
         
         bat_layout.addWidget(bat_label)
         bat_layout.addWidget(self.bat_edit)
@@ -258,19 +300,21 @@ class RealityScanBatchGenerator(QMainWindow):
         # Прокси-модель для сортировки
         self.proxy_model = NumericSortProxyModel()
         self.proxy_model.setSourceModel(self.folders_model)
-        self.proxy_model.setSortCaseSensitivity(Qt.CaseInsensitive)
+        self.proxy_model.setSortCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         
         # Виджет дерева
         self.tree_view = QTreeView()
         self.tree_view.setModel(self.proxy_model)
         self.tree_view.setSortingEnabled(True)
-        self.tree_view.sortByColumn(0, Qt.AscendingOrder)  # Сортировка по имени по умолчанию
+        self.tree_view.sortByColumn(0, Qt.SortOrder.AscendingOrder)  # Сортировка по имени по умолчанию
         self.tree_view.setRootIsDecorated(False)
-        self.tree_view.setSelectionMode(QTreeView.NoSelection)
-        self.tree_view.header().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.tree_view.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.tree_view.header().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.tree_view.setSelectionMode(QTreeView.SelectionMode.NoSelection)
+        self.tree_view.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.tree_view.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.tree_view.header().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.apply_font(self.tree_view)  # Применяем шрифт к дереву
+        # Устанавливаем черный цвет текста
+        self.tree_view.setStyleSheet("color: black;")
         
         # Установка шрифта для заголовков дерева
         header = self.tree_view.header()
@@ -285,14 +329,20 @@ class RealityScanBatchGenerator(QMainWindow):
         self.select_all_btn = QPushButton("Выбрать все")
         self.select_all_btn.clicked.connect(self.select_all_folders)
         self.apply_font(self.select_all_btn)
+        # Устанавливаем черный цвет текста
+        self.select_all_btn.setStyleSheet("color: black;")
         
         self.deselect_all_btn = QPushButton("Снять все")
         self.deselect_all_btn.clicked.connect(self.deselect_all_folders)
         self.apply_font(self.deselect_all_btn)
+        # Устанавливаем черный цвет текста
+        self.deselect_all_btn.setStyleSheet("color: black;")
         
         self.clear_folders_btn = QPushButton("Очистить список")
         self.clear_folders_btn.clicked.connect(self.clear_folders_list)
         self.apply_font(self.clear_folders_btn)
+        # Устанавливаем черный цвет текста
+        self.clear_folders_btn.setStyleSheet("color: black;")
         
         controls_layout.addWidget(self.select_all_btn)
         controls_layout.addWidget(self.deselect_all_btn)
@@ -320,6 +370,8 @@ class RealityScanBatchGenerator(QMainWindow):
         self.scale_ai_masks_check = QCheckBox("Использовать AI маски (-generateAIMasks)")
         self.scale_ai_masks_check.setChecked(self.settings.value("scale_ai_masks", self.use_ai_masks, type=bool))
         self.apply_font(self.scale_ai_masks_check)
+        # Устанавливаем черный цвет текста
+        self.scale_ai_masks_check.setStyleSheet("color: black;")
         
         # Чекбоксы для приоритетных групп (добавлены)
         prior_group_layout = QHBoxLayout()
@@ -327,10 +379,14 @@ class RealityScanBatchGenerator(QMainWindow):
         self.scale_prior_calibration_check = QCheckBox("Использовать приоритетную калибровочную группу (-setPriorCalibrationGroup -1)")
         self.scale_prior_calibration_check.setChecked(self.settings.value("scale_prior_calibration", True, type=bool))
         self.apply_font(self.scale_prior_calibration_check)
+        # Устанавливаем черный цвет текста
+        self.scale_prior_calibration_check.setStyleSheet("color: black;")
         
         self.scale_prior_lens_check = QCheckBox("Использовать приоритетную группу линз (-setPriorLensGroup -1)")
         self.scale_prior_lens_check.setChecked(self.settings.value("scale_prior_lens", True, type=bool))
         self.apply_font(self.scale_prior_lens_check)
+        # Устанавливаем черный цвет текста
+        self.scale_prior_lens_check.setStyleSheet("color: black;")
         
         prior_group_layout.addWidget(self.scale_prior_calibration_check)
         prior_group_layout.addWidget(self.scale_prior_lens_check)
@@ -338,12 +394,16 @@ class RealityScanBatchGenerator(QMainWindow):
         scale_simplify_layout = QHBoxLayout()
         scale_simplify_label = QLabel("Количество полигонов после упрощения:")
         self.apply_font(scale_simplify_label)
+        # Устанавливаем черный цвет текста
+        scale_simplify_label.setStyleSheet("color: black;")
         
         self.scale_simplify_edit = QSpinBox()
         # Изменён диапазон: от 1 до 100000000
         self.scale_simplify_edit.setRange(1, 100000000)
         self.scale_simplify_edit.setValue(self.settings.value("scale_simplify", self.simplify_value, type=int))
         self.apply_font(self.scale_simplify_edit)
+        # Устанавливаем черный цвет текста
+        self.scale_simplify_edit.setStyleSheet("color: black;")
         
         scale_simplify_layout.addWidget(scale_simplify_label)
         scale_simplify_layout.addWidget(self.scale_simplify_edit)
@@ -367,16 +427,24 @@ class RealityScanBatchGenerator(QMainWindow):
         self.presets_combo = QComboBox()
         self.presets_combo.addItems(list(self.presets.keys()))
         self.apply_font(self.presets_combo)
+        # Устанавливаем черный цвет текста
+        self.presets_combo.setStyleSheet("color: black;")
         
         load_preset_btn = QPushButton("Загрузить пресет")
         load_preset_btn.clicked.connect(self.load_preset)
         self.apply_font(load_preset_btn)
+        # Устанавливаем черный цвет текста
+        load_preset_btn.setStyleSheet("color: black;")
         
         clear_markers_btn = QPushButton("Очистить маркеры")
         clear_markers_btn.clicked.connect(self.clear_markers)
         self.apply_font(clear_markers_btn)
+        # Устанавливаем черный цвет текста
+        clear_markers_btn.setStyleSheet("color: black;")
         
         presets_layout.addWidget(QLabel("Выберите пресет:"))
+        # Устанавливаем черный цвет текста для QLabel
+        presets_layout.itemAt(0).widget().setStyleSheet("color: black;")
         self.apply_font(presets_layout.itemAt(0).widget())  # Применяем к QLabel
         
         presets_layout.addWidget(self.presets_combo)
@@ -401,6 +469,9 @@ class RealityScanBatchGenerator(QMainWindow):
         
         self.apply_font(self.point1_combo)
         self.apply_font(self.point2_combo)
+        # Устанавливаем черный цвет текста
+        self.point1_combo.setStyleSheet("color: black;")
+        self.point2_combo.setStyleSheet("color: black;")
         self.point2_combo.setCurrentIndex(1)
         
         self.distance_spin = QDoubleSpinBox()
@@ -410,20 +481,30 @@ class RealityScanBatchGenerator(QMainWindow):
         self.distance_spin.setValue(0.11)
         self.distance_spin.setSingleStep(0.01)
         self.apply_font(self.distance_spin)
+        # Устанавливаем черный цвет текста
+        self.distance_spin.setStyleSheet("color: black;")
         
         add_command_btn = QPushButton("Добавить")
         add_command_btn.clicked.connect(self.add_distance_command)
         self.apply_font(add_command_btn)
+        # Устанавливаем черный цвет текста
+        add_command_btn.setStyleSheet("color: black;")
         
         new_command_layout.addWidget(QLabel("Точка 1:"))
+        # Устанавливаем черный цвет текста для QLabel
+        new_command_layout.itemAt(0).widget().setStyleSheet("color: black;")
         self.apply_font(new_command_layout.itemAt(0).widget())  # Применяем к QLabel
         
         new_command_layout.addWidget(self.point1_combo)
         new_command_layout.addWidget(QLabel("Точка 2:"))
+        # Устанавливаем черный цвет текста для QLabel
+        new_command_layout.itemAt(2).widget().setStyleSheet("color: black;")
         self.apply_font(new_command_layout.itemAt(2).widget())  # Применяем к QLabel
         
         new_command_layout.addWidget(self.point2_combo)
         new_command_layout.addWidget(QLabel("Дистанция (м):"))
+        # Устанавливаем черный цвет текста для QLabel
+        new_command_layout.itemAt(4).widget().setStyleSheet("color: black;")
         self.apply_font(new_command_layout.itemAt(4).widget())  # Применяем к QLabel
         
         new_command_layout.addWidget(self.distance_spin)
@@ -438,14 +519,16 @@ class RealityScanBatchGenerator(QMainWindow):
         # Таблица для отображения команд маркеров
         self.markers_table = QTableWidget(0, 5)  # 5 колонок
         self.markers_table.setHorizontalHeaderLabels(["Вкл.", "Точка 1", "Точка 2", "Дистанция", "Управление"])
-        self.markers_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.markers_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.markers_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.markers_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
-        self.markers_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        self.markers_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.markers_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.markers_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.markers_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.markers_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.markers_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.markers_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.markers_table.setMaximumHeight(200)
         self.apply_font(self.markers_table)  # Применяем шрифт к таблице
+        # Устанавливаем черный цвет текста
+        self.markers_table.setStyleSheet("color: black;")
         
         # Установка шрифта для заголовков таблицы
         header = self.markers_table.horizontalHeader()
@@ -463,15 +546,17 @@ class RealityScanBatchGenerator(QMainWindow):
         
         # Инициализируем white_list_widget
         self.white_list_widget = QListWidget()
-        self.white_list_widget.setSelectionMode(QAbstractItemView.MultiSelection)
+        self.white_list_widget.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
         # Заполняем список маркерами с порядковыми номерами
         for idx, marker in enumerate(self.marker_points):
             item = QListWidgetItem(f"{idx}-{marker}")
-            item.setData(Qt.UserRole, marker)  # Сохраняем оригинальное имя маркера
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Unchecked)
+            item.setData(Qt.ItemDataRole.UserRole, marker)  # Сохраняем оригинальное имя маркера
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
             self.white_list_widget.addItem(item)
             self.apply_font(item)
+            # Устанавливаем черный цвет текста
+            item.setForeground(QBrush(QColor("black")))
         
         white_list_layout.addWidget(self.white_list_widget)
         
@@ -480,10 +565,14 @@ class RealityScanBatchGenerator(QMainWindow):
         select_all_white_btn = QPushButton("Выбрать все")
         select_all_white_btn.clicked.connect(self.select_all_white_list)
         self.apply_font(select_all_white_btn)
+        # Устанавливаем черный цвет текста
+        select_all_white_btn.setStyleSheet("color: black;")
         
         deselect_all_white_btn = QPushButton("Снять все")
         deselect_all_white_btn.clicked.connect(self.deselect_all_white_list)
         self.apply_font(deselect_all_white_btn)
+        # Устанавливаем черный цвет текста
+        deselect_all_white_btn.setStyleSheet("color: black;")
         
         white_list_buttons_layout.addWidget(select_all_white_btn)
         white_list_buttons_layout.addWidget(deselect_all_white_btn)
@@ -507,6 +596,8 @@ class RealityScanBatchGenerator(QMainWindow):
         self.noscale_ai_masks_check = QCheckBox("Использовать AI маски (-generateAIMasks)")
         self.noscale_ai_masks_check.setChecked(self.settings.value("noscale_ai_masks", self.use_ai_masks, type=bool))
         self.apply_font(self.noscale_ai_masks_check)
+        # Устанавливаем черный цвет текста
+        self.noscale_ai_masks_check.setStyleSheet("color: black;")
         
         # Чекбоксы для приоритетных групп (добавлены)
         noscale_prior_group_layout = QHBoxLayout()
@@ -514,22 +605,30 @@ class RealityScanBatchGenerator(QMainWindow):
         self.noscale_prior_calibration_check = QCheckBox("Использовать приоритетную калибровочную группу (-setPriorCalibrationGroup -1)")
         self.noscale_prior_calibration_check.setChecked(self.settings.value("noscale_prior_calibration", True, type=bool))
         self.apply_font(self.noscale_prior_calibration_check)
+        # Устанавливаем черный цвет текста
+        self.noscale_prior_calibration_check.setStyleSheet("color: black;")
         
         self.noscale_prior_lens_check = QCheckBox("Использовать приоритетную группу линз (-setPriorLensGroup -1)")
         self.noscale_prior_lens_check.setChecked(self.settings.value("noscale_prior_lens", True, type=bool))
         self.apply_font(self.noscale_prior_lens_check)
+        # Устанавливаем черный цвет текста
+        self.noscale_prior_lens_check.setStyleSheet("color: black;")
         
         noscale_prior_group_layout.addWidget(self.noscale_prior_calibration_check)
         noscale_prior_group_layout.addWidget(self.noscale_prior_lens_check)
         
         noscale_simplify_label = QLabel("Количество полигонов после упрощения:")
         self.apply_font(noscale_simplify_label)
+        # Устанавливаем черный цвет текста
+        noscale_simplify_label.setStyleSheet("color: black;")
         
         self.noscale_simplify_edit = QSpinBox()
         # Изменён диапазон: от 1 до 100000000
         self.noscale_simplify_edit.setRange(1, 100000000)
         self.noscale_simplify_edit.setValue(self.settings.value("noscale_simplify", self.simplify_value, type=int))
         self.apply_font(self.noscale_simplify_edit)
+        # Устанавливаем черный цвет текста
+        self.noscale_simplify_edit.setStyleSheet("color: black;")
         
         noscale_settings_layout.addWidget(self.noscale_ai_masks_check)
         noscale_settings_layout.addLayout(noscale_prior_group_layout)  # Добавлены чекбоксы
@@ -554,10 +653,14 @@ class RealityScanBatchGenerator(QMainWindow):
         preview_btn = QPushButton("Предпросмотр")
         preview_btn.clicked.connect(self.preview_bat)
         self.apply_font(preview_btn)
+        # Устанавливаем черный цвет текста
+        preview_btn.setStyleSheet("color: black;")
         
         generate_btn = QPushButton("Сгенерировать BAT файлы")
         generate_btn.clicked.connect(self.generate_bat)
         self.apply_font(generate_btn)
+        # Устанавливаем черный цвет текста
+        generate_btn.setStyleSheet("color: black;")
         
         buttons_layout.addWidget(preview_btn)
         buttons_layout.addWidget(generate_btn)
@@ -588,6 +691,8 @@ class RealityScanBatchGenerator(QMainWindow):
             f"Настройки сохраняются в: {self.settings.fileName()}"
         )
         self.apply_font(self.info_text)
+        # Устанавливаем черный цвет текста и светлый фон
+        self.info_text.setStyleSheet("color: black; background-color: #f0f0f0;")
         
         info_layout.addWidget(self.info_text)
         info_group.setLayout(info_layout)
@@ -603,12 +708,12 @@ class RealityScanBatchGenerator(QMainWindow):
     def select_all_white_list(self):
         for i in range(self.white_list_widget.count()):
             item = self.white_list_widget.item(i)
-            item.setCheckState(Qt.Checked)
+            item.setCheckState(Qt.CheckState.Checked)
 
     def deselect_all_white_list(self):
         for i in range(self.white_list_widget.count()):
             item = self.white_list_widget.item(i)
-            item.setCheckState(Qt.Unchecked)
+            item.setCheckState(Qt.CheckState.Unchecked)
     
     def update_mode_settings(self):
         if self.mode_noscale.isChecked():
@@ -651,9 +756,9 @@ class RealityScanBatchGenerator(QMainWindow):
                     self, 
                     "Дублирование маркеров",
                     f"Пара точек {point1} и {point2} уже существует!\nЗаменить существующую команду?",
-                    QMessageBox.Yes | QMessageBox.No
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
                 )
-                if reply == QMessageBox.Yes:
+                if reply == QMessageBox.StandardButton.Yes:
                     # Обновляем существующую команду
                     self.distance_commands[idx] = {
                         'point1': point1,
@@ -696,22 +801,30 @@ class RealityScanBatchGenerator(QMainWindow):
             enabled_check.stateChanged.connect(lambda state, r=row: self.toggle_marker_enabled(r, state))
             self.markers_table.setCellWidget(row, 0, enabled_check)
             self.apply_font(enabled_check)  # Применяем шрифт
+            # Устанавливаем черный цвет текста
+            enabled_check.setStyleSheet("color: black;")
             
             # Точка 1 с порядковым номером
             point1_item = QTableWidgetItem(point1_display)
-            point1_item.setFlags(point1_item.flags() & ~Qt.ItemIsEditable)
+            point1_item.setFlags(point1_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            # Устанавливаем черный цвет текста
+            point1_item.setForeground(QBrush(QColor("black")))
             self.markers_table.setItem(row, 1, point1_item)
             self.apply_font(point1_item)  # Применяем шрифт
             
             # Точка 2 с порядковым номером
             point2_item = QTableWidgetItem(point2_display)
-            point2_item.setFlags(point2_item.flags() & ~Qt.ItemIsEditable)
+            point2_item.setFlags(point2_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            # Устанавливаем черный цвет текста
+            point2_item.setForeground(QBrush(QColor("black")))
             self.markers_table.setItem(row, 2, point2_item)
             self.apply_font(point2_item)  # Применяем шрифт
             
             # Дистанция
             distance_item = QTableWidgetItem(f"{cmd['distance']:.5f}")
-            distance_item.setFlags(distance_item.flags() & ~Qt.ItemIsEditable)
+            distance_item.setFlags(distance_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            # Устанавливаем черный цвет текста
+            distance_item.setForeground(QBrush(QColor("black")))
             self.markers_table.setItem(row, 3, distance_item)
             self.apply_font(distance_item)  # Применяем шрифт
             
@@ -720,26 +833,28 @@ class RealityScanBatchGenerator(QMainWindow):
             delete_btn.clicked.connect(lambda _, r=row: self.delete_marker(r))
             self.markers_table.setCellWidget(row, 4, delete_btn)
             self.apply_font(delete_btn)  # Применяем шрифт
+            # Устанавливаем черный цвет текста
+            delete_btn.setStyleSheet("color: black;")
             
             # Обновляем цвет строки
             for col in range(1, 4):
                 item = self.markers_table.item(row, col)
                 if item:
                     if cmd['enabled']:
-                        item.setBackground(QBrush(Qt.white))
+                        item.setBackground(QBrush(Qt.GlobalColor.white))
                     else:
                         item.setBackground(QBrush(QColor(220, 220, 220)))
     
     def toggle_marker_enabled(self, row, state):
         if 0 <= row < len(self.distance_commands):
-            self.distance_commands[row]['enabled'] = (state == Qt.Checked)
+            self.distance_commands[row]['enabled'] = (state == Qt.CheckState.Checked.value)
             
             # Обновляем цвет строки
             for col in range(1, 4):
                 item = self.markers_table.item(row, col)
                 if item:
-                    if state == Qt.Checked:
-                        item.setBackground(QBrush(Qt.white))
+                    if state == Qt.CheckState.Checked.value:
+                        item.setBackground(QBrush(Qt.GlobalColor.white))
                     else:
                         item.setBackground(QBrush(QColor(220, 220, 220)))
     
@@ -787,7 +902,7 @@ class RealityScanBatchGenerator(QMainWindow):
         
         try:
             # Показываем курсор ожидания во время подсчета файлов
-            QApplication.setOverrideCursor(Qt.WaitCursor)
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             QApplication.processEvents()
             
             # Собираем все объекты для обработки
@@ -844,28 +959,34 @@ class RealityScanBatchGenerator(QMainWindow):
                 # Восстанавливаем состояние чекбокса из настроек
                 key = folder_path.replace("\\", "_").replace("/", "_").replace(":", "_")
                 folder_state = self.settings.value(f"folder_state/{key}", True, type=bool)
-                name_item.setCheckState(Qt.Checked if folder_state else Qt.Unchecked)
+                name_item.setCheckState(Qt.CheckState.Checked if folder_state else Qt.CheckState.Unchecked)
                 
-                name_item.setData(folder_path, Qt.UserRole)  # Сохраняем полный путь
+                name_item.setData(folder_path, Qt.ItemDataRole.UserRole)  # Сохраняем полный путь
                 name_item.setEditable(False)
                 name_item.setFont(QFont("", self.FONT_SIZE))
+                # Устанавливаем черный цвет текста
+                name_item.setForeground(QBrush(QColor("black")))
                 
                 # Элемент с количеством файлов
                 count_item = QStandardItem()
-                count_item.setData(file_count, Qt.DisplayRole)
-                count_item.setData(file_count, Qt.UserRole)
+                count_item.setData(file_count, Qt.ItemDataRole.DisplayRole)
+                count_item.setData(file_count, Qt.ItemDataRole.UserRole)
                 count_item.setEditable(False)
                 count_item.setFont(QFont("", self.FONT_SIZE))
+                # Устанавливаем черный цвет текста
+                count_item.setForeground(QBrush(QColor("black")))
                 
                 date_item = QStandardItem(mod_date)
                 date_item.setEditable(False)
                 date_item.setFont(QFont("", self.FONT_SIZE))
+                # Устанавливаем черный цвет текста
+                date_item.setForeground(QBrush(QColor("black")))
                 
                 # Добавляем строкя
                 self.folders_model.appendRow([name_item, count_item, date_item])
             
             # Сортировка по имени по умолчанию
-            self.proxy_model.sort(0, Qt.AscendingOrder)
+            self.proxy_model.sort(0, Qt.SortOrder.AscendingOrder)
             
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось обновить список подпапки: {str(e)}")
@@ -883,12 +1004,12 @@ class RealityScanBatchGenerator(QMainWindow):
     def select_all_folders(self):
         for row in range(self.folders_model.rowCount()):
             item = self.folders_model.item(row, 0)
-            item.setCheckState(Qt.Checked)
+            item.setCheckState(Qt.CheckState.Checked)
     
     def deselect_all_folders(self):
         for row in range(self.folders_model.rowCount()):
             item = self.folders_model.item(row, 0)
-            item.setCheckState(Qt.Unchecked)
+            item.setCheckState(Qt.CheckState.Unchecked)
     
     def clear_folders_list(self):
         self.folders_model.removeRows(0, self.folders_model.rowCount())
@@ -912,8 +1033,8 @@ class RealityScanBatchGenerator(QMainWindow):
         selected = []
         for row in range(self.folders_model.rowCount()):
             item = self.folders_model.item(row, 0)
-            if item.checkState() == Qt.Checked:
-                folder_path = item.data(Qt.UserRole)  # Получаем полный путь
+            if item.checkState() == Qt.CheckState.Checked:
+                folder_path = item.data(Qt.ItemDataRole.UserRole)  # Получаем полный путь
                 folder_name = os.path.basename(folder_path)
                 selected.append((folder_path, folder_name))
         return selected
@@ -925,7 +1046,7 @@ class RealityScanBatchGenerator(QMainWindow):
         # Показываем диалог предпросмотра
         if bat_content:
             preview_dialog = PreviewDialog(bat_content, self)
-            preview_dialog.exec_()
+            preview_dialog.exec()
     
     def generate_bat(self):
         # Получаем содержимое BAT-файлов
@@ -976,7 +1097,7 @@ class RealityScanBatchGenerator(QMainWindow):
         
         selected_folders = self.get_selected_folders()
         if not selected_folders:
-            QMessageBox.warning(self, "Предупреждение", "Не выбрано ни одной подпапки для обработки!")
+            QMessageBox.warning(self, "Предупеждение", "Не выбрано ни одной подпапки для обработки!")
             return None
         
         try:
@@ -1075,8 +1196,8 @@ class RealityScanBatchGenerator(QMainWindow):
         white_list = set()
         for i in range(self.white_list_widget.count()):
             item = self.white_list_widget.item(i)
-            if item.checkState() == Qt.Checked:
-                white_list.add(item.data(Qt.UserRole))  # Получаем оригинальное имя маркера
+            if item.checkState() == Qt.CheckState.Checked:
+                white_list.add(item.data(Qt.ItemDataRole.UserRole))  # Получаем оригинальное имя маркера
         
         # Объединяем маркеры из defineDistance и белого списка
         keep_markers = white_list.union(markers_in_define_distance)
@@ -1152,18 +1273,18 @@ class RealityScanBatchGenerator(QMainWindow):
         # Сохраняем состояние выбранных подпапок
         for row in range(self.folders_model.rowCount()):
             item = self.folders_model.item(row, 0)
-            folder_path = item.data(Qt.UserRole)
+            folder_path = item.data(Qt.ItemDataRole.UserRole)
             if folder_path:
                 key = folder_path.replace("\\", "_").replace("/", "_").replace(":", "_")
-                is_checked = item.checkState() == Qt.Checked
+                is_checked = item.checkState() == Qt.CheckState.Checked
                 self.settings.setValue(f"folder_state/{key}", is_checked)
         
         # Сохраняем белый список маркеров
         white_list = []
         for i in range(self.white_list_widget.count()):
             item = self.white_list_widget.item(i)
-            if item.checkState() == Qt.Checked:
-                white_list.append(item.data(Qt.UserRole))
+            if item.checkState() == Qt.CheckState.Checked:
+                white_list.append(item.data(Qt.ItemDataRole.UserRole))
         self.settings.setValue("white_list_markers", white_list)
     
     def load_settings(self):
@@ -1193,11 +1314,11 @@ class RealityScanBatchGenerator(QMainWindow):
         if white_list and hasattr(self, 'white_list_widget'):
             for i in range(self.white_list_widget.count()):
                 item = self.white_list_widget.item(i)
-                marker_name = item.data(Qt.UserRole)
+                marker_name = item.data(Qt.ItemDataRole.UserRole)
                 if marker_name in white_list:
-                    item.setCheckState(Qt.Checked)
+                    item.setCheckState(Qt.CheckState.Checked)
                 else:
-                    item.setCheckState(Qt.Unchecked)
+                    item.setCheckState(Qt.CheckState.Unchecked)
     
     def closeEvent(self, event):
         # При закрытии приложения сохраняем настройки
@@ -1215,7 +1336,7 @@ if __name__ == "__main__":
     try:
         window = RealityScanBatchGenerator()
         window.show()
-        app.exec_()
+        app.exec()
     except Exception as e:
         print(f"Ошибка при запуске приложения: {e}")
         QMessageBox.critical(None, "Ошибка", f"Не удалось запустить приложение: {str(e)}")
