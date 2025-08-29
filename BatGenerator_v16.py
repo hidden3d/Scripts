@@ -137,7 +137,7 @@ class RealityScanBatchGenerator(QMainWindow):
         
         # Режим работы
         mode_group = QGroupBox("Режим работы")
-        mode_group.setStyleSheet("color: black;")
+        mode_group.setStyleSheet("color: black; font: bold;")
         mode_layout = QHBoxLayout()
         
         self.mode_noscale = QRadioButton("NoScale (два BAT-файла)")
@@ -164,7 +164,7 @@ class RealityScanBatchGenerator(QMainWindow):
         realityscan_layout = QHBoxLayout()
         realityscan_label = QLabel("Путь к RealityScan:")
         # Устанавливаем черный цвет текста
-        realityscan_label.setStyleSheet("color: black;")
+        realityscan_label.setStyleSheet("color: black; font: bold;")
         
         self.realityscan_edit = QLineEdit(self.settings.value("realityscan_path", self.realityscan_path))
         # Устанавливаем черный цвет текста
@@ -1327,6 +1327,20 @@ class RealityScanBatchGenerator(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setStyleSheet("""
+        QWidget {
+            background-color: "green"
+            color: "black"
+        
+                      
+        }
+
+
+
+
+
+
+    """)
     
     # Установка единого шрифта для всего приложения
     font = QFont()
