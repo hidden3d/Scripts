@@ -137,7 +137,7 @@ class RealityScanBatchGenerator(QMainWindow):
         
         # Режим работы
         mode_group = QGroupBox("Режим работы")
-        mode_group.setStyleSheet("color: black; font: bold;")
+        mode_group.setStyleSheet("color: black; font: bold; background-color: #e0e0e0;")
         mode_layout = QHBoxLayout()
         
         self.mode_noscale = QRadioButton("NoScale (два BAT-файла)")
@@ -233,7 +233,7 @@ class RealityScanBatchGenerator(QMainWindow):
         self.trim_date_checkbox.setChecked(self.settings.value("trim_date", False, type=bool))
         self.apply_font(self.trim_date_checkbox)
         # Устанавливаем черный цвет текста
-        self.trim_date_checkbox.setStyleSheet("color: black;")
+        self.trim_date_checkbox.setStyleSheet("color: black; font: bold;")
         input_layout.addWidget(self.trim_date_checkbox)
         
         input_group.setLayout(input_layout)
@@ -243,11 +243,11 @@ class RealityScanBatchGenerator(QMainWindow):
         output_layout = QHBoxLayout()
         output_label = QLabel("Папка для проектов:")
         # Устанавливаем черный цвет текста
-        output_label.setStyleSheet("color: black;")
+        output_label.setStyleSheet("color: black; font: bold;")
         
         self.output_edit = QLineEdit(self.settings.value("output_folder", ""))
         # Устанавливаем черный цвет текста
-        self.output_edit.setStyleSheet("color: black;")
+        self.output_edit.setStyleSheet("color: black; background-color: #f0f0f0;")
         
         output_btn = QPushButton("Обзор...")
         output_btn.clicked.connect(self.select_output_folder)
@@ -267,11 +267,11 @@ class RealityScanBatchGenerator(QMainWindow):
         bat_layout = QHBoxLayout()
         bat_label = QLabel("BAT файл для сохранения:")
         # Устанавливаем черный цвет текста
-        bat_label.setStyleSheet("color: black;")
+        bat_label.setStyleSheet("color: black; font: bold;")
         
         self.bat_edit = QLineEdit(self.settings.value("bat_file", ""))
         # Устанавливаем черный цвет текста
-        self.bat_edit.setStyleSheet("color: black;")
+        self.bat_edit.setStyleSheet("color: black; background-color: #f0f0f0;")
         
         bat_btn = QPushButton("Обзор...")
         bat_btn.clicked.connect(self.select_bat_file)
@@ -290,13 +290,13 @@ class RealityScanBatchGenerator(QMainWindow):
         # Список подпапок с чекбоксами (используем QTreeView)
         self.folders_group = QGroupBox("Выберите подпапки для обработки")
         self.apply_font(self.folders_group)
+        self.folders_group.setStyleSheet("color: black; font: bold;")
         folders_layout = QVBoxLayout()
         
         # Модель для отображения подпапок
         self.folders_model = QStandardItemModel()
         # Изменён порядок столбцов: Подпапка, Файлов, Дата изменения
         self.folders_model.setHorizontalHeaderLabels(["Подпапка", "Файлов", "Дата изменения"])
-        
         # Прокси-модель для сортировки
         self.proxy_model = NumericSortProxyModel()
         self.proxy_model.setSourceModel(self.folders_model)
@@ -314,7 +314,7 @@ class RealityScanBatchGenerator(QMainWindow):
         self.tree_view.header().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.apply_font(self.tree_view)  # Применяем шрифт к дереву
         # Устанавливаем черный цвет текста
-        self.tree_view.setStyleSheet("color: black;")
+        self.tree_view.setStyleSheet("color: black; background-color: #f0f0f0; font: normal;")
         
         # Установка шрифта для заголовков дерева
         header = self.tree_view.header()
@@ -330,19 +330,19 @@ class RealityScanBatchGenerator(QMainWindow):
         self.select_all_btn.clicked.connect(self.select_all_folders)
         self.apply_font(self.select_all_btn)
         # Устанавливаем черный цвет текста
-        self.select_all_btn.setStyleSheet("color: black;")
+        self.select_all_btn.setStyleSheet("color: black; font: normal;")
         
         self.deselect_all_btn = QPushButton("Снять все")
         self.deselect_all_btn.clicked.connect(self.deselect_all_folders)
         self.apply_font(self.deselect_all_btn)
         # Устанавливаем черный цвет текста
-        self.deselect_all_btn.setStyleSheet("color: black;")
+        self.deselect_all_btn.setStyleSheet("color: black; font: normal;")
         
         self.clear_folders_btn = QPushButton("Очистить список")
         self.clear_folders_btn.clicked.connect(self.clear_folders_list)
         self.apply_font(self.clear_folders_btn)
         # Устанавливаем черный цвет текста
-        self.clear_folders_btn.setStyleSheet("color: black;")
+        self.clear_folders_btn.setStyleSheet("color: black; font: normal;")
         
         controls_layout.addWidget(self.select_all_btn)
         controls_layout.addWidget(self.deselect_all_btn)
@@ -365,9 +365,9 @@ class RealityScanBatchGenerator(QMainWindow):
         # Общие настройки для Scale режима
         scale_common_group = QGroupBox("Общие настройки")
         self.apply_font(scale_common_group)
-        scale_common_layout = QVBoxLayout()
+        scale_common_layout = QHBoxLayout()
         
-        self.scale_ai_masks_check = QCheckBox("Использовать AI маски (-generateAIMasks)")
+        self.scale_ai_masks_check = QCheckBox("Маски (-generateAIMasks)")
         self.scale_ai_masks_check.setChecked(self.settings.value("scale_ai_masks", self.use_ai_masks, type=bool))
         self.apply_font(self.scale_ai_masks_check)
         # Устанавливаем черный цвет текста
@@ -376,13 +376,13 @@ class RealityScanBatchGenerator(QMainWindow):
         # Чекбоксы для приоритетных групп (добавлены)
         prior_group_layout = QHBoxLayout()
         
-        self.scale_prior_calibration_check = QCheckBox("Использовать приоритетную калибровочную группу (-setPriorCalibrationGroup -1)")
+        self.scale_prior_calibration_check = QCheckBox("-setPriorCalibrationGroup -1")
         self.scale_prior_calibration_check.setChecked(self.settings.value("scale_prior_calibration", True, type=bool))
         self.apply_font(self.scale_prior_calibration_check)
         # Устанавливаем черный цвет текста
         self.scale_prior_calibration_check.setStyleSheet("color: black;")
         
-        self.scale_prior_lens_check = QCheckBox("Использовать приоритетную группу линз (-setPriorLensGroup -1)")
+        self.scale_prior_lens_check = QCheckBox("-setPriorLensGroup -1")
         self.scale_prior_lens_check.setChecked(self.settings.value("scale_prior_lens", True, type=bool))
         self.apply_font(self.scale_prior_lens_check)
         # Устанавливаем черный цвет текста
@@ -392,7 +392,7 @@ class RealityScanBatchGenerator(QMainWindow):
         prior_group_layout.addWidget(self.scale_prior_lens_check)
         
         scale_simplify_layout = QHBoxLayout()
-        scale_simplify_label = QLabel("Количество полигонов после упрощения:")
+        scale_simplify_label = QLabel("Количество полигонов:")
         self.apply_font(scale_simplify_label)
         # Устанавливаем черный цвет текста
         scale_simplify_label.setStyleSheet("color: black;")
