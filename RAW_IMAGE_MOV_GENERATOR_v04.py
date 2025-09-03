@@ -569,9 +569,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tree.addTopLevelItem(root_item)
         
         raw_folders_found = 0
+        # Список искомых папок (добавлены AWR, CR2, DNG)
+        target_folders = ["RAW", "raw", "AWR", "awr", "CR2", "cr2", "DNG", "dng"]
+        
         for root, dirs, files in os.walk(folder):
-            if "RAW" in dirs or "raw" in dirs:
-                raw_dir = "RAW" if "RAW" in dirs else "raw"
+            # Проверяем все целевые папки
+            found_folders = [d for d in dirs if d in target_folders]
+            
+            for raw_dir in found_folders:
                 raw_folder = Path(root) / raw_dir
                 
                 try:
@@ -592,8 +597,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 
                 if jpg_exists:
                     raw_files = list(raw_folder.glob("*.[aA][rR][wW]")) + \
-                               list(raw_folder.glob("*.[cC][rR]2")) + \
-                               list(raw_folder.glob("*.[dD][nN][gG]"))
+                            list(raw_folder.glob("*.[cC][rR]2")) + \
+                            list(raw_folder.glob("*.[dD][nN][gG]"))
                     jpg_files = list(jpg_folder.glob("*.jpg"))
                     
                     if len(raw_files) == len(jpg_files):
@@ -624,7 +629,7 @@ class MainWindow(QtWidgets.QMainWindow):
         root_item.setExpanded(True)
         
         if raw_folders_found == 0:
-            root_item.setText(3, "Папки RAW не найдены")
+            root_item.setText(3, "Папки RAW/AWR/CR2/DNG не найдены")
 
     def remove_folders(self):
         selected_items = self.tree.selectedItems()
