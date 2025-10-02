@@ -1218,6 +1218,9 @@ class RealityScanBatchGenerator(QMainWindow):
                 except:
                     self.distance_commands = []
         
+        # ОБНОВЛЯЕМ ТАБЛИЦУ МАРКЕРОВ ПОСЛЕ ЗАГРУЗКИ КОМАНД
+        self.update_markers_table()
+        
         # Загрузка общих настроек
         self.common_ai_masks_check.setChecked(self.settings.value("common_ai_masks", self.use_ai_masks, type=bool))
         self.common_simplify_edit.setValue(self.settings.value("common_simplify", self.simplify_value, type=int))
