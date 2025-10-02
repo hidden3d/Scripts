@@ -1036,18 +1036,23 @@ class RealityScanBatchGenerator(QMainWindow):
             project_dir = os.path.join(output_folder, project_name)
             project_file = os.path.join(project_dir, f"{project_name}.rsproj")
             
-            # Добавляем команду экспорта, если включен экспорт и указан путь
-            export_command = ""
+            # Добавляем команды экспорта и рендера, если включен экспорт и указан путь
+            export_commands = ""
             if self.export_checkbox.isChecked() and self.export_path_edit.text():
                 export_dir = os.path.join(self.export_path_edit.text(), project_name)
                 export_file = os.path.join(export_dir, f"{project_name}.obj")
-                export_command = f" -exportSelectedModel {export_file}"
+                export_commands = f" -exportSelectedModel {export_file}"
+                
+                # Добавляем команду рендера
+                render_file = os.path.join(export_dir, f"{project_name}_render.png")
+                export_commands += f' -renderMeshFromCustomPositionYPR "{render_file}" 2048 2048 100 0 0 150 0 0 0'
             
             command = (
                 f'RealityScan.exe -stdConsole -load {project_file} '
                 f'-calculateNormalModel -simplify {simplify_value} '
                 f'-unwrap -calculateTexture '
-                f'-save {project_file}{export_command} -quit\n'
+                f'{export_commands} '
+                f'-save {project_file} -quit\n'
             )
             bat_content2 += command
         
@@ -1108,19 +1113,24 @@ class RealityScanBatchGenerator(QMainWindow):
                 if marker not in keep_markers:
                     delete_commands += f" -selectControlPoint {marker} -deleteControlPoint"
             
-            # Добавляем команду экспорта, если включен экспорт и указан путь
-            export_command = ""
+            # Добавляем команды экспорта и рендера, если включен экспорт и указан путь
+            export_commands = ""
             if self.export_checkbox.isChecked() and self.export_path_edit.text():
                 export_dir = os.path.join(self.export_path_edit.text(), project_name)
                 export_file = os.path.join(export_dir, f"{project_name}.obj")
-                export_command = f" -exportSelectedModel {export_file}"
+                export_commands = f" -exportSelectedModel {export_file}"
+                
+                # Добавляем команду рендера
+                render_file = os.path.join(export_dir, f"{project_name}_render.png")
+                export_commands += f' -renderMeshFromCustomPositionYPR "{render_file}" 2048 2048 100 0 0 150 0 0 0'
             
             command = (
                 f'RealityScan.exe -newScene -stdConsole -set "appIncSubdirs=true" -addFolder {folder_path}\\ '
                 f' -selectAllImages {prior_calibration_param}{prior_lens_param} -detectMarkers{ai_masks_param}'
                 f'{delete_commands} {distance_commands} -align '
                 f'-calculateNormalModel -simplify {simplify_value} -unwrap -calculateTexture '
-                f'-save {project_dir}\\{project_name}.rsproj{export_command} -quit\n'
+                f'{export_commands} '
+                f'-save {project_dir}\\{project_name}.rsproj -quit\n'
             )
             bat_content += command
         
