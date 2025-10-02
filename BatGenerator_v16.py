@@ -113,10 +113,10 @@ class RealityScanBatchGenerator(QMainWindow):
         # Инициализируем QSettings с INI-формат
         self.settings = QSettings(config_path, QSettings.IniFormat)
         
-        # Загрузка настроек
-        self.load_settings()
-        
         self.init_ui()
+        
+        # Загрузка настроек ПОСЛЕ инициализации UI
+        self.load_settings()
     
     def apply_font(self, widget):
         """Применяет установленный размер шрифта к виджету"""
@@ -136,10 +136,10 @@ class RealityScanBatchGenerator(QMainWindow):
         mode_layout = QHBoxLayout()
         
         self.mode_noscale = QRadioButton("NoScale (два BAT-файла)")
-        self.mode_noscale.setChecked(self.settings.value("mode_noscale", True, type=bool))
+        self.mode_noscale.setChecked(True)
         
         self.mode_scale = QRadioButton("Scale (один BAT-файл с маркерами)")
-        self.mode_scale.setChecked(self.settings.value("mode_scale", False, type=bool))
+        self.mode_scale.setChecked(False)
         
         mode_layout.addWidget(self.mode_noscale)
         mode_layout.addWidget(self.mode_scale)
@@ -154,7 +154,7 @@ class RealityScanBatchGenerator(QMainWindow):
         # Путь к RealityScan
         realityscan_layout = QHBoxLayout()
         realityscan_label = QLabel("Путь к RealityScan:")
-        self.realityscan_edit = QLineEdit(self.settings.value("realityscan_path", self.realityscan_path))
+        self.realityscan_edit = QLineEdit(self.realityscan_path)
         realityscan_btn = QPushButton("Обзор...")
         realityscan_btn.clicked.connect(self.select_realityscan_path)
         
@@ -177,15 +177,6 @@ class RealityScanBatchGenerator(QMainWindow):
         self.input_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.apply_font(self.input_list)
         
-        # Загрузка сохраненных папок
-        saved_folders = self.settings.value("input_folders", [])
-        if saved_folders:
-            self.input_list.addItems(saved_folders)
-            # Применяем шрифт к элементам списка
-            for i in range(self.input_list.count()):
-                item = self.input_list.item(i)
-                self.apply_font(item)
-        
         input_layout.addWidget(self.input_list)
         
         # Кнопки управления списком папок
@@ -206,7 +197,7 @@ class RealityScanBatchGenerator(QMainWindow):
         
         # Чекбокс для обрезки даты из имени подпапки
         self.trim_date_checkbox = QCheckBox("Убрать дату из имени подпапки (если начинается с 8 цифр)")
-        self.trim_date_checkbox.setChecked(self.settings.value("trim_date", False, type=bool))
+        self.trim_date_checkbox.setChecked(False)
         self.apply_font(self.trim_date_checkbox)
         input_layout.addWidget(self.trim_date_checkbox)
         
@@ -216,7 +207,7 @@ class RealityScanBatchGenerator(QMainWindow):
         # Выходная папка для проектов
         output_layout = QHBoxLayout()
         output_label = QLabel("Папка для проектов:")
-        self.output_edit = QLineEdit(self.settings.value("output_folder", ""))
+        self.output_edit = QLineEdit()
         output_btn = QPushButton("Обзор...")
         output_btn.clicked.connect(self.select_output_folder)
         
@@ -229,10 +220,37 @@ class RealityScanBatchGenerator(QMainWindow):
         for widget in [output_label, self.output_edit, output_btn]:
             self.apply_font(widget)
         
+        # Настройки экспорта моделей
+        export_layout = QHBoxLayout()
+        
+        # Чекбокс для включения/выключения экспорта
+        self.export_checkbox = QCheckBox("Экспорт моделей")
+        self.export_checkbox.setChecked(True)
+        self.apply_font(self.export_checkbox)
+        
+        export_layout.addWidget(self.export_checkbox)
+        
+        # Поле для пути экспорта
+        export_path_label = QLabel("Путь для экспорта:")
+        self.apply_font(export_path_label)
+        
+        self.export_path_edit = QLineEdit()
+        self.apply_font(self.export_path_edit)
+        
+        export_path_btn = QPushButton("Обзор...")
+        export_path_btn.clicked.connect(self.select_export_path)
+        self.apply_font(export_path_btn)
+        
+        export_layout.addWidget(export_path_label)
+        export_layout.addWidget(self.export_path_edit)
+        export_layout.addWidget(export_path_btn)
+        
+        main_layout.addLayout(export_layout)
+        
         # Файл BAT
         bat_layout = QHBoxLayout()
         bat_label = QLabel("BAT файл для сохранения:")
-        self.bat_edit = QLineEdit(self.settings.value("bat_file", ""))
+        self.bat_edit = QLineEdit()
         bat_btn = QPushButton("Обзор...")
         bat_btn.clicked.connect(self.select_bat_file)
         
@@ -302,12 +320,6 @@ class RealityScanBatchGenerator(QMainWindow):
         folders_layout.addLayout(controls_layout)
         self.folders_group.setLayout(folders_layout)
         main_layout.addWidget(self.folders_group)
-        
-        # Если папки уже указаны, загружаем подпапки
-        if self.input_list.count() > 0:
-            self.update_folders_model()
-
-
 
         # Общие настройки для обоих режимов
         common_settings_group = QGroupBox("Общие настройки")
@@ -316,7 +328,7 @@ class RealityScanBatchGenerator(QMainWindow):
         
         # AI Masks
         self.common_ai_masks_check = QCheckBox("Маски -generateAIMasks")
-        self.common_ai_masks_check.setChecked(self.settings.value("common_ai_masks", self.use_ai_masks, type=bool))
+        self.common_ai_masks_check.setChecked(self.use_ai_masks)
         self.apply_font(self.common_ai_masks_check)
         common_layout.addWidget(self.common_ai_masks_check)
         
@@ -324,11 +336,11 @@ class RealityScanBatchGenerator(QMainWindow):
         prior_group_layout = QHBoxLayout()
         
         self.common_prior_calibration_check = QCheckBox("-setPriorCalibrationGroup -1")
-        self.common_prior_calibration_check.setChecked(self.settings.value("common_prior_calibration", True, type=bool))
+        self.common_prior_calibration_check.setChecked(True)
         self.apply_font(self.common_prior_calibration_check)
         
         self.common_prior_lens_check = QCheckBox("-setPriorLensGroup -1")
-        self.common_prior_lens_check.setChecked(self.settings.value("common_prior_lens", True, type=bool))
+        self.common_prior_lens_check.setChecked(True)
         self.apply_font(self.common_prior_lens_check)
         
         prior_group_layout.addWidget(self.common_prior_calibration_check)
@@ -342,7 +354,7 @@ class RealityScanBatchGenerator(QMainWindow):
         
         self.common_simplify_edit = QSpinBox()
         self.common_simplify_edit.setRange(1, 100000000)
-        self.common_simplify_edit.setValue(self.settings.value("common_simplify", self.simplify_value, type=int))
+        self.common_simplify_edit.setValue(self.simplify_value)
         self.apply_font(self.common_simplify_edit)
         
         simplify_layout.addWidget(simplify_label)
@@ -352,9 +364,6 @@ class RealityScanBatchGenerator(QMainWindow):
         
         common_settings_group.setLayout(common_layout)
         main_layout.addWidget(common_settings_group)
-
-
-
 
         # Настройки для режима Scale
         self.scale_settings_group = QGroupBox("Настройки Scale режима")
@@ -881,6 +890,12 @@ class RealityScanBatchGenerator(QMainWindow):
         if folder:
             self.output_edit.setText(folder)
     
+    def select_export_path(self):
+        """Выбор пути для экспорта моделей"""
+        folder = QFileDialog.getExistingDirectory(self, "Выберите папку для экспорта моделей", self.export_path_edit.text())
+        if folder:
+            self.export_path_edit.setText(folder)
+    
     def select_bat_file(self):
         file, _ = QFileDialog.getSaveFileName(
             self,
@@ -1021,11 +1036,18 @@ class RealityScanBatchGenerator(QMainWindow):
             project_dir = os.path.join(output_folder, project_name)
             project_file = os.path.join(project_dir, f"{project_name}.rsproj")
             
+            # Добавляем команду экспорта, если включен экспорт и указан путь
+            export_command = ""
+            if self.export_checkbox.isChecked() and self.export_path_edit.text():
+                export_dir = os.path.join(self.export_path_edit.text(), project_name)
+                export_file = os.path.join(export_dir, f"{project_name}.obj")
+                export_command = f" -exportSelectedModel {export_file}"
+            
             command = (
                 f'RealityScan.exe -stdConsole -load {project_file} '
                 f'-calculateNormalModel -simplify {simplify_value} '
                 f'-unwrap -calculateTexture '
-                f'-save {project_file} -quit\n'
+                f'-save {project_file}{export_command} -quit\n'
             )
             bat_content2 += command
         
@@ -1086,12 +1108,19 @@ class RealityScanBatchGenerator(QMainWindow):
                 if marker not in keep_markers:
                     delete_commands += f" -selectControlPoint {marker} -deleteControlPoint"
             
+            # Добавляем команду экспорта, если включен экспорт и указан путь
+            export_command = ""
+            if self.export_checkbox.isChecked() and self.export_path_edit.text():
+                export_dir = os.path.join(self.export_path_edit.text(), project_name)
+                export_file = os.path.join(export_dir, f"{project_name}.obj")
+                export_command = f" -exportSelectedModel {export_file}"
+            
             command = (
                 f'RealityScan.exe -newScene -stdConsole -set "appIncSubdirs=true" -addFolder {folder_path}\\ '
                 f' -selectAllImages {prior_calibration_param}{prior_lens_param} -detectMarkers{ai_masks_param}'
                 f'{delete_commands} {distance_commands} -align '
                 f'-calculateNormalModel -simplify {simplify_value} -unwrap -calculateTexture '
-                f'-save {project_dir}\\{project_name}.rsproj -quit\n'
+                f'-save {project_dir}\\{project_name}.rsproj{export_command} -quit\n'
             )
             bat_content += command
         
@@ -1104,6 +1133,10 @@ class RealityScanBatchGenerator(QMainWindow):
         self.settings.setValue("realityscan_path", self.realityscan_edit.text())
         self.settings.setValue("output_folder", self.output_edit.text())
         self.settings.setValue("bat_file", self.bat_edit.text())
+        
+        # Сохраняем настройки экспорта
+        self.settings.setValue("export_models", self.export_checkbox.isChecked())
+        self.settings.setValue("export_path", self.export_path_edit.text())
         
         # Сохраняем список папок
         input_folders = [self.input_list.item(i).text() for i in range(self.input_list.count())]
@@ -1142,6 +1175,28 @@ class RealityScanBatchGenerator(QMainWindow):
         self.settings.setValue("white_list_markers", white_list)
     
     def load_settings(self):
+        # Загрузка основных настроек
+        self.realityscan_edit.setText(self.settings.value("realityscan_path", self.realityscan_path))
+        self.output_edit.setText(self.settings.value("output_folder", ""))
+        self.bat_edit.setText(self.settings.value("bat_file", ""))
+        
+        # Загрузка настроек экспорта
+        self.export_checkbox.setChecked(self.settings.value("export_models", True, type=bool))
+        self.export_path_edit.setText(self.settings.value("export_path", ""))
+        
+        # Загрузка списка папок
+        saved_folders = self.settings.value("input_folders", [])
+        if saved_folders:
+            self.input_list.addItems(saved_folders)
+            # Применяем шрифт к элементам списка
+            for i in range(self.input_list.count()):
+                item = self.input_list.item(i)
+                self.apply_font(item)
+        
+        # Загрузка режима
+        self.mode_noscale.setChecked(self.settings.value("mode_noscale", True, type=bool))
+        self.mode_scale.setChecked(self.settings.value("mode_scale", False, type=bool))
+        
         # Загрузка настроек маркеров
         saved_commands = self.settings.value("distance_commands")
         if saved_commands:
@@ -1162,6 +1217,19 @@ class RealityScanBatchGenerator(QMainWindow):
                             })
                 except:
                     self.distance_commands = []
+        
+        # Загрузка общих настроек
+        self.common_ai_masks_check.setChecked(self.settings.value("common_ai_masks", self.use_ai_masks, type=bool))
+        self.common_simplify_edit.setValue(self.settings.value("common_simplify", self.simplify_value, type=int))
+        self.common_prior_calibration_check.setChecked(self.settings.value("common_prior_calibration", True, type=bool))
+        self.common_prior_lens_check.setChecked(self.settings.value("common_prior_lens", True, type=bool))
+        
+        # Загрузка состояния чекбокса обрезки даты
+        self.trim_date_checkbox.setChecked(self.settings.value("trim_date", False, type=bool))
+        
+        # Обновляем модель подпапок, если есть папки
+        if self.input_list.count() > 0:
+            self.update_folders_model()
     
     def load_white_list_settings(self):
         # Загрузка белого списка маркеров
