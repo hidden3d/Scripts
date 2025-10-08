@@ -229,7 +229,7 @@ class ConverterThread(QThread):
         
         video_name = output_dir.name
         
-        # Если выбран формат MOV и кодек MJPEG, сначала создаем MP4 с H264
+        # Если выбран формат MOV и кодек MJPEG, сначала создаем MP4 с MP4V
         if self.video_format == 'mov' and self.video_codec == 'mjpeg':
             # Создаем временный MP4 файл
             temp_mp4_path = output_dir / f"temp_{video_name}.mp4"
@@ -237,14 +237,13 @@ class ConverterThread(QThread):
             
             self.log_messages([(f"Создаем временный MP4: {temp_mp4_path}", "blue")])
             
-            # Пробуем различные кодеки для MP4
+            # Пробуем кодеки для MP4 - теперь только MP4V
             mp4_codecs = [
-                ('avc1', 'H264/AVC1'),
-                ('h264', 'H264'),
                 ('mp4v', 'MP4V'),
-                ('X264', 'x264'),
-                ('H264', 'H264 uppercase')
+                ('MJPG', 'MJPEG')  # Резервный кодек
             ]
+            
+            self.log_messages([(f"Начинаем подбор кодеков для MP4. Доступные кодеки: {[name for _, name in mp4_codecs]}", "blue")])
             
             out = None
             used_codec = None
@@ -253,26 +252,30 @@ class ConverterThread(QThread):
                 if not self._is_running:
                     return
                     
+                self.log_messages([(f"Пробуем кодек: {codec_name} (FourCC: {codec})", "blue")])
                 try:
                     fourcc = cv2.VideoWriter_fourcc(*codec)
+                    self.log_messages([(f"Создаем VideoWriter с кодеком {codec_name}...", "blue")])
                     out = cv2.VideoWriter(str(temp_mp4_path), fourcc, 30.0, (target_width, target_height))
                     
                     if out.isOpened():
-                        self.log_messages([(f"Успешно создан MP4 с кодеком: {codec_name}", "green")])
+                        self.log_messages([(f"✓ Кодек {codec_name} успешно инициализирован", "green")])
                         used_codec = codec_name
                         break
                     else:
-                        self.log_messages([(f"Кодек {codec_name} не поддерживается", "blue")])
+                        self.log_messages([(f"✗ Кодек {codec_name} не поддерживается для записи", "orange")])
                         out = None
                 except Exception as e:
-                    self.log_messages([(f"Ошибка с кодеком {codec_name}: {e}", "blue")])
+                    self.log_messages([(f"✗ Ошибка при инициализации кодека {codec_name}: {e}", "red")])
                     out = None
             
             if out is None:
-                self.log_messages([(f"Ошибка: не удалось создать временный MP4 файл ни с одним кодеком", "red")])
+                self.log_messages([(f"❌ Критическая ошибка: не удалось создать временный MP4 файл ни с одним из кодеков", "red")])
+                self.log_messages([(f"Доступные кодеки: {[name for _, name in mp4_codecs]}", "blue")])
                 return
                 
             try:
+                self.log_messages([(f"Начинаем запись кадров в MP4 с кодеком {used_codec}", "blue")])
                 # Записываем кадры в видео
                 success_count = self.write_frames_to_video(out, images, target_width, target_height)
                 out.release()
@@ -280,7 +283,7 @@ class ConverterThread(QThread):
                 # Проверяем, что файл создан и не пустой
                 if temp_mp4_path.exists() and temp_mp4_path.stat().st_size > 0:
                     file_size_mb = temp_mp4_path.stat().st_size / (1024 * 1024)
-                    self.log_messages([(f"Временный MP4 создан успешно с кодеком {used_codec}, размер: {file_size_mb:.1f} МБ", "green")])
+                    self.log_messages([(f"✓ Временный MP4 создан успешно с кодеком {used_codec}, размер: {file_size_mb:.1f} МБ", "green")])
                     
                     # Конвертируем MP4 в MOV с MJPEG кодеком через ffmpeg
                     self.convert_mp4_to_mov_with_mjpeg(temp_mp4_path, final_mov_path)
@@ -290,10 +293,10 @@ class ConverterThread(QThread):
                         temp_mp4_path.unlink()
                         self.log_messages([(f"Удален временный MP4 файл", "blue")])
                 else:
-                    self.log_messages([(f"Ошибка: временный MP4 файл не создан или имеет нулевой размер", "red")])
+                    self.log_messages([(f"❌ Ошибка: временный MP4 файл не создан или имеет нулевой размер", "red")])
                     
             except Exception as e:
-                self.log_messages([(f"Ошибка при создании MP4: {e}", "red")])
+                self.log_messages([(f"❌ Ошибка при создании MP4: {e}", "red")])
                 if out is not None:
                     out.release()
                 if temp_mp4_path.exists():
@@ -311,15 +314,17 @@ class ConverterThread(QThread):
             self.log_messages([(f"Создаем временный файл: {temp_video_path}", "blue")])
             
             # Определяем кодек в зависимости от выбора
-            if self.video_codec == "h264":
-                codecs = [('avc1', 'H264/AVC1'), ('h264', 'H264')]
+            if self.video_codec == "mp4v":
+                codecs = [('mp4v', 'MP4V')]
             elif self.video_codec == "mjpeg":
                 codecs = [('MJPG', 'MJPEG')]
-            else:  # mp4v
-                codecs = [('mp4v', 'MP4V')]
+            else:
+                codecs = [('mp4v', 'MP4V')]  # По умолчанию MP4V
             
             # Добавляем резервные кодеки
-            codecs.extend([('avc1', 'H264/AVC1'), ('mp4v', 'MP4V'), ('MJPG', 'MJPEG')])
+            codecs.extend([('mp4v', 'MP4V'), ('MJPG', 'MJPEG')])
+            
+            self.log_messages([(f"Начинаем подбор кодеков для {self.video_format}. Доступные кодеки: {[name for _, name in codecs]}", "blue")])
             
             out = None
             used_codec = None
@@ -328,33 +333,37 @@ class ConverterThread(QThread):
                 if not self._is_running:
                     return
                     
+                self.log_messages([(f"Пробуем кодек: {codec_name} (FourCC: {codec})", "blue")])
                 try:
                     fourcc = cv2.VideoWriter_fourcc(*codec)
+                    self.log_messages([(f"Создаем VideoWriter с кодеком {codec_name}...", "blue")])
                     out = cv2.VideoWriter(str(temp_video_path), fourcc, 30.0, (target_width, target_height))
                     
                     if out.isOpened():
-                        self.log_messages([(f"Успешно создано видео с кодеком: {codec_name}", "green")])
+                        self.log_messages([(f"✓ Кодек {codec_name} успешно инициализирован", "green")])
                         used_codec = codec_name
                         break
                     else:
-                        self.log_messages([(f"Кодек {codec_name} не поддерживается", "blue")])
+                        self.log_messages([(f"✗ Кодек {codec_name} не поддерживается для записи", "orange")])
                         out = None
                 except Exception as e:
-                    self.log_messages([(f"Ошибка с кодеком {codec_name}: {e}", "blue")])
+                    self.log_messages([(f"✗ Ошибка при инициализации кодека {codec_name}: {e}", "red")])
                     out = None
             
             if out is None:
-                self.log_messages([(f"Ошибка: не удалось создать видеофайл ни с одним кодеком", "red")])
+                self.log_messages([(f"❌ Критическая ошибка: не удалось создать видеофайл ни с одним из кодеков", "red")])
+                self.log_messages([(f"Доступные кодеки: {[name for _, name in codecs]}", "blue")])
                 return
 
             try:
+                self.log_messages([(f"Начинаем запись кадров в {self.video_format} с кодеком {used_codec}", "blue")])
                 success_count = self.write_frames_to_video(out, images, target_width, target_height)
                 out.release()
                 
                 # Переименовываем временный файл в финальный
                 if temp_video_path.exists() and temp_video_path.stat().st_size > 0:
                     file_size_mb = temp_video_path.stat().st_size / (1024 * 1024)
-                    self.log_messages([(f"Временный файл создан успешно с кодеком {used_codec}, размер: {file_size_mb:.1f} МБ", "green")])
+                    self.log_messages([(f"✓ Временный файл создан успешно с кодеком {used_codec}, размер: {file_size_mb:.1f} МБ", "green")])
                     
                     if video_path.exists():
                         self.log_messages([(f"Удаляем существующий файл: {video_path}", "blue")])
@@ -362,14 +371,14 @@ class ConverterThread(QThread):
                         
                     self.log_messages([(f"Переименовываем временный файл в: {video_path}", "blue")])
                     temp_video_path.rename(video_path)
-                    self.log_messages([(f"Видео успешно создано: {video_path} ({success_count}/{len(images)} кадров)", "green")])
+                    self.log_messages([(f"✓ Видео успешно создано: {video_path} ({success_count}/{len(images)} кадров)", "green")])
                 else:
-                    self.log_messages([(f"Ошибка: временный файл не создан или имеет нулевой размер", "red")])
+                    self.log_messages([(f"❌ Ошибка: временный файл не создан или имеет нулевой размер", "red")])
                     if temp_video_path.exists():
                         self.log_messages([(f"Временный файл сохранен для диагностики: {temp_video_path}", "blue")])
                         
             except Exception as e:
-                self.log_messages([(f"Ошибка при создании видео: {e}", "red")])
+                self.log_messages([(f"❌ Ошибка при создании видео: {e}", "red")])
                 if out is not None:
                     out.release()
                 if temp_video_path.exists():
@@ -461,21 +470,22 @@ class ConverterThread(QThread):
                 str(mov_path)
             ]
             
-            self.log_messages([(f"Запускаем ffmpeg: {' '.join(command)}", "blue")])
+            self.log_messages([(f"Запускаем ffmpeg для конвертации в MOV с MJPEG:", "blue")])
+            self.log_messages([(f"Команда: {' '.join(command)}", "blue")])
             
             result = subprocess.run(command, capture_output=True, text=True, check=True)
             
             if mov_path.exists() and mov_path.stat().st_size > 0:
                 file_size_mb = mov_path.stat().st_size / (1024 * 1024)
-                self.log_messages([(f"MOV с MJPEG кодеком успешно создан: {mov_path} (размер: {file_size_mb:.1f} МБ)", "green")])
+                self.log_messages([(f"✓ MOV с MJPEG кодеком успешно создан: {mov_path} (размер: {file_size_mb:.1f} МБ)", "green")])
             else:
-                self.log_messages([(f"Ошибка: MOV файл не создан или имеет нулевой размер", "red")])
+                self.log_messages([(f"❌ Ошибка: MOV файл не создан или имеет нулевой размер", "red")])
                 
         except subprocess.CalledProcessError as e:
-            self.log_messages([(f"Ошибка конвертации через ffmpeg: {e}", "red")])
+            self.log_messages([(f"❌ Ошибка конвертации через ffmpeg: {e}", "red")])
             self.log_messages([(f"stderr: {e.stderr}", "red")])
         except FileNotFoundError:
-            self.log_messages([(f"Ошибка: ffmpeg не найден. Установите ffmpeg для использования MJPEG кодека.", "red")])
+            self.log_messages([(f"❌ Ошибка: ffmpeg не найден. Установите ffmpeg для использования MJPEG кодека.", "red")])
 
 class TreeWidgetItem(QtWidgets.QTreeWidgetItem):
     def __init__(self, path, parent=None, display_path=None, is_root=False):
@@ -532,7 +542,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_mutex = QtCore.QMutex()
         
         self.scale_factor = 2
-        self.video_format = 'mov'  # MOV по умолчанию
+        self.video_format = 'mov'
         self.num_threads = os.cpu_count()
         self.font_size = 0.8
         self.video_resolution = "Full HD (1920x1080)"
@@ -624,7 +634,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         second_row_layout.addWidget(QtWidgets.QLabel("Кодек видео:"))
         self.codec_combo = QtWidgets.QComboBox()
-        self.codec_combo.addItems(["mjpeg", "h264", "mp4v"])  # MJPEG первым по умолчанию
+        self.codec_combo.addItems(["mjpeg", "mp4v"])  # MJPEG первым по умолчанию
         self.codec_combo.setCurrentText("mjpeg")              # MJPEG по умолчанию
         second_row_layout.addWidget(self.codec_combo)
 
