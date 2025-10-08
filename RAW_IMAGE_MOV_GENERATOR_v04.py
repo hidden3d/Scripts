@@ -208,6 +208,7 @@ class ConverterThread(QThread):
 
         self.log_messages([(f"Начинаем создание видео из {len(images)} кадров", "blue")])
         
+        # Определяем разрешение
         if self.video_resolution == "HD (1280x720)":
             target_width, target_height = 1280, 720
         elif self.video_resolution == "Full HD (1920x1080)":
@@ -215,59 +216,180 @@ class ConverterThread(QThread):
         elif self.video_resolution == "4K (3840x2160)":
             target_width, target_height = 3840, 2160
         else:
-            max_width, max_height = 0, 0
-            for img_path in images:
-                frame = cv2.imread(str(img_path))
-                if frame is not None:
-                    h, w = frame.shape[:2]
-                    max_width = max(max_width, w)
-                    max_height = max(max_height, h)
-            target_width, target_height = max_width, max_height
+            # Для Original берем разрешение первого изображения
+            first_frame = cv2.imread(str(images[0]))
+            if first_frame is not None:
+                h, w = first_frame.shape[:2]
+                target_width, target_height = w, h
+            else:
+                # Если не удалось прочитать первое изображение, используем дефолтное
+                target_width, target_height = 1920, 1080
         
         self.log_messages([(f"Целевое разрешение видео: {target_width}x{target_height}", "blue")])
         
         video_name = output_dir.name
-        video_path = output_dir / f"{video_name}.{self.video_format}"
         
-        if video_path.exists():
-            self.log_messages([(f"Видео уже существует: {video_path}", "blue")])
-            self.log_messages([(f"Перезаписываем существующее видео", "blue")])
-        
-        temp_video_path = output_dir / f"tmp_{video_name}.{self.video_format}"
-        self.log_messages([(f"Создаем временный файл: {temp_video_path}", "blue")])
-        
-        if self.video_codec == "h264":
-            fourcc = cv2.VideoWriter_fourcc(*'avc1')
-        else:
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        
-        self.log_messages([(f"Используем кодек: {self.video_codec} ({fourcc})", "blue")])
-        
-        out = cv2.VideoWriter(str(temp_video_path), fourcc, 30.0, (target_width, target_height))
-        
-        if not out.isOpened():
-            self.log_messages([(f"Ошибка: не удалось создать видеофайл {temp_video_path}", "red")])
-            if self.video_codec == "h264":
-                fallback_codec = "mp4v"
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            else:
-                fallback_codec = "h264"
-                fourcc = cv2.VideoWriter_fourcc(*'avc1')
+        # Если выбран формат MOV и кодек MJPEG, сначала создаем MP4 с MP4V
+        if self.video_format == 'mov' and self.video_codec == 'mjpeg':
+            # Создаем временный MP4 файл
+            temp_mp4_path = output_dir / f"temp_{video_name}.mp4"
+            final_mov_path = output_dir / f"{video_name}.mov"
+            
+            self.log_messages([(f"Создаем временный MP4: {temp_mp4_path}", "blue")])
+            
+            # Пробуем кодеки для MP4 - теперь только MP4V
+            mp4_codecs = [
+                ('mp4v', 'MP4V'),
+                ('MJPG', 'MJPEG')  # Резервный кодек
+            ]
+            
+            self.log_messages([(f"Начинаем подбор кодеков для MP4. Доступные кодеки: {[name for _, name in mp4_codecs]}", "blue")])
+            
+            out = None
+            used_codec = None
+            
+            for codec, codec_name in mp4_codecs:
+                if not self._is_running:
+                    return
+                    
+                self.log_messages([(f"Пробуем кодек: {codec_name} (FourCC: {codec})", "blue")])
+                try:
+                    fourcc = cv2.VideoWriter_fourcc(*codec)
+                    self.log_messages([(f"Создаем VideoWriter с кодеком {codec_name}...", "blue")])
+                    out = cv2.VideoWriter(str(temp_mp4_path), fourcc, 30.0, (target_width, target_height))
+                    
+                    if out.isOpened():
+                        self.log_messages([(f"✓ Кодек {codec_name} успешно инициализирован", "green")])
+                        used_codec = codec_name
+                        break
+                    else:
+                        self.log_messages([(f"✗ Кодек {codec_name} не поддерживается для записи", "orange")])
+                        out = None
+                except Exception as e:
+                    self.log_messages([(f"✗ Ошибка при инициализации кодека {codec_name}: {e}", "red")])
+                    out = None
+            
+            if out is None:
+                self.log_messages([(f"❌ Критическая ошибка: не удалось создать временный MP4 файл ни с одним из кодеков", "red")])
+                self.log_messages([(f"Доступные кодеки: {[name for _, name in mp4_codecs]}", "blue")])
+                return
                 
-            self.log_messages([(f"Пробуем альтернативный кодек: {fallback_codec}", "blue")])
-            out = cv2.VideoWriter(str(temp_video_path), fourcc, 30.0, (target_width, target_height))
-            if not out.isOpened():
-                self.log_messages([(f"Ошибка: не удалось создать видеофайл даже с кодеком {fallback_codec}", "red")])
+            try:
+                self.log_messages([(f"Начинаем запись кадров в MP4 с кодеком {used_codec}", "blue")])
+                # Записываем кадры в видео
+                success_count = self.write_frames_to_video(out, images, target_width, target_height)
+                out.release()
+                
+                # Проверяем, что файл создан и не пустой
+                if temp_mp4_path.exists() and temp_mp4_path.stat().st_size > 0:
+                    file_size_mb = temp_mp4_path.stat().st_size / (1024 * 1024)
+                    self.log_messages([(f"✓ Временный MP4 создан успешно с кодеком {used_codec}, размер: {file_size_mb:.1f} МБ", "green")])
+                    
+                    # Конвертируем MP4 в MOV с MJPEG кодеком через ffmpeg
+                    self.convert_mp4_to_mov_with_mjpeg(temp_mp4_path, final_mov_path)
+                    
+                    # Удаляем временный MP4 файл
+                    if temp_mp4_path.exists():
+                        temp_mp4_path.unlink()
+                        self.log_messages([(f"Удален временный MP4 файл", "blue")])
+                else:
+                    self.log_messages([(f"❌ Ошибка: временный MP4 файл не создан или имеет нулевой размер", "red")])
+                    
+            except Exception as e:
+                self.log_messages([(f"❌ Ошибка при создании MP4: {e}", "red")])
+                if out is not None:
+                    out.release()
+                if temp_mp4_path.exists():
+                    temp_mp4_path.unlink()
+                    
+        else:
+            # Стандартная логика для других форматов
+            video_path = output_dir / f"{video_name}.{self.video_format}"
+            
+            if video_path.exists():
+                self.log_messages([(f"Видео уже существует: {video_path}", "blue")])
+                self.log_messages([(f"Перезаписываем существующее видео", "blue")])
+            
+            temp_video_path = output_dir / f"tmp_{video_name}.{self.video_format}"
+            self.log_messages([(f"Создаем временный файл: {temp_video_path}", "blue")])
+            
+            # Определяем кодек в зависимости от выбора
+            if self.video_codec == "mp4v":
+                codecs = [('mp4v', 'MP4V')]
+            elif self.video_codec == "mjpeg":
+                codecs = [('MJPG', 'MJPEG')]
+            else:
+                codecs = [('mp4v', 'MP4V')]  # По умолчанию MP4V
+            
+            # Добавляем резервные кодеки
+            codecs.extend([('mp4v', 'MP4V'), ('MJPG', 'MJPEG')])
+            
+            self.log_messages([(f"Начинаем подбор кодеков для {self.video_format}. Доступные кодеки: {[name for _, name in codecs]}", "blue")])
+            
+            out = None
+            used_codec = None
+            
+            for codec, codec_name in codecs:
+                if not self._is_running:
+                    return
+                    
+                self.log_messages([(f"Пробуем кодек: {codec_name} (FourCC: {codec})", "blue")])
+                try:
+                    fourcc = cv2.VideoWriter_fourcc(*codec)
+                    self.log_messages([(f"Создаем VideoWriter с кодеком {codec_name}...", "blue")])
+                    out = cv2.VideoWriter(str(temp_video_path), fourcc, 30.0, (target_width, target_height))
+                    
+                    if out.isOpened():
+                        self.log_messages([(f"✓ Кодек {codec_name} успешно инициализирован", "green")])
+                        used_codec = codec_name
+                        break
+                    else:
+                        self.log_messages([(f"✗ Кодек {codec_name} не поддерживается для записи", "orange")])
+                        out = None
+                except Exception as e:
+                    self.log_messages([(f"✗ Ошибка при инициализации кодека {codec_name}: {e}", "red")])
+                    out = None
+            
+            if out is None:
+                self.log_messages([(f"❌ Критическая ошибка: не удалось создать видеофайл ни с одним из кодеков", "red")])
+                self.log_messages([(f"Доступные кодеки: {[name for _, name in codecs]}", "blue")])
                 return
 
+            try:
+                self.log_messages([(f"Начинаем запись кадров в {self.video_format} с кодеком {used_codec}", "blue")])
+                success_count = self.write_frames_to_video(out, images, target_width, target_height)
+                out.release()
+                
+                # Переименовываем временный файл в финальный
+                if temp_video_path.exists() and temp_video_path.stat().st_size > 0:
+                    file_size_mb = temp_video_path.stat().st_size / (1024 * 1024)
+                    self.log_messages([(f"✓ Временный файл создан успешно с кодеком {used_codec}, размер: {file_size_mb:.1f} МБ", "green")])
+                    
+                    if video_path.exists():
+                        self.log_messages([(f"Удаляем существующий файл: {video_path}", "blue")])
+                        video_path.unlink()
+                        
+                    self.log_messages([(f"Переименовываем временный файл в: {video_path}", "blue")])
+                    temp_video_path.rename(video_path)
+                    self.log_messages([(f"✓ Видео успешно создано: {video_path} ({success_count}/{len(images)} кадров)", "green")])
+                else:
+                    self.log_messages([(f"❌ Ошибка: временный файл не создан или имеет нулевой размер", "red")])
+                    if temp_video_path.exists():
+                        self.log_messages([(f"Временный файл сохранен для диагностики: {temp_video_path}", "blue")])
+                        
+            except Exception as e:
+                self.log_messages([(f"❌ Ошибка при создании видео: {e}", "red")])
+                if out is not None:
+                    out.release()
+                if temp_video_path.exists():
+                    self.log_messages([(f"Временный файл сохранен для диагностики: {temp_video_path}", "blue")])
+
+    def write_frames_to_video(self, out, images, target_width, target_height):
+        """Записывает кадры в видеофайл и возвращает количество успешных кадров"""
         success_count = 0
         for i, img_path in enumerate(images):
             if not self._is_running:
-                out.release()
-                if temp_video_path.exists():
-                    self.log_messages([(f"Удаляем временный файл после остановки: {temp_video_path}", "blue")])
-                    temp_video_path.unlink()
-                return
+                return success_count
                 
             # Проверяем паузу
             with self.pause_condition:
@@ -293,7 +415,7 @@ class ConverterThread(QThread):
             y_offset = (target_height - new_h) // 2
             background[y_offset:y_offset+new_h, x_offset:x_offset+new_w] = resized_frame
             
-            text = str(img_path)
+            text = str(img_path)  
             font = cv2.FONT_HERSHEY_SIMPLEX
             font_scale = self.font_size
             thickness = 2
@@ -326,27 +448,44 @@ class ConverterThread(QThread):
             try:
                 out.write(background)
                 success_count += 1
-                if (i + 1) % 10 == 0:
-                    self.log_messages([(f"Обработан кадр {i+1}/{len(images)}: {img_path}", "blue")])
+                if (i + 1) % 50 == 0:  # Реже логируем чтобы не засорять лог
+                    self.log_messages([(f"Обработан кадр {i+1}/{len(images)}", "blue")])
             except Exception as e:
                 self.log_messages([(f"Ошибка записи кадра {i+1}/{len(images)}: {e}", "red")])
         
-        out.release()
-        
-        if temp_video_path.exists() and temp_video_path.stat().st_size > 0:
-            self.log_messages([(f"Временный файл создан успешно, размер: {temp_video_path.stat().st_size} байт", "green")])
+        self.log_messages([(f"Успешно записано кадров: {success_count}/{len(images)}", "green")])
+        return success_count
+
+    def convert_mp4_to_mov_with_mjpeg(self, mp4_path: Path, mov_path: Path):
+        """Конвертирует MP4 в MOV с MJPEG кодеком через ffmpeg"""
+        try:
+            # Команда ffmpeg для конвертации с высоким качеством MJPEG
+            command = [
+                'ffmpeg',
+                '-i', str(mp4_path),
+                '-c:v', 'mjpeg',  # Кодек MJPEG
+                '-q:v', '1',      # Высокое качество (1-31, где 1 - лучшее)
+                '-c:a', 'copy',   # Копируем аудио, если есть
+                '-y',             # Перезаписать выходной файл
+                str(mov_path)
+            ]
             
-            if video_path.exists():
-                self.log_messages([(f"Удаляем существующий файл: {video_path}", "blue")])
-                video_path.unlink()
+            self.log_messages([(f"Запускаем ffmpeg для конвертации в MOV с MJPEG:", "blue")])
+            self.log_messages([(f"Команда: {' '.join(command)}", "blue")])
+            
+            result = subprocess.run(command, capture_output=True, text=True, check=True)
+            
+            if mov_path.exists() and mov_path.stat().st_size > 0:
+                file_size_mb = mov_path.stat().st_size / (1024 * 1024)
+                self.log_messages([(f"✓ MOV с MJPEG кодеком успешно создан: {mov_path} (размер: {file_size_mb:.1f} МБ)", "green")])
+            else:
+                self.log_messages([(f"❌ Ошибка: MOV файл не создан или имеет нулевой размер", "red")])
                 
-            self.log_messages([(f"Переименовываем временный файл в: {video_path}", "blue")])
-            temp_video_path.rename(video_path)
-            self.log_messages([(f"Видео успешно создано: {video_path} ({success_count}/{len(images)} кадров)", "green")])
-        else:
-            self.log_messages([(f"Ошибка: временный файл не создан или имеет нулевой размер", "red")])
-            if temp_video_path.exists():
-                self.log_messages([(f"Временный файл сохранен для диагностики: {temp_video_path}", "blue")])
+        except subprocess.CalledProcessError as e:
+            self.log_messages([(f"❌ Ошибка конвертации через ffmpeg: {e}", "red")])
+            self.log_messages([(f"stderr: {e.stderr}", "red")])
+        except FileNotFoundError:
+            self.log_messages([(f"❌ Ошибка: ffmpeg не найден. Установите ffmpeg для использования MJPEG кодека.", "red")])
 
 class TreeWidgetItem(QtWidgets.QTreeWidgetItem):
     def __init__(self, path, parent=None, display_path=None, is_root=False):
@@ -403,11 +542,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_mutex = QtCore.QMutex()
         
         self.scale_factor = 2
-        self.video_format = 'mp4'
+        self.video_format = 'mov'
         self.num_threads = os.cpu_count()
         self.font_size = 0.8
         self.video_resolution = "Full HD (1920x1080)"
-        self.video_codec = "mp4v"
+        self.video_codec = "mjpeg"  # MJPEG по умолчанию
         self.added_folders = set()
         
         self.setup_ui()
@@ -489,13 +628,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         second_row_layout.addWidget(QtWidgets.QLabel("Формат видео:"))
         self.format_combo = QtWidgets.QComboBox()
-        self.format_combo.addItems(["mp4", "mov"])
+        self.format_combo.addItems(["mov", "mp4"])  # MOV первым по умолчанию
+        self.format_combo.setCurrentText("mov")     # MOV по умолчанию
         second_row_layout.addWidget(self.format_combo)
 
         second_row_layout.addWidget(QtWidgets.QLabel("Кодек видео:"))
         self.codec_combo = QtWidgets.QComboBox()
-        self.codec_combo.addItems(["mp4v", "h264"])
-        self.codec_combo.setCurrentText("mp4v")
+        self.codec_combo.addItems(["mjpeg", "mp4v"])  # MJPEG первым по умолчанию
+        self.codec_combo.setCurrentText("mjpeg")              # MJPEG по умолчанию
         second_row_layout.addWidget(self.codec_combo)
 
         second_row_layout.addWidget(QtWidgets.QLabel("Разрешение видео:"))
