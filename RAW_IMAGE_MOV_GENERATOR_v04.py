@@ -536,7 +536,7 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RAW to Video Converter")
+        self.setWindowTitle("RAW to Video Converter v06")
         self.setGeometry(100, 100, 1200, 800)
         
         self.log_mutex = QtCore.QMutex()
