@@ -29,6 +29,11 @@ class SequenceFinder(QThread):
         super().__init__()
         self.directory = directory
         self._is_running = True
+        # Поддерживаемые расширения для поиска
+        self.supported_extensions = {'.exr', '.jpg', '.jpeg', '.png', '.tga', '.tif', '.tiff', 
+                                   '.dpx', '.cin', '.mov', '.mp4', '.avi', '.mkv'}
+        # Видео расширения, которые всегда считаем одиночными
+        self.video_extensions = {'.mov', '.mp4', '.avi', '.mkv'}
 
     def stop(self):
         self._is_running = False
@@ -37,8 +42,8 @@ class SequenceFinder(QThread):
         self._is_running = True
 
     def find_sequences_in_directory(self, directory):
-        """Находит последовательности EXR файлов в конкретной директории"""
-        exr_files = {}
+        """Находит последовательности файлов в конкретной директории"""
+        files_by_extension = defaultdict(list)
         
         try:
             files = os.listdir(directory)
@@ -50,27 +55,31 @@ class SequenceFinder(QThread):
                 break
                 
             file_path = os.path.join(directory, file)
-            if os.path.isfile(file_path) and file.lower().endswith('.exr'):
-                self.progress_update.emit(f"Обработка: {file}")
+            if os.path.isfile(file_path):
+                # Получаем расширение файла
+                _, ext = os.path.splitext(file)
+                ext = ext.lower()
                 
-                # Извлекаем базовое имя и номер кадра
-                base_name, frame_num = self.extract_sequence_info(file)
-                if base_name and frame_num is not None:
-                    if base_name not in exr_files:
-                        exr_files[base_name] = []
-                    exr_files[base_name].append((frame_num, file_path))
+                # Проверяем, поддерживается ли расширение
+                if ext in self.supported_extensions:
+                    self.progress_update.emit(f"Обработка: {file}")
+                    
+                    # Извлекаем базовое имя и номер кадра
+                    base_name, frame_num = self.extract_sequence_info(file)
+                    if base_name:
+                        files_by_extension[ext].append((base_name, frame_num, file_path, file))
         
-        return exr_files
+        return files_by_extension
 
     def find_sequences_recursive(self, directory):
-        """Рекурсивно ищет последовательности EXR файлов во всех подпапках"""
+        """Рекурсивно ищет последовательности файлов во всех подпапках"""
         all_sequences = {}
         
         # Сначала ищем в текущей директории
-        exr_files = self.find_sequences_in_directory(directory)
+        files_by_extension = self.find_sequences_in_directory(directory)
         
         # Формируем последовательности для текущей папки
-        sequences = self.form_sequences(exr_files, directory)
+        sequences = self.form_sequences(files_by_extension, directory)
         all_sequences.update(sequences)
         
         # Эмитируем найденные последовательности сразу
@@ -81,10 +90,12 @@ class SequenceFinder(QThread):
             # Формируем данные для таблицы
             sequence_data = {
                 'path': seq_info['path'],
-                'name': seq_name,
+                'name': seq_info['display_name'],
                 'frame_range': seq_info['frame_range'],
                 'frame_count': len(seq_info['files']),
-                'files': seq_info['files']
+                'files': seq_info['files'],
+                'extension': seq_info['extension'],
+                'type': seq_info['type']
             }
             
             self.sequence_found.emit(sequence_data)
@@ -108,29 +119,61 @@ class SequenceFinder(QThread):
             
         return all_sequences
 
-    def form_sequences(self, exr_files, directory):
-        """Формирует последовательности из найденных EXR файлов"""
+    def form_sequences(self, files_by_extension, directory):
+        """Формирует последовательности из найденных файлов"""
         sequences = {}
-        for base_name, files in exr_files.items():
-            if len(files) > 1:  # Только если есть несколько кадров
-                files.sort(key=lambda x: x[0])
-                frame_numbers = [f[0] for f in files]
-                file_paths = [f[1] for f in files]
-                
-                # Проверяем, является ли это последовательностью (последовательные номера)
-                if self.is_sequence(frame_numbers):
-                    rel_path = os.path.relpath(directory, self.directory)
-                    if rel_path == '.':
-                        display_name = base_name
-                    else:
-                        display_name = f"{rel_path}/{base_name}"
+        
+        # Обрабатываем каждый тип расширений отдельно
+        for ext, files_list in files_by_extension.items():
+            # Группируем файлы по базовому имени
+            files_by_base_name = defaultdict(list)
+            for base_name, frame_num, file_path, file_name in files_list:
+                files_by_base_name[base_name].append((frame_num, file_path, file_name))
+            
+            # Формируем последовательности для каждого базового имени
+            for base_name, files in files_by_base_name.items():
+                if len(files) >= 1:
+                    # Сортируем файлы по номеру кадра
+                    files.sort(key=lambda x: x[0] if x[0] is not None else -1)
+                    frame_numbers = [f[0] for f in files]
+                    file_paths = [f[1] for f in files]
+                    file_names = [f[2] for f in files]
                     
-                    sequences[display_name] = {
+                    # Определяем тип последовательности
+                    if ext in self.video_extensions:
+                        # Видеофайлы всегда считаем одиночными
+                        seq_type = f'video_single_{ext[1:]}'
+                        frame_range = "одиночный файл"
+                    elif ext == '.exr':
+                        if self.is_sequence(frame_numbers):
+                            seq_type = 'exr_sequence'
+                            frame_range = f"{min(frame_numbers)}-{max(frame_numbers)}"
+                        else:
+                            seq_type = 'exr_single'
+                            frame_range = "одиночный файл"
+                    else:
+                        if self.is_sequence(frame_numbers):
+                            seq_type = f'other_sequence_{ext[1:]}'
+                            frame_range = f"{min(frame_numbers)}-{max(frame_numbers)}"
+                        else:
+                            seq_type = f'other_single_{ext[1:]}'
+                            frame_range = "одиночный файл"
+                    
+                    # Имя последовательности - только имя первого файла с расширением
+                    display_name = file_names[0]
+                    
+                    # Используем путь + имя файла как ключ для уникальности
+                    unique_key = f"{directory}/{file_names[0]}"
+                    
+                    sequences[unique_key] = {
                         'files': file_paths,
                         'frames': frame_numbers,
                         'first_file': file_paths[0],
-                        'frame_range': f"{min(frame_numbers)}-{max(frame_numbers)}",
-                        'path': directory
+                        'frame_range': frame_range,
+                        'path': directory,
+                        'display_name': display_name,
+                        'extension': ext,
+                        'type': seq_type
                     }
         
         return sequences
@@ -167,14 +210,20 @@ class SequenceFinder(QThread):
             except ValueError:
                 pass
         
-        return filename, None
+        # Если не нашли номер кадра, возвращаем полное имя как базовое
+        return name_without_ext, None
 
     def is_sequence(self, frame_numbers):
         """Проверяет, являются ли номера кадров последовательными"""
         if len(frame_numbers) < 2:
             return False
         
-        sorted_frames = sorted(frame_numbers)
+        # Фильтруем None значения (одиночные файлы)
+        valid_frames = [f for f in frame_numbers if f is not None]
+        if len(valid_frames) < 2:
+            return False
+        
+        sorted_frames = sorted(valid_frames)
         
         # Проверяем, что разница между кадрами постоянная
         differences = [sorted_frames[i] - sorted_frames[i-1] for i in range(1, len(sorted_frames))]
@@ -187,7 +236,6 @@ class SequenceFinder(QThread):
         self.find_sequences_recursive(self.directory)
         self.finished_signal.emit()
 
-
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -195,23 +243,23 @@ class SettingsDialog(QDialog):
         self.setup_ui()
 
     def setup_ui(self):
-        self.setWindowTitle("Управление цветами метаданных")
-        self.setGeometry(200, 200, 700, 500)
+        self.setWindowTitle("Управление цветами")
+        self.setGeometry(200, 200, 800, 600)
         
         layout = QVBoxLayout()
         
         # Создаем вкладки
         self.tabs = QTabWidget()
         
-        # Вкладка активных полей
-        self.active_tab = QWidget()
-        self.setup_active_tab()
-        self.tabs.addTab(self.active_tab, "Активные поля")
+        # Вкладка цветов метаданных
+        self.metadata_tab = QWidget()
+        self.setup_metadata_tab()
+        self.tabs.addTab(self.metadata_tab, "Цвета метаданных")
         
-        # Вкладка корзины
-        self.trash_tab = QWidget()
-        self.setup_trash_tab()
-        self.tabs.addTab(self.trash_tab, "Корзина")
+        # Вкладка цветов последовательностей
+        self.sequences_tab = QWidget()
+        self.setup_sequences_tab()
+        self.tabs.addTab(self.sequences_tab, "Цвета последовательностей")
         
         layout.addWidget(self.tabs)
         
@@ -225,7 +273,25 @@ class SettingsDialog(QDialog):
         
         self.load_current_settings()
 
-    def setup_active_tab(self):
+    def setup_metadata_tab(self):
+        # Создаем табы для активных и удаленных полей метаданных
+        layout = QVBoxLayout()
+        metadata_tabs = QTabWidget()
+        
+        # Вкладка активных полей
+        self.active_tab = QWidget()
+        self.setup_active_metadata_tab()
+        metadata_tabs.addTab(self.active_tab, "Активные поля")
+        
+        # Вкладка корзины
+        self.trash_tab = QWidget()
+        self.setup_trash_metadata_tab()
+        metadata_tabs.addTab(self.trash_tab, "Корзина")
+        
+        layout.addWidget(metadata_tabs)
+        self.metadata_tab.setLayout(layout)
+
+    def setup_active_metadata_tab(self):
         layout = QVBoxLayout()
         
         # Добавление нового поля
@@ -254,7 +320,7 @@ class SettingsDialog(QDialog):
         
         self.active_tab.setLayout(layout)
 
-    def setup_trash_tab(self):
+    def setup_trash_metadata_tab(self):
         layout = QVBoxLayout()
         
         layout.addWidget(QLabel("Удаленные поля:"))
@@ -281,32 +347,65 @@ class SettingsDialog(QDialog):
         
         self.trash_tab.setLayout(layout)
 
+    def setup_sequences_tab(self):
+        layout = QVBoxLayout()
+        
+        # Добавление нового типа последовательности
+        form_layout = QFormLayout()
+        
+        self.sequence_type_input = QLineEdit()
+        self.sequence_type_input.setPlaceholderText("Например: exr_sequence, video_single_mov")
+        self.add_sequence_color_btn = QPushButton("Добавить тип и выбрать цвет")
+        self.add_sequence_color_btn.clicked.connect(self.add_sequence_type_with_color)
+        
+        form_layout.addRow("Тип последовательности:", self.sequence_type_input)
+        form_layout.addRow("", self.add_sequence_color_btn)
+        
+        # Список активных цветов последовательностей
+        layout.addWidget(QLabel("Цвета последовательностей:"))
+        self.sequences_list = QListWidget()
+        self.sequences_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.sequences_list.customContextMenuRequested.connect(self.show_sequences_list_context_menu)
+        
+        # Кнопка удаления выбранного
+        self.delete_sequence_btn = QPushButton("Удалить выбранное")
+        self.delete_sequence_btn.clicked.connect(self.delete_selected_sequence)
+        
+        layout.addLayout(form_layout)
+        layout.addWidget(self.sequences_list)
+        layout.addWidget(self.delete_sequence_btn)
+        
+        self.sequences_tab.setLayout(layout)
+
     def load_current_settings(self):
         """Загружает текущие настройки из родительского окна"""
+        # Загружаем активные поля метаданных
         self.active_list.clear()
-        self.trash_list.clear()
-        
-        # Загружаем активные поля
         for field_name, color_data in self.parent.color_metadata.items():
-            # Проверяем корректность структуры данных
             if isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
                 if not color_data.get('removed', False):
                     color = QColor(color_data['r'], color_data['g'], color_data['b'])
                     item = QListWidgetItem(field_name)
                     item.setBackground(color)
                     self.active_list.addItem(item)
-            else:
-                print(f"Пропущен некорректный элемент color_metadata: {field_name} = {color_data}")
         
-        # Загружаем удаленные поля
+        # Загружаем корзину метаданных
+        self.trash_list.clear()
         for field_name, color_data in self.parent.removed_metadata.items():
             if isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
                 color = QColor(color_data['r'], color_data['g'], color_data['b'])
                 item = QListWidgetItem(field_name)
                 item.setBackground(color)
                 self.trash_list.addItem(item)
-            else:
-                print(f"Пропущен некорректный элемент removed_metadata: {field_name} = {color_data}")
+        
+        # Загружаем цвета последовательностей
+        self.sequences_list.clear()
+        for seq_type, color_data in self.parent.sequence_colors.items():
+            if isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
+                color = QColor(color_data['r'], color_data['g'], color_data['b'])
+                item = QListWidgetItem(seq_type)
+                item.setBackground(color)
+                self.sequences_list.addItem(item)
 
     def add_field_with_color(self):
         field_name = self.field_input.text().strip()
@@ -352,11 +451,50 @@ class SettingsDialog(QDialog):
             
             self.field_input.clear()
 
+    def add_sequence_type_with_color(self):
+        seq_type = self.sequence_type_input.text().strip()
+        if not seq_type:
+            QMessageBox.warning(self, "Ошибка", "Введите тип последовательности")
+            return
+        
+        # Проверяем, нет ли уже такого типа
+        for i in range(self.sequences_list.count()):
+            if self.sequences_list.item(i).text() == seq_type:
+                QMessageBox.warning(self, "Ошибка", "Этот тип уже добавлен")
+                return
+        
+        # Выбираем цвет
+        color = QColorDialog.getColor(QColor(200, 200, 255), self, "Выберите цвет для типа последовательности")
+        if color.isValid():
+            # Добавляем тип в активные
+            self.parent.sequence_colors[seq_type] = {
+                'r': color.red(),
+                'g': color.green(), 
+                'b': color.blue()
+            }
+            
+            # Сохраняем настройки
+            self.parent.save_settings()
+            
+            # Обновляем интерфейс
+            self.load_current_settings()
+            
+            # Обновляем отображение последовательностей
+            self.parent.update_sequences_colors()
+            
+            self.sequence_type_input.clear()
+
     def delete_selected_active(self):
         current_row = self.active_list.currentRow()
         if current_row >= 0:
             field_name = self.active_list.item(current_row).text()
             self.move_field_to_trash(field_name)
+
+    def delete_selected_sequence(self):
+        current_row = self.sequences_list.currentRow()
+        if current_row >= 0:
+            seq_type = self.sequences_list.item(current_row).text()
+            self.delete_sequence_type(seq_type)
 
     def move_field_to_trash(self, field_name):
         """Перемещает поле в корзину"""
@@ -376,6 +514,20 @@ class SettingsDialog(QDialog):
             
             # Обновляем отображение метаданных
             self.parent.update_metadata_colors()
+
+    def delete_sequence_type(self, seq_type):
+        """Удаляет тип последовательности"""
+        if seq_type in self.parent.sequence_colors:
+            del self.parent.sequence_colors[seq_type]
+            
+            # Сохраняем настройки
+            self.parent.save_settings()
+            
+            # Обновляем интерфейс
+            self.load_current_settings()
+            
+            # Обновляем отображение последовательностей
+            self.parent.update_sequences_colors()
 
     def restore_selected(self):
         current_row = self.trash_list.currentRow()
@@ -467,6 +619,23 @@ class SettingsDialog(QDialog):
             elif action == delete_action:
                 self.delete_field_permanently(field_name)
 
+    def show_sequences_list_context_menu(self, position):
+        current_row = self.sequences_list.currentRow()
+        if current_row >= 0:
+            seq_type = self.sequences_list.item(current_row).text()
+            
+            menu = QMenu(self)
+            
+            change_color_action = menu.addAction("Изменить цвет")
+            remove_action = menu.addAction("Удалить")
+            
+            action = menu.exec_(self.sequences_list.mapToGlobal(position))
+            
+            if action == change_color_action:
+                self.change_sequence_color(seq_type)
+            elif action == remove_action:
+                self.delete_sequence_type(seq_type)
+
     def change_field_color(self, field_name):
         """Изменяет цвет поля"""
         if field_name in self.parent.color_metadata:
@@ -491,6 +660,29 @@ class SettingsDialog(QDialog):
                 # Обновляем отображение метаданных
                 self.parent.update_metadata_colors()
 
+    def change_sequence_color(self, seq_type):
+        """Изменяет цвет типа последовательности"""
+        if seq_type in self.parent.sequence_colors:
+            current_color_data = self.parent.sequence_colors[seq_type]
+            current_color = QColor(current_color_data['r'], current_color_data['g'], current_color_data['b'])
+            
+            color = QColorDialog.getColor(current_color, self, f"Выберите цвет для типа '{seq_type}'")
+            if color.isValid():
+                self.parent.sequence_colors[seq_type] = {
+                    'r': color.red(),
+                    'g': color.green(),
+                    'b': color.blue()
+                }
+                
+                # Сохраняем настройки
+                self.parent.save_settings()
+                
+                # Обновляем интерфейс
+                self.load_current_settings()
+                
+                # Обновляем отображение последовательностей
+                self.parent.update_sequences_colors()
+
 
 class EXRMetadataViewer(QMainWindow):
     def __init__(self):
@@ -499,9 +691,10 @@ class EXRMetadataViewer(QMainWindow):
         self.current_sequence_files = []
         self.current_metadata = {}
         
-        # Новая структура данных для цветов
+        # Структуры данных для цветов
         self.color_metadata = {}  # {field_name: {'r': int, 'g': int, 'b': int, 'removed': False}}
         self.removed_metadata = {}  # {field_name: {'r': int, 'g': int, 'b': int, 'removed': True}}
+        self.sequence_colors = {}  # {seq_type: {'r': int, 'g': int, 'b': int}}
         
         self.settings_file = "exr_viewer_settings.json"
         self.load_settings()
@@ -546,12 +739,13 @@ class EXRMetadataViewer(QMainWindow):
         # Таблица последовательностей
         layout.addWidget(QLabel("Найденные последовательности:"))
         self.sequences_table = QTableWidget()
-        self.sequences_table.setColumnCount(4)
-        self.sequences_table.setHorizontalHeaderLabels(["Путь", "Имя последовательности", "Диапазон", "Количество кадров"])
+        self.sequences_table.setColumnCount(5)
+        self.sequences_table.setHorizontalHeaderLabels(["Путь", "Имя последовательности", "Расширение", "Диапазон", "Количество кадров"])
         self.sequences_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.sequences_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.sequences_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.sequences_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.sequences_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.sequences_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.sequences_table.setSortingEnabled(True)
         self.sequences_table.itemSelectionChanged.connect(self.on_sequence_selected)
@@ -609,10 +803,20 @@ class EXRMetadataViewer(QMainWindow):
             QMessageBox.warning(self, "Ошибка", "Укажите существующую папку")
             return
         
+        # Останавливаем предыдущий поиск, если он активен
+        if hasattr(self, 'sequence_finder') and self.sequence_finder.isRunning():
+            self.sequence_finder.stop()
+            self.sequence_finder.wait()  # Ждем завершения потока
+        
+        # Полностью очищаем все данные
         self.sequences_table.setRowCount(0)
         self.metadata_table.setRowCount(0)
         self.sequences = {}
         self.current_sequence_files = []
+        self.current_metadata = {}
+        
+        # Сбрасываем поиск
+        self.clear_search()
         
         self.sequence_finder = SequenceFinder(folder)
         self.sequence_finder.sequence_found.connect(self.on_sequence_found)
@@ -626,7 +830,7 @@ class EXRMetadataViewer(QMainWindow):
         self.continue_btn.setEnabled(False)
 
     def stop_search(self):
-        if hasattr(self, 'sequence_finder'):
+        if hasattr(self, 'sequence_finder') and self.sequence_finder.isRunning():
             self.sequence_finder.stop()
             self.stop_btn.setEnabled(False)
             self.continue_btn.setEnabled(True)
@@ -641,6 +845,12 @@ class EXRMetadataViewer(QMainWindow):
 
     def on_sequence_found(self, sequence_data):
         """Добавляет найденную последовательность в таблицу"""
+        # Проверяем, что данные корректны
+        required_keys = ['path', 'name', 'frame_range', 'frame_count', 'files', 'extension', 'type']
+        if not all(key in sequence_data for key in required_keys):
+            print(f"Некорректные данные последовательности: {sequence_data}")
+            return
+            
         row = self.sequences_table.rowCount()
         self.sequences_table.insertRow(row)
         
@@ -649,24 +859,53 @@ class EXRMetadataViewer(QMainWindow):
         path_item.setFlags(path_item.flags() & ~Qt.ItemIsEditable)
         self.sequences_table.setItem(row, 0, path_item)
         
-        # Имя последовательности
+        # Имя последовательности (только имя первого файла с расширением)
         name_item = QTableWidgetItem(sequence_data['name'])
         name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
         self.sequences_table.setItem(row, 1, name_item)
         
+        # Расширение
+        ext_item = QTableWidgetItem(sequence_data['extension'])
+        ext_item.setFlags(ext_item.flags() & ~Qt.ItemIsEditable)
+        self.sequences_table.setItem(row, 2, ext_item)
+        
         # Диапазон
         range_item = QTableWidgetItem(sequence_data['frame_range'])
         range_item.setFlags(range_item.flags() & ~Qt.ItemIsEditable)
-        self.sequences_table.setItem(row, 2, range_item)
+        self.sequences_table.setItem(row, 3, range_item)
         
-        # Количество кадров
-        count_item = QTableWidgetItem(str(sequence_data['frame_count']))
+        # Количество кадров - устанавливаем числовое значение для правильной сортировки
+        count_item = QTableWidgetItem()
+        count_item.setData(Qt.DisplayRole, sequence_data['frame_count'])
         count_item.setFlags(count_item.flags() & ~Qt.ItemIsEditable)
-        self.sequences_table.setItem(row, 3, count_item)
+        self.sequences_table.setItem(row, 4, count_item)
         
-        # Сохраняем файлы последовательности для доступа при выборе
+        # Сохраняем тип и файлы последовательности для доступа при выборе
         key = f"{sequence_data['path']}/{sequence_data['name']}"
-        self.sequences[key] = sequence_data['files']
+        self.sequences[key] = {
+            'files': sequence_data['files'],
+            'type': sequence_data['type'],
+            'extension': sequence_data['extension']
+        }
+        
+        # Подкрашиваем строку в зависимости от типа
+        self.color_row_by_type(row, sequence_data['type'])
+
+    def color_row_by_type(self, row, seq_type):
+        """Подкрашивает строку таблицы в зависимости от типа последовательности"""
+        # Получаем цвет из настроек
+        color_data = self.sequence_colors.get(seq_type)
+        if color_data and isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
+            color = QColor(color_data['r'], color_data['g'], color_data['b'])
+        else:
+            # Цвет по умолчанию - серый
+            color = QColor(240, 240, 240)
+        
+        # Применяем цвет ко всей строке
+        for col in range(self.sequences_table.columnCount()):
+            item = self.sequences_table.item(row, col)
+            if item:
+                item.setBackground(color)
 
     def update_progress(self, message):
         self.progress_label.setText(message)
@@ -683,14 +922,32 @@ class EXRMetadataViewer(QMainWindow):
             return
         
         # Получаем данные из выбранной строки
-        path = self.sequences_table.item(current_row, 0).text()
-        name = self.sequences_table.item(current_row, 1).text()
+        path_item = self.sequences_table.item(current_row, 0)
+        name_item = self.sequences_table.item(current_row, 1)
+        ext_item = self.sequences_table.item(current_row, 2)
+        
+        if not path_item or not name_item or not ext_item:
+            return
+            
+        path = path_item.text()
+        name = name_item.text()
+        extension = ext_item.text()
         
         key = f"{path}/{name}"
-        if key in self.sequences:
-            self.current_sequence_files = self.sequences[key]
-            if self.current_sequence_files:
+        if key in self.sequences and self.sequences[key]['files']:
+            self.current_sequence_files = self.sequences[key]['files']
+            seq_type = self.sequences[key]['type']
+            
+            # Только для EXR файлов отображаем метаданные
+            if extension.lower() == '.exr' and self.current_sequence_files:
                 self.display_metadata(self.current_sequence_files[0])
+            else:
+                # Для других типов очищаем таблицу метаданных
+                self.metadata_table.setRowCount(0)
+                # Показываем сообщение о неподдерживаемом формате
+                self.metadata_table.setRowCount(1)
+                self.metadata_table.setItem(0, 0, QTableWidgetItem("Информация"))
+                self.metadata_table.setItem(0, 1, QTableWidgetItem(f"Метаданные для формата {extension} не поддерживаются"))
 
     def show_sequences_table_context_menu(self, position):
         """Контекстное меню для таблицы последовательностей"""
@@ -700,17 +957,61 @@ class EXRMetadataViewer(QMainWindow):
             
         row = index.row()
         path_item = self.sequences_table.item(row, 0)
+        name_item = self.sequences_table.item(row, 1)
         
-        if path_item:
+        if path_item and name_item:
             path = path_item.text()
+            name = name_item.text()
             
-            menu = QMenu(self)
-            open_action = menu.addAction("Открыть в проводнике")
+            key = f"{path}/{name}"
+            if key in self.sequences:
+                seq_type = self.sequences[key]['type']
+                
+                menu = QMenu(self)
+                open_action = menu.addAction("Открыть в проводнике")
+                menu.addSeparator()
+                color_action = menu.addAction(f"Изменить цвет для '{seq_type}'")
+                
+                action = menu.exec_(self.sequences_table.viewport().mapToGlobal(position))
+                
+                if action == open_action:
+                    self.open_in_explorer(path)
+                elif action == color_action:
+                    self.change_sequence_color(seq_type)
+
+    def change_sequence_color(self, seq_type):
+        """Изменяет цвет типа последовательности через контекстное меню"""
+        current_color_data = self.sequence_colors.get(seq_type)
+        current_color = QColor(200, 200, 255)  # Цвет по умолчанию
+        
+        if current_color_data and isinstance(current_color_data, dict) and 'r' in current_color_data and 'g' in current_color_data and 'b' in current_color_data:
+            current_color = QColor(current_color_data['r'], current_color_data['g'], current_color_data['b'])
+        
+        color = QColorDialog.getColor(current_color, self, f"Выберите цвет для типа '{seq_type}'")
+        if color.isValid():
+            self.sequence_colors[seq_type] = {
+                'r': color.red(),
+                'g': color.green(),
+                'b': color.blue()
+            }
             
-            action = menu.exec_(self.sequences_table.viewport().mapToGlobal(position))
+            self.save_settings()
+            self.update_sequences_colors()
+
+    def update_sequences_colors(self):
+        """Обновляет цвета в таблице последовательностей"""
+        for row in range(self.sequences_table.rowCount()):
+            path_item = self.sequences_table.item(row, 0)
+            name_item = self.sequences_table.item(row, 1)
             
-            if action == open_action:
-                self.open_in_explorer(path)
+            if path_item and name_item:
+                path = path_item.text()
+                name = name_item.text()
+                
+                key = f"{path}/{name}"
+                if key in self.sequences:
+                    seq_type = self.sequences[key]['type']
+                    self.color_row_by_type(row, seq_type)
 
     def open_in_explorer(self, path):
         """Открывает папку в проводнике"""
@@ -1044,7 +1345,10 @@ class EXRMetadataViewer(QMainWindow):
         """Удаляет поле из цветных в корзину"""
         if field_name in self.color_metadata:
             # Перемещаем в корзину
-            self.removed_metadata[field_name] = self.color_metadata[field_name]
+            color_data = self.color_metadata[field_name]
+            self.removed_metadata[field_name] = color_data
+            
+            # Удаляем из активных
             del self.color_metadata[field_name]
             
             self.save_settings()
@@ -1067,59 +1371,27 @@ class EXRMetadataViewer(QMainWindow):
             # Настройки сохраняются автоматически в диалоге
             # Обновляем отображение метаданных с новыми цветами
             self.update_metadata_colors()
+            self.update_sequences_colors()
 
     def load_settings(self):
-        """Загружает настройки из файла с миграцией старой структуры"""
+        """Загружает настройки из файла"""
         try:
             if os.path.exists(self.settings_file):
                 with open(self.settings_file, 'r', encoding='utf-8') as f:
                     settings = json.load(f)
                     
-                    # Миграция со старой структуры на новую
-                    if 'color_metadata' in settings:
-                        # Если это старая структура (с цветами как ключи)
-                        if isinstance(settings['color_metadata'], dict) and any(color in settings['color_metadata'] for color in ['red', 'green', 'blue', 'yellow']):
-                            self.migrate_from_old_structure(settings)
-                        else:
-                            # Новая структура
-                            self.color_metadata = settings.get('color_metadata', {})
-                            self.removed_metadata = settings.get('removed_metadata', {})
-                    else:
-                        self.color_metadata = {}
-                        self.removed_metadata = {}
+                    # Загружаем цвета метаданных
+                    self.color_metadata = settings.get('color_metadata', {})
+                    self.removed_metadata = settings.get('removed_metadata', {})
+                    
+                    # Загружаем цвета последовательностей
+                    self.sequence_colors = settings.get('sequence_colors', {})
                         
         except Exception as e:
             print(f"Ошибка загрузки настроек: {e}")
             self.color_metadata = {}
             self.removed_metadata = {}
-
-    def migrate_from_old_structure(self, settings):
-        """Мигрирует данные со старой структуры на новую"""
-        print("Миграция настроек со старой структуры на новую...")
-        
-        # Старая структура: {'red': ['field1', 'field2'], 'green': ['field3'], ...}
-        old_color_mapping = {
-            'red': QColor(255, 200, 200),
-            'green': QColor(200, 255, 200),
-            'blue': QColor(200, 200, 255),
-            'yellow': QColor(255, 255, 200)
-        }
-        
-        # Переносим данные из старой структуры в новую
-        for color_name, fields in settings['color_metadata'].items():
-            if color_name in old_color_mapping and isinstance(fields, list):
-                color = old_color_mapping[color_name]
-                for field_name in fields:
-                    self.color_metadata[field_name] = {
-                        'r': color.red(),
-                        'g': color.green(),
-                        'b': color.blue(),
-                        'removed': False
-                    }
-        
-        # Сохраняем в новой структуре
-        self.save_settings()
-        print("Миграция завершена!")
+            self.sequence_colors = {}
 
     def save_settings(self):
         """Сохраняет настройки в файл"""
@@ -1129,19 +1401,21 @@ class EXRMetadataViewer(QMainWindow):
             for field_name, color_data in self.color_metadata.items():
                 if isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
                     cleaned_color_metadata[field_name] = color_data
-                else:
-                    print(f"Удален некорректный элемент color_metadata: {field_name} = {color_data}")
             
             cleaned_removed_metadata = {}
             for field_name, color_data in self.removed_metadata.items():
                 if isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
                     cleaned_removed_metadata[field_name] = color_data
-                else:
-                    print(f"Удален некорректный элемент removed_metadata: {field_name} = {color_data}")
+            
+            cleaned_sequence_colors = {}
+            for seq_type, color_data in self.sequence_colors.items():
+                if isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
+                    cleaned_sequence_colors[seq_type] = color_data
             
             settings = {
                 'color_metadata': cleaned_color_metadata,
-                'removed_metadata': cleaned_removed_metadata
+                'removed_metadata': cleaned_removed_metadata,
+                'sequence_colors': cleaned_sequence_colors
             }
             
             with open(self.settings_file, 'w', encoding='utf-8') as f:
