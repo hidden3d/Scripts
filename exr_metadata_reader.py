@@ -125,93 +125,110 @@ class SequenceFinder(QThread):
         
         # Обрабатываем каждый тип расширений отдельно
         for ext, files_list in files_by_extension.items():
+            if not files_list:  # Пропускаем пустые списки
+                continue
+                
             # Группируем файлы по базовому имени
             files_by_base_name = defaultdict(list)
             for base_name, frame_num, file_path, file_name in files_list:
-                files_by_base_name[base_name].append((frame_num, file_path, file_name))
+                if base_name is not None:
+                    files_by_base_name[base_name].append((frame_num, file_path, file_name))
             
             # Формируем последовательности для каждого базового имени
             for base_name, files in files_by_base_name.items():
-                if len(files) >= 1:
-                    # Сортируем файлы по номеру кадра
-                    files.sort(key=lambda x: x[0] if x[0] is not None else -1)
-                    frame_numbers = [f[0] for f in files]
-                    file_paths = [f[1] for f in files]
-                    file_names = [f[2] for f in files]
+                if not files:  # Пропускаем пустые группы
+                    continue
                     
-                    # Определяем тип последовательности
-                    if ext in self.video_extensions:
-                        # Видеофайлы всегда считаем одиночными
-                        seq_type = f'video_single_{ext[1:]}'
-                        frame_range = "одиночный файл"
-                    elif ext == '.exr':
-                        if self.is_sequence(frame_numbers):
-                            seq_type = 'exr_sequence'
-                            frame_range = f"{min(frame_numbers)}-{max(frame_numbers)}"
-                        else:
-                            seq_type = 'exr_single'
-                            frame_range = "одиночный файл"
+                # Сортируем файлы по номеру кадра
+                files.sort(key=lambda x: x[0] if x[0] is not None else -1)
+                frame_numbers = [f[0] for f in files if f[0] is not None]
+                file_paths = [f[1] for f in files]
+                file_names = [f[2] for f in files]
+                
+                # Определяем диапазон кадров
+                if len(frame_numbers) >= 2:
+                    frame_range = f"{min(frame_numbers)}-{max(frame_numbers)}"
+                    frame_count = len(frame_numbers)
+                else:
+                    frame_range = "одиночный файл"
+                    frame_count = len(files)
+                
+                # Определяем тип последовательности
+                if ext in self.video_extensions:
+                    seq_type = f'video_single_{ext[1:]}'
+                elif ext == '.exr':
+                    if len(frame_numbers) >= 2:
+                        seq_type = 'exr_sequence'
                     else:
-                        if self.is_sequence(frame_numbers):
-                            seq_type = f'other_sequence_{ext[1:]}'
-                            frame_range = f"{min(frame_numbers)}-{max(frame_numbers)}"
-                        else:
-                            seq_type = f'other_single_{ext[1:]}'
-                            frame_range = "одиночный файл"
-                    
-                    # Имя последовательности - только имя первого файла с расширением
-                    display_name = file_names[0]
-                    
-                    # Используем путь + имя файла как ключ для уникальности
-                    unique_key = f"{directory}/{file_names[0]}"
-                    
-                    sequences[unique_key] = {
-                        'files': file_paths,
-                        'frames': frame_numbers,
-                        'first_file': file_paths[0],
-                        'frame_range': frame_range,
-                        'path': directory,
-                        'display_name': display_name,
-                        'extension': ext,
-                        'type': seq_type
-                    }
+                        seq_type = 'exr_single'
+                else:
+                    if len(frame_numbers) >= 2:
+                        seq_type = f'other_sequence_{ext[1:]}'
+                    else:
+                        seq_type = f'other_single_{ext[1:]}'
+                
+                # Имя последовательности - только имя первого файла с расширением
+                display_name = file_names[0] if file_names else f"{base_name}{ext}"
+                
+                # Используем путь + имя файла как ключ для уникальности
+                unique_key = f"{directory}/{display_name}"
+                
+                # Гарантируем, что все поля заполнены
+                sequences[unique_key] = {
+                    'files': file_paths,
+                    'frames': frame_numbers,
+                    'first_file': file_paths[0] if file_paths else "",
+                    'frame_range': frame_range,
+                    'path': directory,
+                    'display_name': display_name,
+                    'extension': ext,
+                    'type': seq_type,
+                    'frame_count': frame_count
+                }
         
         return sequences
 
     def extract_sequence_info(self, filename):
         """Извлекает базовое имя и номер кадра из имени файла"""
-        # Убираем расширение
-        name_without_ext = os.path.splitext(filename)[0]
-        
-        # Ищем паттерны для номеров кадров
-        patterns = [
-            r'(.+?)\.(\d+)$',  # name.0001
-            r'(.+?)_(\d+)$',   # name_0001
-            r'(.+?)-(\d+)$',   # name-0001
-        ]
-        
-        for pattern in patterns:
-            match = re.match(pattern, name_without_ext)
+        try:
+            # Убираем расширение
+            name_without_ext = os.path.splitext(filename)[0]
+            
+            # Ищем паттерны для номеров кадров (с конца строки)
+            patterns = [
+                r'^(.+?)\.(\d+)$',  # name.0001
+                r'^(.+?)[._-](\d+)$',  # name_0001, name-0001
+                r'^(.+?)(\d+)$',       # name0001
+            ]
+            
+            for pattern in patterns:
+                match = re.match(pattern, name_without_ext)
+                if match:
+                    base_name = match.group(1)
+                    frame_num_str = match.group(2)
+                    
+                    # Проверяем, что извлеченный номер состоит из цифр
+                    if frame_num_str.isdigit():
+                        frame_num = int(frame_num_str)
+                        # Убираем разделители из базового имени
+                        base_name = base_name.rstrip('._-')
+                        return base_name, frame_num
+            
+            # Если не нашли паттерн, проверяем есть ли числа в конце имени
+            match = re.search(r'(\d+)$', name_without_ext)
             if match:
-                base_name = match.group(1)
-                try:
-                    frame_num = int(match.group(2))
+                frame_num_str = match.group(1)
+                if frame_num_str.isdigit():
+                    base_name = name_without_ext[:-len(frame_num_str)].rstrip('._-')
+                    frame_num = int(frame_num_str)
                     return base_name, frame_num
-                except ValueError:
-                    continue
-        
-        # Если не нашли паттерн с числами, проверяем есть ли числа в имени
-        match = re.search(r'(.+?)(\d+)\.?.*$', name_without_ext)
-        if match:
-            base_name = match.group(1).rstrip('._-')
-            try:
-                frame_num = int(match.group(2))
-                return base_name, frame_num
-            except ValueError:
-                pass
-        
-        # Если не нашли номер кадра, возвращаем полное имя как базовое
-        return name_without_ext, None
+            
+            # Если не нашли номер кадра, возвращаем полное имя как базовое
+            return name_without_ext, None
+            
+        except Exception as e:
+            print(f"Ошибка при извлечении информации из {filename}: {e}")
+            return filename, None
 
     def is_sequence(self, frame_numbers):
         """Проверяет, являются ли номера кадров последовательными"""
@@ -233,8 +250,12 @@ class SequenceFinder(QThread):
         return len(unique_differences) == 1
 
     def run(self):
-        self.find_sequences_recursive(self.directory)
-        self.finished_signal.emit()
+        try:
+            self.find_sequences_recursive(self.directory)
+        except Exception as e:
+            print(f"Ошибка в потоке поиска: {e}")
+        finally:
+            self.finished_signal.emit()
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
@@ -803,21 +824,35 @@ class EXRMetadataViewer(QMainWindow):
             QMessageBox.warning(self, "Ошибка", "Укажите существующую папку")
             return
         
-        # Останавливаем предыдущий поиск, если он активен
-        if hasattr(self, 'sequence_finder') and self.sequence_finder.isRunning():
+        # Полностью останавливаем и удаляем предыдущий поиск
+        if hasattr(self, 'sequence_finder'):
             self.sequence_finder.stop()
-            self.sequence_finder.wait()  # Ждем завершения потока
+            self.sequence_finder.wait(2000)  # Увеличиваем время ожидания
+            try:
+                self.sequence_finder.quit()
+                self.sequence_finder.wait(1000)
+            except:
+                pass
+            del self.sequence_finder
         
-        # Полностью очищаем все данные
+        # АБСОЛЮТНАЯ очистка всех данных
         self.sequences_table.setRowCount(0)
         self.metadata_table.setRowCount(0)
-        self.sequences = {}
+        self.sequences.clear()  # Используем clear() вместо присваивания {}
         self.current_sequence_files = []
         self.current_metadata = {}
+        
+        # Принудительно обновляем интерфейс
+        QApplication.processEvents()
         
         # Сбрасываем поиск
         self.clear_search()
         
+        # Обновляем прогресс
+        self.progress_label.setText("Начинаем поиск...")
+        QApplication.processEvents()
+        
+        # Создаем новый поиск с новыми соединениями
         self.sequence_finder = SequenceFinder(folder)
         self.sequence_finder.sequence_found.connect(self.on_sequence_found)
         self.sequence_finder.progress_update.connect(self.update_progress)
@@ -851,6 +886,11 @@ class EXRMetadataViewer(QMainWindow):
             print(f"Некорректные данные последовательности: {sequence_data}")
             return
             
+        # Проверяем, что ключевые поля не пустые
+        if not sequence_data.get('path') or not sequence_data.get('name') or not sequence_data.get('extension'):
+            print(f"Пустые ключевые поля в данных: {sequence_data}")
+            return
+                
         row = self.sequences_table.rowCount()
         self.sequences_table.insertRow(row)
         
@@ -859,7 +899,7 @@ class EXRMetadataViewer(QMainWindow):
         path_item.setFlags(path_item.flags() & ~Qt.ItemIsEditable)
         self.sequences_table.setItem(row, 0, path_item)
         
-        # Имя последовательности (только имя первого файла с расширением)
+        # Имя последовательности
         name_item = QTableWidgetItem(sequence_data['name'])
         name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
         self.sequences_table.setItem(row, 1, name_item)
@@ -874,13 +914,13 @@ class EXRMetadataViewer(QMainWindow):
         range_item.setFlags(range_item.flags() & ~Qt.ItemIsEditable)
         self.sequences_table.setItem(row, 3, range_item)
         
-        # Количество кадров - устанавливаем числовое значение для правильной сортировки
+        # Количество кадров
         count_item = QTableWidgetItem()
         count_item.setData(Qt.DisplayRole, sequence_data['frame_count'])
         count_item.setFlags(count_item.flags() & ~Qt.ItemIsEditable)
         self.sequences_table.setItem(row, 4, count_item)
         
-        # Сохраняем тип и файлы последовательности для доступа при выборе
+        # Сохраняем тип и файлы последовательности
         key = f"{sequence_data['path']}/{sequence_data['name']}"
         self.sequences[key] = {
             'files': sequence_data['files'],
@@ -890,6 +930,9 @@ class EXRMetadataViewer(QMainWindow):
         
         # Подкрашиваем строку в зависимости от типа
         self.color_row_by_type(row, sequence_data['type'])
+        
+        # Принудительно обновляем отображение таблицы
+        self.sequences_table.viewport().update()
 
     def color_row_by_type(self, row, seq_type):
         """Подкрашивает строку таблицы в зависимости от типа последовательности"""
