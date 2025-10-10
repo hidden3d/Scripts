@@ -7,6 +7,8 @@ import subprocess
 from pathlib import Path
 from collections import defaultdict
 import ast
+import datetime
+import logging
 
 import OpenEXR
 import Imath
@@ -15,9 +17,115 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout
                              QTextEdit, QLabel, QFileDialog, QMessageBox,
                              QListWidgetItem, QColorDialog, QDialog, QDialogButtonBox,
                              QFormLayout, QComboBox, QTableWidget, QTableWidgetItem,
-                             QHeaderView, QAbstractItemView, QMenu, QAction, QTabWidget)
-from PyQt5.QtCore import QThread, pyqtSignal, Qt
+                             QHeaderView, QAbstractItemView, QMenu, QAction, QTabWidget,
+                             QSplitter, QTextBrowser, QScrollArea)
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSettings
 from PyQt5.QtGui import QTextCursor, QColor, QTextCharFormat, QFont, QBrush
+
+# ==================== НАСТРОЙКИ ====================
+DEBUG = True  # Включить/выключить отладочный вывод
+DEFAULT_FONT_SIZE = 10  # Размер шрифта по умолчанию
+DEFAULT_COLUMN_WIDTHS = {  # Ширины столбцов по умолчанию
+    'sequences': [200, 300, 80, 100, 100],  # Путь, Имя, Расширение, Диапазон, Количество
+    'metadata': [200, 500]  # Поле, Значение
+}
+# ===================================================
+
+class DebugLogger:
+    """Класс для сбора отладочной информации"""
+    
+    def __init__(self, debug_enabled=DEBUG):
+        self.debug_enabled = debug_enabled
+        self.log_messages = []
+        self.max_log_size = 10000  # Максимальное количество сообщений в логе
+        
+    def log(self, message, level="INFO"):
+        """Добавляет сообщение в лог"""
+        if not self.debug_enabled:
+            return
+            
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        log_entry = f"[{timestamp}] [{level}] {message}"
+        self.log_messages.append(log_entry)
+        
+        # Ограничиваем размер лога
+        if len(self.log_messages) > self.max_log_size:
+            self.log_messages = self.log_messages[-self.max_log_size:]
+        
+    def get_log_text(self):
+        """Возвращает весь лог как текст"""
+        return "\n".join(self.log_messages)
+    
+    def clear_log(self):
+        """Очищает лог"""
+        self.log_messages = []
+
+
+class LogViewerDialog(QDialog):
+    """Диалог для просмотра логов"""
+    
+    def __init__(self, debug_logger, parent=None):
+        super().__init__(parent)
+        self.debug_logger = debug_logger
+        self.setup_ui()
+        
+    def setup_ui(self):
+        self.setWindowTitle("Лог приложения")
+        self.setGeometry(300, 300, 800, 600)
+        
+        layout = QVBoxLayout()
+        
+        # Панель управления
+        control_layout = QHBoxLayout()
+        self.refresh_btn = QPushButton("Обновить")
+        self.clear_btn = QPushButton("Очистить лог")
+        self.save_btn = QPushButton("Сохранить в файл")
+        
+        self.refresh_btn.clicked.connect(self.refresh_log)
+        self.clear_btn.clicked.connect(self.clear_log)
+        self.save_btn.clicked.connect(self.save_log)
+        
+        control_layout.addWidget(self.refresh_btn)
+        control_layout.addWidget(self.clear_btn)
+        control_layout.addWidget(self.save_btn)
+        control_layout.addStretch()
+        
+        # Текстовое поле для лога
+        self.log_text = QTextBrowser()
+        self.log_text.setFont(QFont("Courier", 9))
+        self.log_text.setLineWrapMode(QTextEdit.NoWrap)
+        
+        layout.addLayout(control_layout)
+        layout.addWidget(self.log_text)
+        
+        self.setLayout(layout)
+        self.refresh_log()
+        
+    def refresh_log(self):
+        """Обновляет содержимое лога"""
+        self.log_text.setPlainText(self.debug_logger.get_log_text())
+        # Прокручиваем вниз
+        cursor = self.log_text.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.log_text.setTextCursor(cursor)
+        
+    def clear_log(self):
+        """Очищает лог"""
+        self.debug_logger.clear_log()
+        self.refresh_log()
+        
+    def save_log(self):
+        """Сохраняет лог в файл"""
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить лог", "exr_viewer_log.txt", "Text Files (*.txt)"
+        )
+        if filename:
+            try:
+                with open(filename, 'w', encoding='utf-8') as f:
+                    f.write(self.debug_logger.get_log_text())
+                QMessageBox.information(self, "Успех", "Лог сохранен в файл")
+            except Exception as e:
+                QMessageBox.warning(self, "Ошибка", f"Не удалось сохранить лог: {str(e)}")
 
 
 class SequenceFinder(QThread):
@@ -25,9 +133,10 @@ class SequenceFinder(QThread):
     progress_update = pyqtSignal(str)
     finished_signal = pyqtSignal()
 
-    def __init__(self, directory):
+    def __init__(self, directory, debug_logger):
         super().__init__()
         self.directory = directory
+        self.debug_logger = debug_logger
         self._is_running = True
         # Поддерживаемые расширения для поиска
         self.supported_extensions = {'.exr', '.jpg', '.jpeg', '.png', '.tga', '.tif', '.tiff', 
@@ -47,9 +156,9 @@ class SequenceFinder(QThread):
         
         try:
             files = os.listdir(directory)
-            print(f"find_sequences_in_directory: В папке {directory} найдено {len(files)} файлов/папок")
+            self.debug_logger.log(f"find_sequences_in_directory: В папке {directory} найдено {len(files)} файлов/папок")
         except PermissionError:
-            print(f"find_sequences_in_directory: Нет доступа к папке {directory}")
+            self.debug_logger.log(f"find_sequences_in_directory: Нет доступа к папке {directory}", "WARNING")
             return {}
             
         for file in files:
@@ -68,14 +177,14 @@ class SequenceFinder(QThread):
                     
                     # Извлекаем базовое имя и номер кадра
                     base_name, frame_num = self.extract_sequence_info(file)
-                    print(f"  Файл: {file} -> base_name: {base_name}, frame_num: {frame_num}")
+                    self.debug_logger.log(f"  Файл: {file} -> base_name: {base_name}, frame_num: {frame_num}")
                     
                     if base_name:
                         files_by_extension[ext].append((base_name, frame_num, file_path, file))
         
-        print(f"find_sequences_in_directory: Для папки {directory} найдено:")
+        self.debug_logger.log(f"find_sequences_in_directory: Для папки {directory} найдено:")
         for ext, files in files_by_extension.items():
-            print(f"    {ext}: {len(files)} файлов")
+            self.debug_logger.log(f"    {ext}: {len(files)} файлов")
         
         return files_by_extension
 
@@ -130,21 +239,21 @@ class SequenceFinder(QThread):
     def form_sequences(self, files_by_extension, directory):
         """Формирует последовательности из найденных файлов"""
         sequences = {}
-        print(f"form_sequences: Начало формирования последовательностей для {directory}")
+        self.debug_logger.log(f"form_sequences: Начало формирования последовательностей для {directory}")
         
         # Обрабатываем каждый тип расширений отдельно
         for ext, files_list in files_by_extension.items():
-            print(f"  Обрабатываем расширение {ext}: {len(files_list)} файлов")
+            self.debug_logger.log(f"  Обрабатываем расширение {ext}: {len(files_list)} файлов")
             
             # Группируем файлы по базовому имени
             files_by_base_name = defaultdict(list)
             for base_name, frame_num, file_path, file_name in files_list:
                 files_by_base_name[base_name].append((frame_num, file_path, file_name))
-                print(f"    Файл {file_name} -> базовая группа: {base_name}")
+                self.debug_logger.log(f"    Файл {file_name} -> базовая группа: {base_name}")
             
             # Формируем последовательности для каждого базового имени
             for base_name, files in files_by_base_name.items():
-                print(f"    Формируем последовательность для базового имени: {base_name}")
+                self.debug_logger.log(f"    Формируем последовательность для базового имени: {base_name}")
                 
                 if len(files) >= 1:
                     # Сортируем файлы по номеру кадра
@@ -153,8 +262,8 @@ class SequenceFinder(QThread):
                     file_paths = [f[1] for f in files]
                     file_names = [f[2] for f in files]
                     
-                    print(f"      Файлы: {file_names}")
-                    print(f"      Номера кадров: {frame_numbers}")
+                    self.debug_logger.log(f"      Файлы: {file_names}")
+                    self.debug_logger.log(f"      Номера кадров: {frame_numbers}")
                     
                     # Определяем тип последовательности
                     if ext in self.video_extensions:
@@ -194,15 +303,15 @@ class SequenceFinder(QThread):
                         'frame_count': len(files)
                     }
                     
-                    print(f"      Сформирована последовательность:")
-                    print(f"        Ключ: {unique_key}")
-                    print(f"        Имя: {display_name}")
-                    print(f"        Расширение: {ext}")
-                    print(f"        Диапазон: {frame_range}")
-                    print(f"        Количество файлов: {len(files)}")
-                    print(f"        Тип: {seq_type}")
+                    self.debug_logger.log(f"      Сформирована последовательность:")
+                    self.debug_logger.log(f"        Ключ: {unique_key}")
+                    self.debug_logger.log(f"        Имя: {display_name}")
+                    self.debug_logger.log(f"        Расширение: {ext}")
+                    self.debug_logger.log(f"        Диапазон: {frame_range}")
+                    self.debug_logger.log(f"        Количество файлов: {len(files)}")
+                    self.debug_logger.log(f"        Тип: {seq_type}")
         
-        print(f"form_sequences: Сформировано {len(sequences)} последовательностей")
+        self.debug_logger.log(f"form_sequences: Сформировано {len(sequences)} последовательностей")
         return sequences
 
     def extract_sequence_info(self, filename):
@@ -223,7 +332,7 @@ class SequenceFinder(QThread):
                 base_name = match.group(1)
                 try:
                     frame_num = int(match.group(2))
-                    print(f"extract_sequence_info: '{filename}' -> pattern '{pattern}': base_name='{base_name}', frame_num={frame_num}")
+                    self.debug_logger.log(f"extract_sequence_info: '{filename}' -> pattern '{pattern}': base_name='{base_name}', frame_num={frame_num}")
                     return base_name, frame_num
                 except ValueError:
                     continue
@@ -234,14 +343,14 @@ class SequenceFinder(QThread):
             base_name = match.group(1).rstrip('._-')
             try:
                 frame_num = int(match.group(2))
-                print(f"extract_sequence_info: '{filename}' -> fallback pattern: base_name='{base_name}', frame_num={frame_num}")
+                self.debug_logger.log(f"extract_sequence_info: '{filename}' -> fallback pattern: base_name='{base_name}', frame_num={frame_num}")
                 return base_name, frame_num
             except ValueError:
                 pass
         
         # Если не нашли номер кадра, возвращаем полное имя как базовое
         result = (name_without_ext, None)
-        print(f"extract_sequence_info: '{filename}' -> fallback: base_name='{name_without_ext}', frame_num=None")
+        self.debug_logger.log(f"extract_sequence_info: '{filename}' -> fallback: base_name='{name_without_ext}', frame_num=None")
         return result
 
     def is_sequence(self, frame_numbers):
@@ -267,7 +376,7 @@ class SequenceFinder(QThread):
         try:
             self.find_sequences_recursive(self.directory)
         except Exception as e:
-            print(f"Ошибка в потоке поиска: {e}")
+            self.debug_logger.log(f"Ошибка в потоке поиска: {e}", "ERROR")
         finally:
             self.finished_signal.emit()
 
@@ -726,6 +835,9 @@ class EXRMetadataViewer(QMainWindow):
         self.current_sequence_files = []
         self.current_metadata = {}
         
+        # Инициализация логгера
+        self.debug_logger = DebugLogger(DEBUG)
+        
         # Структуры данных для цветов
         self.color_metadata = {}  # {field_name: {'r': int, 'g': int, 'b': int, 'removed': False}}
         self.removed_metadata = {}  # {field_name: {'r': int, 'g': int, 'b': int, 'removed': True}}
@@ -738,6 +850,11 @@ class EXRMetadataViewer(QMainWindow):
     def setup_ui(self):
         self.setWindowTitle("EXR Sequence Metadata Viewer")
         self.setGeometry(100, 100, 1200, 800)
+        
+        # Устанавливаем шрифт приложения
+        app_font = QFont()
+        app_font.setPointSize(DEFAULT_FONT_SIZE)
+        QApplication.setFont(app_font)
         
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -759,44 +876,68 @@ class EXRMetadataViewer(QMainWindow):
         self.stop_btn = QPushButton("СТОП")
         self.continue_btn = QPushButton("ПРОДОЛЖИТЬ")
         self.settings_btn = QPushButton("Настройки цветов")
+        self.log_btn = QPushButton("Лог")  # Новая кнопка для лога
         
         self.start_btn.clicked.connect(self.start_search)
         self.stop_btn.clicked.connect(self.stop_search)
         self.continue_btn.clicked.connect(self.continue_search)
         self.settings_btn.clicked.connect(self.open_settings)
+        self.log_btn.clicked.connect(self.show_log)  # Подключаем показ лога
         
         control_layout.addWidget(self.start_btn)
         control_layout.addWidget(self.stop_btn)
         control_layout.addWidget(self.continue_btn)
         control_layout.addWidget(self.settings_btn)
+        control_layout.addWidget(self.log_btn)  # Добавляем кнопку лога
         control_layout.addStretch()
         
-        # Таблица последовательностей
-        layout.addWidget(QLabel("Найденные последовательности:"))
+        # Создаем разделитель для таблиц
+        splitter = QSplitter(Qt.Vertical)
+        
+        # Верхняя часть - таблица последовательностей
+        sequences_widget = QWidget()
+        sequences_layout = QVBoxLayout()
+        sequences_layout.addWidget(QLabel("Найденные последовательности:"))
+        
         self.sequences_table = QTableWidget()
         self.sequences_table.setColumnCount(5)
         self.sequences_table.setHorizontalHeaderLabels(["Путь", "Имя последовательности", "Расширение", "Диапазон", "Количество кадров"])
-        self.sequences_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.sequences_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.sequences_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.sequences_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.sequences_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        
+        # Устанавливаем ширины столбцов по умолчанию
+        for i, width in enumerate(DEFAULT_COLUMN_WIDTHS['sequences']):
+            self.sequences_table.setColumnWidth(i, width)
+        
+        self.sequences_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)
+        self.sequences_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Interactive)
+        self.sequences_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Interactive)
+        self.sequences_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Interactive)
+        self.sequences_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Interactive)
+        
         self.sequences_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.sequences_table.setSortingEnabled(True)
         self.sequences_table.itemSelectionChanged.connect(self.on_sequence_selected)
         self.sequences_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.sequences_table.customContextMenuRequested.connect(self.show_sequences_table_context_menu)
         
-        # Поле прогресса
-        self.progress_label = QLabel("Готов к работе")
+        sequences_layout.addWidget(self.sequences_table)
+        sequences_widget.setLayout(sequences_layout)
         
-        # Таблица метаданных
-        layout.addWidget(QLabel("Метаданные выбранной последовательности:"))
+        # Нижняя часть - таблица метаданных
+        metadata_widget = QWidget()
+        metadata_layout = QVBoxLayout()
+        metadata_layout.addWidget(QLabel("Метаданные выбранной последовательности:"))
+        
         self.metadata_table = QTableWidget()
         self.metadata_table.setColumnCount(2)
         self.metadata_table.setHorizontalHeaderLabels(["Поле", "Значение"])
-        self.metadata_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.metadata_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        
+        # Устанавливаем ширины столбцов по умолчанию
+        for i, width in enumerate(DEFAULT_COLUMN_WIDTHS['metadata']):
+            self.metadata_table.setColumnWidth(i, width)
+        
+        self.metadata_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)
+        self.metadata_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Interactive)
+        
         self.metadata_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.metadata_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.metadata_table.customContextMenuRequested.connect(self.show_metadata_table_context_menu)
@@ -814,12 +955,24 @@ class EXRMetadataViewer(QMainWindow):
         self.clear_search_btn.clicked.connect(self.clear_search)
         search_layout.addWidget(self.clear_search_btn)
         
+        metadata_layout.addWidget(self.metadata_table)
+        metadata_layout.addLayout(search_layout)
+        metadata_widget.setLayout(metadata_layout)
+        
+        # Добавляем виджеты в разделитель
+        splitter.addWidget(sequences_widget)
+        splitter.addWidget(metadata_widget)
+        
+        # Устанавливаем начальные размеры (верхняя часть - 40%, нижняя - 60%)
+        splitter.setSizes([400, 600])
+        
+        # Поле прогресса
+        self.progress_label = QLabel("Готов к работе")
+        
         layout.addLayout(folder_layout)
         layout.addLayout(control_layout)
         layout.addWidget(self.progress_label)
-        layout.addWidget(self.sequences_table)
-        layout.addWidget(self.metadata_table)
-        layout.addLayout(search_layout)
+        layout.addWidget(splitter)  # Добавляем разделитель вместо отдельных таблиц
         
         central_widget.setLayout(layout)
         
@@ -838,11 +991,11 @@ class EXRMetadataViewer(QMainWindow):
             QMessageBox.warning(self, "Ошибка", "Укажите существующую папку")
             return
         
-        print(f"=== НАЧАЛО ПОИСКА В ПАПКЕ: {folder} ===")
+        self.debug_logger.log(f"=== НАЧАЛО ПОИСКА В ПАПКЕ: {folder} ===")
         
         # Полностью останавливаем и удаляем предыдущий поиск
         if hasattr(self, 'sequence_finder'):
-            print("Останавливаем предыдущий поиск...")
+            self.debug_logger.log("Останавливаем предыдущий поиск...")
             self.sequence_finder.stop()
             self.sequence_finder.wait(2000)
             try:
@@ -853,19 +1006,19 @@ class EXRMetadataViewer(QMainWindow):
             del self.sequence_finder
         
         # СБРАСЫВАЕМ СОРТИРОВКУ ТАБЛИЦЫ
-        print("Сбрасываем сортировку таблицы...")
+        self.debug_logger.log("Сбрасываем сортировку таблицы...")
         self.sequences_table.setSortingEnabled(False)  # Временно отключаем сортировку
         
         # АБСОЛЮТНАЯ очистка всех данных
-        print("Очищаем данные...")
+        self.debug_logger.log("Очищаем данные...")
         self.sequences_table.setRowCount(0)
         self.metadata_table.setRowCount(0)
         self.sequences.clear()
         self.current_sequence_files = []
         self.current_metadata = {}
         
-        print(f"Таблица последовательностей очищена: {self.sequences_table.rowCount()} строк")
-        print(f"Словарь sequences очищен: {len(self.sequences)} элементов")
+        self.debug_logger.log(f"Таблица последовательностей очищена: {self.sequences_table.rowCount()} строк")
+        self.debug_logger.log(f"Словарь sequences очищен: {len(self.sequences)} элементов")
         
         # ВКЛЮЧАЕМ СОРТИРОВКУ ОБРАТНО
         self.sequences_table.setSortingEnabled(True)
@@ -881,8 +1034,8 @@ class EXRMetadataViewer(QMainWindow):
         QApplication.processEvents()
         
         # Создаем новый поиск с новыми соединениями
-        print("Создаем новый поиск...")
-        self.sequence_finder = SequenceFinder(folder)
+        self.debug_logger.log("Создаем новый поиск...")
+        self.sequence_finder = SequenceFinder(folder, self.debug_logger)
         self.sequence_finder.sequence_found.connect(self.on_sequence_found)
         self.sequence_finder.progress_update.connect(self.update_progress)
         self.sequence_finder.finished_signal.connect(self.on_search_finished)
@@ -892,6 +1045,11 @@ class EXRMetadataViewer(QMainWindow):
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.continue_btn.setEnabled(False)
+
+    def show_log(self):
+        """Показывает диалог с логами"""
+        dialog = LogViewerDialog(self.debug_logger, self)
+        dialog.exec_()
 
     def stop_search(self):
         if hasattr(self, 'sequence_finder') and self.sequence_finder.isRunning():
@@ -923,14 +1081,14 @@ class EXRMetadataViewer(QMainWindow):
             self.sequences_table.setSortingEnabled(False)
         
         try:
-            print(f"\n--- ПОЛУЧЕНА ПОСЛЕДОВАТЕЛЬНОСТЬ ---")
-            print(f"Данные: {sequence_data}")
+            self.debug_logger.log(f"\n--- ПОЛУЧЕНА ПОСЛЕДОВАТЕЛЬНОСТЬ ---")
+            self.debug_logger.log(f"Данные: {sequence_data}")
             
             # Проверяем, что данные корректны
             required_keys = ['path', 'name', 'frame_range', 'frame_count', 'files', 'extension', 'type']
             missing_keys = [key for key in required_keys if key not in sequence_data]
             if missing_keys:
-                print(f"ОШИБКА: Отсутствуют ключи: {missing_keys}")
+                self.debug_logger.log(f"ОШИБКА: Отсутствуют ключи: {missing_keys}", "ERROR")
                 return
                 
             # Проверяем, что ключевые поля не пустые
@@ -940,43 +1098,43 @@ class EXRMetadataViewer(QMainWindow):
                     empty_fields.append(key)
             
             if empty_fields:
-                print(f"ОШИБКА: Пустые поля: {empty_fields}")
+                self.debug_logger.log(f"ОШИБКА: Пустые поля: {empty_fields}", "ERROR")
                 return
                     
             row = self.sequences_table.rowCount()
-            print(f"Добавляем строку #{row} в таблицу")
+            self.debug_logger.log(f"Добавляем строку #{row} в таблицу")
             self.sequences_table.insertRow(row)
             
             # Путь
             path_item = QTableWidgetItem(sequence_data['path'])
             path_item.setFlags(path_item.flags() & ~Qt.ItemIsEditable)
             self.sequences_table.setItem(row, 0, path_item)
-            print(f"  Столбец 0 (Путь): '{sequence_data['path']}'")
+            self.debug_logger.log(f"  Столбец 0 (Путь): '{sequence_data['path']}'")
             
             # Имя последовательности
             name_item = QTableWidgetItem(sequence_data['name'])
             name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
             self.sequences_table.setItem(row, 1, name_item)
-            print(f"  Столбец 1 (Имя): '{sequence_data['name']}'")
+            self.debug_logger.log(f"  Столбец 1 (Имя): '{sequence_data['name']}'")
             
             # Расширение
             ext_item = QTableWidgetItem(sequence_data['extension'])
             ext_item.setFlags(ext_item.flags() & ~Qt.ItemIsEditable)
             self.sequences_table.setItem(row, 2, ext_item)
-            print(f"  Столбец 2 (Расширение): '{sequence_data['extension']}'")
+            self.debug_logger.log(f"  Столбец 2 (Расширение): '{sequence_data['extension']}'")
             
             # Диапазон
             range_item = QTableWidgetItem(sequence_data['frame_range'])
             range_item.setFlags(range_item.flags() & ~Qt.ItemIsEditable)
             self.sequences_table.setItem(row, 3, range_item)
-            print(f"  Столбец 3 (Диапазон): '{sequence_data['frame_range']}'")
+            self.debug_logger.log(f"  Столбец 3 (Диапазон): '{sequence_data['frame_range']}'")
             
             # Количество кадров
             count_item = QTableWidgetItem()
             count_item.setData(Qt.DisplayRole, sequence_data['frame_count'])
             count_item.setFlags(count_item.flags() & ~Qt.ItemIsEditable)
             self.sequences_table.setItem(row, 4, count_item)
-            print(f"  Столбец 4 (Количество): '{sequence_data['frame_count']}'")
+            self.debug_logger.log(f"  Столбец 4 (Количество): '{sequence_data['frame_count']}'")
             
             # Сохраняем тип и файлы последовательности
             key = f"{sequence_data['path']}/{sequence_data['name']}"
@@ -985,21 +1143,21 @@ class EXRMetadataViewer(QMainWindow):
                 'type': sequence_data['type'],
                 'extension': sequence_data['extension']
             }
-            print(f"  Сохранено в словарь sequences с ключом: '{key}'")
+            self.debug_logger.log(f"  Сохранено в словарь sequences с ключом: '{key}'")
             
             # Подкрашиваем строку в зависимости от типа
             self.color_row_by_type(row, sequence_data['type'])
-            print(f"  Строка окрашена по типу: '{sequence_data['type']}'")
+            self.debug_logger.log(f"  Строка окрашена по типу: '{sequence_data['type']}'")
             
             # Проверяем, что все ячейки заполнены
             for col in range(5):
                 item = self.sequences_table.item(row, col)
                 if item is None:
-                    print(f"  ВНИМАНИЕ: Ячейка ({row}, {col}) пустая!")
+                    self.debug_logger.log(f"  ВНИМАНИЕ: Ячейка ({row}, {col}) пустая!", "WARNING")
                 else:
-                    print(f"  Ячейка ({row}, {col}): '{item.text()}'")
+                    self.debug_logger.log(f"  Ячейка ({row}, {col}): '{item.text()}'")
             
-            print(f"--- КОНЕЦ ДОБАВЛЕНИЯ ПОСЛЕДОВАТЕЛЬНОСТИ ---\n")
+            self.debug_logger.log(f"--- КОНЕЦ ДОБАВЛЕНИЯ ПОСЛЕДОВАТЕЛЬНОСТИ ---\n")
         
         finally:
             # ВОССТАНАВЛИВАЕМ СОРТИРОВКУ
@@ -1035,9 +1193,9 @@ class EXRMetadataViewer(QMainWindow):
         self.sequences_table.viewport().update()
         self.sequences_table.resizeColumnsToContents()
         
-        print(f"=== ПОИСК ЗАВЕРШЕН ===")
-        print(f"Всего последовательностей в таблице: {self.sequences_table.rowCount()}")
-        print(f"Всего последовательностей в словаре: {len(self.sequences)}")
+        self.debug_logger.log(f"=== ПОИСК ЗАВЕРШЕН ===")
+        self.debug_logger.log(f"Всего последовательностей в таблице: {self.sequences_table.rowCount()}")
+        self.debug_logger.log(f"Всего последовательностей в словаре: {len(self.sequences)}")
         
         # Принудительно обновляем интерфейс
         QApplication.processEvents()
@@ -1514,7 +1672,7 @@ class EXRMetadataViewer(QMainWindow):
                     self.sequence_colors = settings.get('sequence_colors', {})
                         
         except Exception as e:
-            print(f"Ошибка загрузки настроек: {e}")
+            self.debug_logger.log(f"Ошибка загрузки настроек: {e}")
             self.color_metadata = {}
             self.removed_metadata = {}
             self.sequence_colors = {}
@@ -1548,11 +1706,17 @@ class EXRMetadataViewer(QMainWindow):
                 json.dump(settings, f, ensure_ascii=False, indent=2)
                 
         except Exception as e:
-            print(f"Ошибка сохранения настроек: {e}")
+            self.debug_logger.log(f"Ошибка сохранения настроек: {e}")
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    
+    # Устанавливаем шрифт приложения
+    app_font = QFont()
+    app_font.setPointSize(DEFAULT_FONT_SIZE)
+    app.setFont(app_font)
+    
     window = EXRMetadataViewer()
     window.show()
     sys.exit(app.exec_())
