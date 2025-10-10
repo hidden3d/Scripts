@@ -19,7 +19,7 @@ from PyQt5.QtGui import QTextCursor, QColor, QTextCharFormat, QFont, QBrush
 
 
 class SequenceFinder(QThread):
-    sequence_found = pyqtSignal(str, list, str)
+    sequence_found = pyqtSignal(dict)  # Изменяем сигнал для передачи словаря с данными
     progress_update = pyqtSignal(str)
     finished_signal = pyqtSignal()
 
@@ -75,8 +75,17 @@ class SequenceFinder(QThread):
         for seq_name, seq_info in sequences.items():
             if not self._is_running:
                 break
-            display_text = f"{seq_name} [{seq_info['frame_range']}] - {len(seq_info['files'])} файлов"
-            self.sequence_found.emit(display_text, seq_info['files'], directory)
+            
+            # Формируем данные для таблицы
+            sequence_data = {
+                'path': seq_info['path'],
+                'name': seq_name,
+                'frame_range': seq_info['frame_range'],
+                'frame_count': len(seq_info['files']),
+                'files': seq_info['files']
+            }
+            
+            self.sequence_found.emit(sequence_data)
             
         if not self._is_running:
             return all_sequences
@@ -338,7 +347,7 @@ class SettingsDialog(QDialog):
 class EXRMetadataViewer(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.sequences = {}
+        self.sequences = {}  # Теперь будем хранить по ключу - путь + имя
         self.current_sequence_files = []
         self.current_metadata = {}
         self.color_metadata = {
@@ -387,10 +396,18 @@ class EXRMetadataViewer(QMainWindow):
         control_layout.addWidget(self.settings_btn)
         control_layout.addStretch()
         
-        # Список последовательностей
+        # Таблица последовательностей
         layout.addWidget(QLabel("Найденные последовательности:"))
-        self.sequences_list = QListWidget()
-        self.sequences_list.itemSelectionChanged.connect(self.on_sequence_selected)
+        self.sequences_table = QTableWidget()
+        self.sequences_table.setColumnCount(4)
+        self.sequences_table.setHorizontalHeaderLabels(["Путь", "Имя последовательности", "Диапазон", "Количество кадров"])
+        self.sequences_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.sequences_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.sequences_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.sequences_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.sequences_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.sequences_table.setSortingEnabled(True)  # Включаем сортировку
+        self.sequences_table.itemSelectionChanged.connect(self.on_sequence_selected)
         
         # Поле прогресса
         self.progress_label = QLabel("Готов к работе")
@@ -409,7 +426,7 @@ class EXRMetadataViewer(QMainWindow):
         layout.addLayout(folder_layout)
         layout.addLayout(control_layout)
         layout.addWidget(self.progress_label)
-        layout.addWidget(self.sequences_list)
+        layout.addWidget(self.sequences_table)
         layout.addWidget(self.metadata_table)
         
         central_widget.setLayout(layout)
@@ -429,7 +446,7 @@ class EXRMetadataViewer(QMainWindow):
             QMessageBox.warning(self, "Ошибка", "Укажите существующую папку")
             return
         
-        self.sequences_list.clear()
+        self.sequences_table.setRowCount(0)
         self.metadata_table.setRowCount(0)
         self.sequences = {}
         self.current_sequence_files = []
@@ -459,10 +476,34 @@ class EXRMetadataViewer(QMainWindow):
             self.stop_btn.setEnabled(True)
             self.continue_btn.setEnabled(False)
 
-    def on_sequence_found(self, display_text, files, directory):
-        item = QListWidgetItem(display_text)
-        self.sequences_list.addItem(item)
-        self.sequences[display_text] = files
+    def on_sequence_found(self, sequence_data):
+        """Добавляет найденную последовательность в таблицу"""
+        row = self.sequences_table.rowCount()
+        self.sequences_table.insertRow(row)
+        
+        # Путь
+        path_item = QTableWidgetItem(sequence_data['path'])
+        path_item.setFlags(path_item.flags() & ~Qt.ItemIsEditable)
+        self.sequences_table.setItem(row, 0, path_item)
+        
+        # Имя последовательности
+        name_item = QTableWidgetItem(sequence_data['name'])
+        name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+        self.sequences_table.setItem(row, 1, name_item)
+        
+        # Диапазон
+        range_item = QTableWidgetItem(sequence_data['frame_range'])
+        range_item.setFlags(range_item.flags() & ~Qt.ItemIsEditable)
+        self.sequences_table.setItem(row, 2, range_item)
+        
+        # Количество кадров
+        count_item = QTableWidgetItem(str(sequence_data['frame_count']))
+        count_item.setFlags(count_item.flags() & ~Qt.ItemIsEditable)
+        self.sequences_table.setItem(row, 3, count_item)
+        
+        # Сохраняем файлы последовательности для доступа при выборе
+        key = f"{sequence_data['path']}/{sequence_data['name']}"
+        self.sequences[key] = sequence_data['files']
 
     def update_progress(self, message):
         self.progress_label.setText(message)
@@ -474,13 +515,17 @@ class EXRMetadataViewer(QMainWindow):
         self.continue_btn.setEnabled(False)
 
     def on_sequence_selected(self):
-        current_item = self.sequences_list.currentItem()
-        if not current_item:
+        current_row = self.sequences_table.currentRow()
+        if current_row < 0:
             return
         
-        sequence_key = current_item.text()
-        if sequence_key in self.sequences:
-            self.current_sequence_files = self.sequences[sequence_key]
+        # Получаем данные из выбранной строки
+        path = self.sequences_table.item(current_row, 0).text()
+        name = self.sequences_table.item(current_row, 1).text()
+        
+        key = f"{path}/{name}"
+        if key in self.sequences:
+            self.current_sequence_files = self.sequences[key]
             if self.current_sequence_files:
                 self.display_metadata(self.current_sequence_files[0])
 
@@ -799,7 +844,7 @@ class EXRMetadataViewer(QMainWindow):
             return
         
         # Полностью перерисовываем таблицу с новыми цветами
-        if self.sequences_list.currentItem():
+        if self.sequences_table.currentRow() >= 0:
             self.on_sequence_selected()
 
     def open_settings(self):
