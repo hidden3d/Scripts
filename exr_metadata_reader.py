@@ -18,12 +18,12 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout
                              QListWidgetItem, QColorDialog, QDialog, QDialogButtonBox,
                              QFormLayout, QComboBox, QTableWidget, QTableWidgetItem,
                              QHeaderView, QAbstractItemView, QMenu, QAction, QTabWidget,
-                             QSplitter, QTextBrowser, QScrollArea)
+                             QSplitter, QTextBrowser, QScrollArea, QCheckBox)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSettings
 from PyQt5.QtGui import QTextCursor, QColor, QTextCharFormat, QFont, QBrush
 
 # ==================== НАСТРОЙКИ ====================
-DEBUG = True  # Включить/выключить отладочный вывод
+DEBUG = False  # По умолчанию логирование выключено
 DEFAULT_FONT_SIZE = 10  # Размер шрифта по умолчанию
 DEFAULT_COLUMN_WIDTHS = {  # Ширины столбцов по умолчанию
     'sequences': [200, 300, 80, 100, 100],  # Путь, Имя, Расширение, Диапазон, Количество
@@ -59,6 +59,10 @@ class DebugLogger:
     def clear_log(self):
         """Очищает лог"""
         self.log_messages = []
+    
+    def set_debug_enabled(self, enabled):
+        """Включает/выключает логирование"""
+        self.debug_enabled = enabled
 
 
 class LogViewerDialog(QDialog):
@@ -379,6 +383,7 @@ class SequenceFinder(QThread):
             self.debug_logger.log(f"Ошибка в потоке поиска: {e}", "ERROR")
         finally:
             self.finished_signal.emit()
+
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
@@ -876,6 +881,12 @@ class EXRMetadataViewer(QMainWindow):
         self.stop_btn = QPushButton("СТОП")
         self.continue_btn = QPushButton("ПРОДОЛЖИТЬ")
         self.settings_btn = QPushButton("Настройки цветов")
+        
+        # Добавляем галочку для включения/выключения логирования
+        self.log_checkbox = QCheckBox("Логирование")
+        self.log_checkbox.setChecked(DEBUG)  # По умолчанию выключено
+        self.log_checkbox.stateChanged.connect(self.toggle_logging)
+        
         self.log_btn = QPushButton("Лог")  # Новая кнопка для лога
         
         self.start_btn.clicked.connect(self.start_search)
@@ -888,6 +899,7 @@ class EXRMetadataViewer(QMainWindow):
         control_layout.addWidget(self.stop_btn)
         control_layout.addWidget(self.continue_btn)
         control_layout.addWidget(self.settings_btn)
+        control_layout.addWidget(self.log_checkbox)  # Добавляем галочку
         control_layout.addWidget(self.log_btn)  # Добавляем кнопку лога
         control_layout.addStretch()
         
@@ -907,11 +919,12 @@ class EXRMetadataViewer(QMainWindow):
         for i, width in enumerate(DEFAULT_COLUMN_WIDTHS['sequences']):
             self.sequences_table.setColumnWidth(i, width)
         
-        self.sequences_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)
-        self.sequences_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Interactive)
-        self.sequences_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Interactive)
-        self.sequences_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Interactive)
-        self.sequences_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Interactive)
+        # Настраиваем режимы изменения размеров столбцов
+        self.sequences_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)  # Путь растягивается
+        self.sequences_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Interactive)  # Имя - изменяемый
+        self.sequences_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Interactive)  # Расширение - изменяемый
+        self.sequences_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Interactive)  # Диапазон - изменяемый
+        self.sequences_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Interactive)  # Количество - изменяемый
         
         self.sequences_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.sequences_table.setSortingEnabled(True)
@@ -935,8 +948,9 @@ class EXRMetadataViewer(QMainWindow):
         for i, width in enumerate(DEFAULT_COLUMN_WIDTHS['metadata']):
             self.metadata_table.setColumnWidth(i, width)
         
-        self.metadata_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)
-        self.metadata_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Interactive)
+        # Настраиваем режимы изменения размеров столбцов
+        self.metadata_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)  # Поле - изменяемый
+        self.metadata_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)  # Значение растягивается до конца
         
         self.metadata_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.metadata_table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -979,6 +993,34 @@ class EXRMetadataViewer(QMainWindow):
         # Изначально кнопки Стоп и Продолжить неактивны
         self.stop_btn.setEnabled(False)
         self.continue_btn.setEnabled(False)
+        
+        # Применяем выравнивание для таблицы последовательностей
+        self.apply_sequences_table_alignment()
+
+    def apply_sequences_table_alignment(self):
+        """Применяет выравнивание для столбцов таблицы последовательностей"""
+        # Устанавливаем выравнивание по правому краю для всех столбцов кроме первого
+        for col in range(1, self.sequences_table.columnCount()):
+            for row in range(self.sequences_table.rowCount()):
+                item = self.sequences_table.item(row, col)
+                if item:
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        
+        # Устанавливаем выравнивание для заголовков
+        header = self.sequences_table.horizontalHeader()
+        for col in range(1, self.sequences_table.columnCount()):
+            header_item = self.sequences_table.horizontalHeaderItem(col)
+            if header_item:
+                header_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+    def toggle_logging(self, state):
+        """Включает/выключает логирование"""
+        enabled = state == Qt.Checked
+        self.debug_logger.set_debug_enabled(enabled)
+        if enabled:
+            self.debug_logger.log("Логирование включено")
+        else:
+            self.debug_logger.log("Логирование выключено")
 
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Выберите папку с EXR файлами")
@@ -1046,11 +1088,6 @@ class EXRMetadataViewer(QMainWindow):
         self.stop_btn.setEnabled(True)
         self.continue_btn.setEnabled(False)
 
-    def show_log(self):
-        """Показывает диалог с логами"""
-        dialog = LogViewerDialog(self.debug_logger, self)
-        dialog.exec_()
-
     def stop_search(self):
         if hasattr(self, 'sequence_finder') and self.sequence_finder.isRunning():
             # Временно отключаем сортировку
@@ -1108,24 +1145,28 @@ class EXRMetadataViewer(QMainWindow):
             # Путь
             path_item = QTableWidgetItem(sequence_data['path'])
             path_item.setFlags(path_item.flags() & ~Qt.ItemIsEditable)
+            path_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)  # Выравнивание по левому краю
             self.sequences_table.setItem(row, 0, path_item)
             self.debug_logger.log(f"  Столбец 0 (Путь): '{sequence_data['path']}'")
             
             # Имя последовательности
             name_item = QTableWidgetItem(sequence_data['name'])
             name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+            name_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)  # Выравнивание по правому краю
             self.sequences_table.setItem(row, 1, name_item)
             self.debug_logger.log(f"  Столбец 1 (Имя): '{sequence_data['name']}'")
             
             # Расширение
             ext_item = QTableWidgetItem(sequence_data['extension'])
             ext_item.setFlags(ext_item.flags() & ~Qt.ItemIsEditable)
+            ext_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)  # Выравнивание по правому краю
             self.sequences_table.setItem(row, 2, ext_item)
             self.debug_logger.log(f"  Столбец 2 (Расширение): '{sequence_data['extension']}'")
             
             # Диапазон
             range_item = QTableWidgetItem(sequence_data['frame_range'])
             range_item.setFlags(range_item.flags() & ~Qt.ItemIsEditable)
+            range_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)  # Выравнивание по правому краю
             self.sequences_table.setItem(row, 3, range_item)
             self.debug_logger.log(f"  Столбец 3 (Диапазон): '{sequence_data['frame_range']}'")
             
@@ -1133,6 +1174,7 @@ class EXRMetadataViewer(QMainWindow):
             count_item = QTableWidgetItem()
             count_item.setData(Qt.DisplayRole, sequence_data['frame_count'])
             count_item.setFlags(count_item.flags() & ~Qt.ItemIsEditable)
+            count_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)  # Выравнивание по правому краю
             self.sequences_table.setItem(row, 4, count_item)
             self.debug_logger.log(f"  Столбец 4 (Количество): '{sequence_data['frame_count']}'")
             
@@ -1192,6 +1234,9 @@ class EXRMetadataViewer(QMainWindow):
         # ПРИНУДИТЕЛЬНО ОБНОВЛЯЕМ ОТОБРАЖЕНИЕ ТАБЛИЦЫ
         self.sequences_table.viewport().update()
         self.sequences_table.resizeColumnsToContents()
+        
+        # Применяем выравнивание после завершения поиска
+        self.apply_sequences_table_alignment()
         
         self.debug_logger.log(f"=== ПОИСК ЗАВЕРШЕН ===")
         self.debug_logger.log(f"Всего последовательностей в таблице: {self.sequences_table.rowCount()}")
@@ -1657,6 +1702,11 @@ class EXRMetadataViewer(QMainWindow):
             self.update_metadata_colors()
             self.update_sequences_colors()
 
+    def show_log(self):
+        """Показывает диалог с логами"""
+        dialog = LogViewerDialog(self.debug_logger, self)
+        dialog.exec_()
+
     def load_settings(self):
         """Загружает настройки из файла"""
         try:
@@ -1672,7 +1722,7 @@ class EXRMetadataViewer(QMainWindow):
                     self.sequence_colors = settings.get('sequence_colors', {})
                         
         except Exception as e:
-            self.debug_logger.log(f"Ошибка загрузки настроек: {e}")
+            self.debug_logger.log(f"Ошибка загрузки настроек: {e}", "ERROR")
             self.color_metadata = {}
             self.removed_metadata = {}
             self.sequence_colors = {}
@@ -1706,7 +1756,7 @@ class EXRMetadataViewer(QMainWindow):
                 json.dump(settings, f, ensure_ascii=False, indent=2)
                 
         except Exception as e:
-            self.debug_logger.log(f"Ошибка сохранения настроек: {e}")
+            self.debug_logger.log(f"Ошибка сохранения настроек: {e}", "ERROR")
 
 
 if __name__ == "__main__":
