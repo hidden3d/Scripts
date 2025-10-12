@@ -21,9 +21,10 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout
                              QSplitter, QTextBrowser, QScrollArea, QCheckBox)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSettings
 from PyQt5.QtGui import QTextCursor, QColor, QTextCharFormat, QFont, QBrush
+from PyQt5.QtWidgets import QTreeWidget, QTreeWidgetItem
 
 # ==================== НАСТРОЙКИ ====================
-DEBUG = True  # Включаем логирование для отладки
+DEBUG = False  # Включаем логирование для отладки
 DEFAULT_FONT_SIZE = 10  # Размер шрифта по умолчанию
 DEFAULT_COLUMN_WIDTHS = {  # Ширины столбцов по умолчанию
     'sequences': [200, 300, 80, 100, 100],  # Путь, Имя, Расширение, Диапазон, Количество
@@ -1101,12 +1102,17 @@ class EXRMetadataViewer(QMainWindow):
         self.sequence_colors = {}  # {seq_type: {'r': int, 'g': int, 'b': int}}
         self.ordered_metadata_fields = []  # Порядок отображения полей метаданных
         
+        # Для древовидной структуры
+        self.tree_structure = {}  # {path: {subfolders: {}, sequences: []}}
+        self.folder_items = {}  # {folder_path: QTreeWidgetItem}
+        self.root_item = None
+        
         self.settings_file = "exr_viewer_settings.json"
         self.load_settings()
         self.setup_ui()
 
     def setup_ui(self):
-        self.setWindowTitle("Universal File Sequence Metadata Viewer")
+        self.setWindowTitle("Universal File Sequence Metadata Viewer - Tree View")
         self.setGeometry(100, 100, 1200, 800)
         
         # Устанавливаем шрифт приложения
@@ -1137,68 +1143,59 @@ class EXRMetadataViewer(QMainWindow):
         
         # Добавляем галочку для включения/выключения логирования
         self.log_checkbox = QCheckBox("Логирование")
-        self.log_checkbox.setChecked(DEBUG)  # По умолчанию выключено
+        self.log_checkbox.setChecked(DEBUG)
         self.log_checkbox.stateChanged.connect(self.toggle_logging)
         
-        self.log_btn = QPushButton("Лог")  # Новая кнопка для лога
+        self.log_btn = QPushButton("Лог")
         
         self.start_btn.clicked.connect(self.start_search)
         self.stop_btn.clicked.connect(self.stop_search)
         self.continue_btn.clicked.connect(self.continue_search)
         self.settings_btn.clicked.connect(self.open_settings)
-        self.log_btn.clicked.connect(self.show_log)  # Подключаем показ лога
+        self.log_btn.clicked.connect(self.show_log)
         
         control_layout.addWidget(self.start_btn)
         control_layout.addWidget(self.stop_btn)
         control_layout.addWidget(self.continue_btn)
         control_layout.addWidget(self.settings_btn)
-        control_layout.addWidget(self.log_checkbox)  # Добавляем галочку
-        control_layout.addWidget(self.log_btn)  # Добавляем кнопку лога
+        control_layout.addWidget(self.log_checkbox)
+        control_layout.addWidget(self.log_btn)
         control_layout.addStretch()
         
         # Создаем разделитель для таблиц
         splitter = QSplitter(Qt.Vertical)
         
-        # Верхняя часть - таблица последовательностей
+        # Верхняя часть - дерево последовательностей
         sequences_widget = QWidget()
         sequences_layout = QVBoxLayout()
-        sequences_layout.addWidget(QLabel("Найденные последовательности:"))
+        sequences_layout.addWidget(QLabel("Структура папок и последовательностей:"))
         
-        self.sequences_table = QTableWidget()
-        self.sequences_table.setColumnCount(5)
-        self.sequences_table.setHorizontalHeaderLabels(["Путь", "Имя последовательности", "Расширение", "Диапазон", "Количество кадров"])
+        # Дерево последовательностей
+        self.sequences_tree = QTreeWidget()
+        self.sequences_tree.setColumnCount(5)
+        self.sequences_tree.setHeaderLabels(["Имя", "Тип", "Диапазон", "Количество", "Путь"])
         
-        # Устанавливаем ширины столбцов по умолчанию
-        for i, width in enumerate(DEFAULT_COLUMN_WIDTHS['sequences']):
-            self.sequences_table.setColumnWidth(i, width)
+        # Настраиваем ширины столбцов
+        self.sequences_tree.setColumnWidth(0, 300)  # Имя
+        self.sequences_tree.setColumnWidth(1, 120)  # Тип
+        self.sequences_tree.setColumnWidth(2, 120)  # Диапазон
+        self.sequences_tree.setColumnWidth(3, 80)   # Количество
+        self.sequences_tree.setColumnWidth(4, 400)  # Путь
         
-        # Настраиваем режимы изменения размеров столбцов
-        # Только столбец "Путь" будет растягиваться, остальные - фиксированные
-        self.sequences_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)  # Путь растягивается
-        self.sequences_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Interactive)    # Имя - фиксированная
-        self.sequences_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Interactive)    # Расширение - фиксированная
-        self.sequences_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Interactive)    # Диапазон - фиксированная
-        self.sequences_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Interactive)    # Количество - фиксированная
+        self.sequences_tree.setSelectionBehavior(QAbstractItemView.SelectRows)
+# ОТКЛЮЧАЕМ СОРТИРОВКУ для сохранения порядка добавления
+        self.sequences_tree.setSortingEnabled(True)
+        self.sequences_tree.itemSelectionChanged.connect(self.on_tree_item_selected)
+        self.sequences_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.sequences_tree.customContextMenuRequested.connect(self.show_tree_context_menu)
         
-        # Устанавливаем фиксированные ширины для столбцов 1-4
-        self.sequences_table.setColumnWidth(1, DEFAULT_COLUMN_WIDTHS['sequences'][1])
-        self.sequences_table.setColumnWidth(2, DEFAULT_COLUMN_WIDTHS['sequences'][2])
-        self.sequences_table.setColumnWidth(3, DEFAULT_COLUMN_WIDTHS['sequences'][3])
-        self.sequences_table.setColumnWidth(4, DEFAULT_COLUMN_WIDTHS['sequences'][4])
-        
-        self.sequences_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.sequences_table.setSortingEnabled(True)
-        self.sequences_table.itemSelectionChanged.connect(self.on_sequence_selected)
-        self.sequences_table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.sequences_table.customContextMenuRequested.connect(self.show_sequences_table_context_menu)
-        
-        sequences_layout.addWidget(self.sequences_table)
+        sequences_layout.addWidget(self.sequences_tree)
         sequences_widget.setLayout(sequences_layout)
         
         # Нижняя часть - таблица метаданных
         metadata_widget = QWidget()
         metadata_layout = QVBoxLayout()
-        metadata_layout.addWidget(QLabel("Метаданные выбранной последовательности:"))
+        metadata_layout.addWidget(QLabel("Метаданные выбранного элемента:"))
         
         self.metadata_table = QTableWidget()
         self.metadata_table.setColumnCount(2)
@@ -1209,8 +1206,8 @@ class EXRMetadataViewer(QMainWindow):
             self.metadata_table.setColumnWidth(i, width)
         
         # Настраиваем режимы изменения размеров столбцов
-        self.metadata_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)    # Поле - фиксированная
-        self.metadata_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)  # Значение растягивается до конца
+        self.metadata_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)
+        self.metadata_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         
         # Устанавливаем фиксированную ширину для столбца "Поле"
         self.metadata_table.setColumnWidth(0, DEFAULT_COLUMN_WIDTHS['metadata'][0])
@@ -1240,8 +1237,8 @@ class EXRMetadataViewer(QMainWindow):
         splitter.addWidget(sequences_widget)
         splitter.addWidget(metadata_widget)
         
-        # Устанавливаем начальные размеры (верхняя часть - 40%, нижняя - 60%)
-        splitter.setSizes([400, 600])
+        # Устанавливаем начальные размеры (верхняя часть - 50%, нижняя - 50%)
+        splitter.setSizes([400, 400])
         
         # Поле прогресса
         self.progress_label = QLabel("Готов к работе")
@@ -1249,32 +1246,354 @@ class EXRMetadataViewer(QMainWindow):
         layout.addLayout(folder_layout)
         layout.addLayout(control_layout)
         layout.addWidget(self.progress_label)
-        layout.addWidget(splitter)  # Добавляем разделитель вместо отдельных таблиц
+        layout.addWidget(splitter)
         
         central_widget.setLayout(layout)
         
         # Изначально кнопки Стоп и Продолжить неактивны
         self.stop_btn.setEnabled(False)
         self.continue_btn.setEnabled(False)
-        
-        # Применяем выравнивание для таблицы последовательностей
-        self.apply_sequences_table_alignment()
 
-    def apply_sequences_table_alignment(self):
-        """Применяет выравнивание для столбцов таблицы последовательностей"""
-        # Устанавливаем выравнивание по правому краю для всех столбцов кроме первого
-        for col in range(1, self.sequences_table.columnCount()):
-            for row in range(self.sequences_table.rowCount()):
-                item = self.sequences_table.item(row, col)
-                if item:
-                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+    def build_tree_structure(self):
+        """Строит полную древовидную структуру папок и последовательностей"""
+        self.tree_structure = {}
+        root_path = self.folder_path.text()
         
-        # Устанавливаем выравнивание для заголовков
-        header = self.sequences_table.horizontalHeader()
-        for col in range(1, self.sequences_table.columnCount()):
-            header_item = self.sequences_table.horizontalHeaderItem(col)
-            if header_item:
-                header_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        # Создаем корневой узел
+        self.tree_structure[root_path] = {
+            'name': os.path.basename(root_path) if root_path else "Корневая папка",
+            'full_path': root_path,
+            'subfolders': {},
+            'sequences': [],
+            'files': []
+        }
+        
+        # Собираем все уникальные пути из последовательностей
+        all_paths = set()
+        for seq_info in self.sequences.values():
+            path = seq_info['path']
+            all_paths.add(path)
+            
+            # Добавляем все родительские пути
+            parent_path = path
+            while parent_path and parent_path.startswith(root_path) and parent_path != root_path:
+                all_paths.add(parent_path)
+                parent_path = os.path.dirname(parent_path)
+        
+        # Создаем узлы для всех путей
+        for path in sorted(all_paths):
+            if path not in self.tree_structure:
+                self.tree_structure[path] = {
+                    'name': os.path.basename(path),
+                    'full_path': path,
+                    'subfolders': {},
+                    'sequences': [],
+                    'files': []
+                }
+        
+        # Добавляем последовательности в соответствующие папки
+        for seq_info in self.sequences.values():
+            path = seq_info['path']
+            
+            # Убедимся, что у последовательности есть все необходимые поля
+            self.ensure_sequence_fields(seq_info)
+            
+            # Добавляем последовательность в папку
+            if path in self.tree_structure:
+                self.tree_structure[path]['sequences'].append(seq_info)
+        
+        # Строим иерархию подпапок
+        self.build_folder_hierarchy(root_path)
+
+
+    def build_folder_hierarchy(self, root_path):
+        """Строит иерархию подпапок для корневой папки"""
+        if root_path not in self.tree_structure:
+            return
+            
+        # Создаем копию ключей для безопасной итерации
+        all_paths = list(self.tree_structure.keys())
+        
+        for path in all_paths:
+            if path == root_path:
+                continue
+                
+            parent_path = os.path.dirname(path)
+            
+            # Если родитель существует в структуре, добавляем текущую папку как подпапку
+            if parent_path in self.tree_structure:
+                # Убедимся, что подпапка еще не добавлена
+                if path not in self.tree_structure[parent_path]['subfolders']:
+                    self.tree_structure[parent_path]['subfolders'][path] = self.tree_structure[path]
+
+
+    def build_subfolder_hierarchy(self, parent_path, parent_info):
+        """Рекурсивно строит иерархию для подпапки"""
+        # Находим все подпапки текущей папки
+        subfolders = {}
+        for path, folder_info in self.tree_structure.items():
+            if os.path.dirname(path) == parent_path:
+                subfolders[path] = folder_info
+                # Добавляем в подпапки родителя
+                parent_info['subfolders'][path] = folder_info
+                # Рекурсивно обрабатываем подпапки
+                self.build_subfolder_hierarchy(path, folder_info)
+
+    def ensure_sequence_fields(self, seq_info):
+        """Убеждается, что у последовательности есть все необходимые поля"""
+        if 'name' not in seq_info:
+            seq_info['name'] = os.path.basename(seq_info.get('first_file', 'Unknown'))
+        if 'display_name' not in seq_info:
+            seq_info['display_name'] = seq_info['name']
+        if 'frame_range' not in seq_info:
+            seq_info['frame_range'] = ''
+        if 'frame_count' not in seq_info:
+            seq_info['frame_count'] = len(seq_info.get('files', []))
+        if 'type' not in seq_info:
+            seq_info['type'] = 'unknown'
+
+
+    def create_parent_folders(self, path, root_path):
+        """Рекурсивно создает родительские папки в структуре"""
+        if path == root_path or not path.startswith(root_path):
+            return
+            
+        parent_path = os.path.dirname(path)
+        
+        # Если родительской папки нет, создаем ее рекурсивно
+        if parent_path not in self.tree_structure and parent_path.startswith(root_path):
+            self.create_parent_folders(parent_path, root_path)
+        
+        # Создаем текущую папку
+        if path not in self.tree_structure:
+            self.tree_structure[path] = {
+                'name': os.path.basename(path),
+                'full_path': path,
+                'subfolders': {},
+                'sequences': [],
+                'files': []
+            }
+
+
+    def populate_tree_widget(self):
+        """Заполняет дерево на основе древовидной структуры"""
+        self.sequences_tree.clear()
+        root_path = self.folder_path.text()
+        
+        if root_path not in self.tree_structure:
+            self.debug_logger.log(f"populate_tree_widget: корневой путь {root_path} не найден в tree_structure")
+            return
+            
+        root_info = self.tree_structure[root_path]
+        
+        # Создаем корневой элемент
+        root_item = QTreeWidgetItem(self.sequences_tree, [
+            root_info['name'], 
+            "Папка", 
+            "", 
+            str(len(root_info['sequences'])), 
+            root_path
+        ])
+        root_item.setData(0, Qt.UserRole, {"type": "folder", "path": root_path})
+        
+        # Добавляем подпапки и последовательности корневой папки
+        self.add_tree_children(root_item, root_info)
+        
+        # Раскрываем ВСЕ узлы дерева
+        self.expand_all_tree_items(root_item)
+        
+        # Логируем результат
+        total_sequences = sum(len(folder_info['sequences']) for folder_info in self.tree_structure.values())
+        total_folders = len(self.tree_structure)
+        self.debug_logger.log(f"populate_tree_widget: отображено {total_sequences} последовательностей в {total_folders} папках")
+        
+        # Дополнительная информация для отладки
+        expanded_count = self.count_expanded_items(root_item)
+        self.debug_logger.log(f"Раскрыто элементов дерева: {expanded_count}")
+
+    def expand_all_tree_items(self, item):
+        """Рекурсивно раскрывает все элементы дерева"""
+        item.setExpanded(True)
+        for i in range(item.childCount()):
+            child = item.child(i)
+            self.expand_all_tree_items(child)
+
+
+    def count_expanded_items(self, item):
+        """Рекурсивно подсчитывает количество раскрытых элементов"""
+        count = 1  # Текущий элемент
+        if item.isExpanded():
+            for i in range(item.childCount()):
+                count += self.count_expanded_items(item.child(i))
+        return count
+
+
+    def expand_all_tree_items_iterative(self, root_item):
+        """Раскрывает все элементы дерева итеративно (без рекурсии)"""
+        stack = [root_item]
+        while stack:
+            item = stack.pop()
+            item.setExpanded(True)
+            # Добавляем всех детей в стек
+            for i in range(item.childCount()):
+                stack.append(item.child(i))
+
+
+    def expand_first_levels(self, item, levels):
+        """Рекурсивно расширяет первые несколько уровней дерева"""
+        if levels <= 0:
+            return
+            
+        item.setExpanded(True)
+        for i in range(item.childCount()):
+            child = item.child(i)
+            child_data = child.data(0, Qt.UserRole)
+            if child_data and child_data.get('type') == 'folder':
+                self.expand_first_levels(child, levels - 1)
+
+
+    def add_tree_children(self, parent_item, folder_info):
+        """Рекурсивно добавляет дочерние элементы в дерево"""
+        # Сначала добавляем подпапки
+        for subfolder_path, subfolder_info in sorted(folder_info['subfolders'].items(), 
+                                                key=lambda x: x[1]['name'].lower()):
+            subfolder_item = QTreeWidgetItem(parent_item, [
+                subfolder_info['name'], 
+                "Папка", 
+                "", 
+                str(len(subfolder_info['sequences'])), 
+                subfolder_path
+            ])
+            subfolder_item.setData(0, Qt.UserRole, {"type": "folder", "path": subfolder_path})
+            
+            # Рекурсивно добавляем содержимое подпапки
+            self.add_tree_children(subfolder_item, subfolder_info)
+        
+        # Затем добавляем последовательности текущей папки
+        for seq_info in sorted(folder_info['sequences'], 
+                            key=lambda x: x.get('display_name', x.get('name', 'Unknown')).lower()):
+            display_name = seq_info.get('display_name', seq_info.get('name', 'Unknown'))
+            frame_range = seq_info.get('frame_range', '')
+            frame_count = seq_info.get('frame_count', 0)
+            seq_type = seq_info.get('type', 'unknown')
+            
+            seq_item = QTreeWidgetItem(parent_item, [
+                display_name,
+                seq_type,
+                frame_range,
+                str(frame_count),
+                seq_info.get('path', '')
+            ])
+            seq_item.setData(0, Qt.UserRole, {"type": "sequence", "info": seq_info})
+            
+            # Применяем цвет в зависимости от типа последовательности
+            self.color_tree_item_by_type(seq_item, seq_type)
+
+
+
+    def is_item_already_added(self, parent_item, path):
+        """Проверяет, был ли элемент с таким путем уже добавлен"""
+        for i in range(parent_item.childCount()):
+            child = parent_item.child(i)
+            child_data = child.data(0, Qt.UserRole)
+            if child_data and child_data.get('path') == path:
+                return True
+        return False
+    
+        
+
+
+    def color_tree_item_by_type(self, item, seq_type):
+        """Подкрашивает элемент дерева в зависимости от типа последовательности"""
+        color_data = self.sequence_colors.get(seq_type)
+        if color_data and isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
+            color = QColor(color_data['r'], color_data['g'], color_data['b'])
+        else:
+            # Цвет по умолчанию - серый
+            color = QColor(240, 240, 240)
+        
+        # Применяем цвет ко всем столбцам элемента
+        for col in range(self.sequences_tree.columnCount()):
+            item.setBackground(col, color)
+
+    def on_tree_item_selected(self):
+        """Обрабатывает выбор элемента в дереве"""
+        selected_items = self.sequences_tree.selectedItems()
+        if not selected_items:
+            return
+            
+        item = selected_items[0]
+        item_data = item.data(0, Qt.UserRole)
+        
+        if not item_data:
+            return
+            
+        if item_data['type'] == 'sequence':
+            # Для последовательности показываем метаданные первого файла
+            seq_info = item_data['info']
+            self.current_sequence_files = seq_info['files']
+            extension = seq_info['extension']
+            
+            if self.current_sequence_files:
+                self.display_metadata(self.current_sequence_files[0], extension)
+        else:
+            # Для папки очищаем метаданные
+            self.metadata_table.setRowCount(0)
+            self.current_sequence_files = []
+            self.current_metadata = {}
+
+    def show_tree_context_menu(self, position):
+        """Контекстное меню для дерева"""
+        index = self.sequences_tree.indexAt(position)
+        if not index.isValid():
+            return
+            
+        item = self.sequences_tree.itemFromIndex(index)
+        item_data = item.data(0, Qt.UserRole)
+        
+        if not item_data:
+            return
+            
+        menu = QMenu(self)
+        
+        if item_data['type'] == 'folder':
+            open_action = menu.addAction("Открыть в проводнике")
+            expand_all_action = menu.addAction("Раскрыть все вложенные")
+            collapse_all_action = menu.addAction("Свернуть все вложенные")
+            
+            open_action.triggered.connect(lambda: self.open_in_explorer(item_data['path']))
+            expand_all_action.triggered.connect(lambda: self.expand_folder_recursive(item))
+            collapse_all_action.triggered.connect(lambda: self.collapse_folder_recursive(item))
+        else:
+            # Для последовательности
+            seq_info = item_data['info']
+            open_action = menu.addAction("Открыть в проводнике")
+            open_action.triggered.connect(lambda: self.open_in_explorer(seq_info['path']))
+            
+            menu.addSeparator()
+            
+            color_action = menu.addAction(f"Изменить цвет для '{seq_info['type']}'")
+            color_action.triggered.connect(lambda: self.change_sequence_color(seq_info['type']))
+        
+        menu.exec_(self.sequences_tree.viewport().mapToGlobal(position))
+
+    def expand_folder_recursive(self, item):
+        """Рекурсивно раскрывает папку и все вложенные"""
+        item.setExpanded(True)
+        for i in range(item.childCount()):
+            child = item.child(i)
+            child_data = child.data(0, Qt.UserRole)
+            if child_data and child_data.get('type') == 'folder':
+                self.expand_folder_recursive(child)
+
+    def collapse_folder_recursive(self, item):
+        """Рекурсивно сворачивает папку и все вложенные"""
+        item.setExpanded(False)
+        for i in range(item.childCount()):
+            child = item.child(i)
+            child_data = child.data(0, Qt.UserRole)
+            if child_data and child_data.get('type') == 'folder':
+                self.collapse_folder_recursive(child)
 
     def toggle_logging(self, state):
         """Включает/выключает логирование"""
@@ -1310,23 +1629,33 @@ class EXRMetadataViewer(QMainWindow):
                 pass
             del self.sequence_finder
         
-        # СБРАСЫВАЕМ СОРТИРОВКУ ТАБЛИЦЫ
-        self.debug_logger.log("Сбрасываем сортировку таблицы...")
-        self.sequences_table.setSortingEnabled(False)  # Временно отключаем сортировку
-        
-        # АБСОЛЮТНАЯ очистка всех данных
+        # Очищаем все данные
         self.debug_logger.log("Очищаем данные...")
-        self.sequences_table.setRowCount(0)
+        self.sequences_tree.clear()
         self.metadata_table.setRowCount(0)
         self.sequences.clear()
         self.current_sequence_files = []
         self.current_metadata = {}
+        self.folder_items = {}  # Очищаем словарь папок
         
-        self.debug_logger.log(f"Таблица последовательностей очищена: {self.sequences_table.rowCount()} строк")
+        # Создаем корневой элемент
+        root_path = folder
+        root_name = os.path.basename(root_path) if root_path != "/" else root_path
+        self.root_item = QTreeWidgetItem(self.sequences_tree, [
+            root_name, 
+            "Папка", 
+            "", 
+            "0", 
+            root_path
+        ])
+        self.root_item.setData(0, Qt.UserRole, {"type": "folder", "path": root_path})
+        self.folder_items[root_path] = self.root_item
+        
+        # СРАЗУ РАСКРЫВАЕМ корневой элемент
+        self.root_item.setExpanded(True)
+        
+        self.debug_logger.log(f"Создан и раскрыт корневой элемент: {root_path}")
         self.debug_logger.log(f"Словарь sequences очищен: {len(self.sequences)} элементов")
-        
-        # ВКЛЮЧАЕМ СОРТИРОВКУ ОБРАТНО
-        self.sequences_table.setSortingEnabled(True)
         
         # Принудительно обновляем интерфейс
         QApplication.processEvents()
@@ -1338,7 +1667,7 @@ class EXRMetadataViewer(QMainWindow):
         self.progress_label.setText("Начинаем поиск...")
         QApplication.processEvents()
         
-        # Создаем новый поиск с новыми соединениями
+        # Создаем новый поиск
         self.debug_logger.log("Создаем новый поиск...")
         self.sequence_finder = SequenceFinder(folder, self.debug_logger)
         self.sequence_finder.sequence_found.connect(self.on_sequence_found)
@@ -1351,190 +1680,272 @@ class EXRMetadataViewer(QMainWindow):
         self.stop_btn.setEnabled(True)
         self.continue_btn.setEnabled(False)
 
+
+    def expand_all_tree_items(self):
+        """Раскрывает все элементы дерева"""
+        def expand_item(item):
+            item.setExpanded(True)
+            for i in range(item.childCount()):
+                expand_item(item.child(i))
+        
+        for i in range(self.sequences_tree.topLevelItemCount()):
+            expand_item(self.sequences_tree.topLevelItem(i))
+
+
+
     def stop_search(self):
         if hasattr(self, 'sequence_finder') and self.sequence_finder.isRunning():
-            # Временно отключаем сортировку
-            self.sequences_table.setSortingEnabled(False)
             self.sequence_finder.stop()
             self.stop_btn.setEnabled(False)
             self.continue_btn.setEnabled(True)
             self.progress_label.setText("Поиск приостановлен")
-            # Включаем сортировку обратно
-            self.sequences_table.setSortingEnabled(True)
 
     def continue_search(self):
         if hasattr(self, 'sequence_finder'):
-            # Временно отключаем сортировку
-            self.sequences_table.setSortingEnabled(False)
             self.sequence_finder.continue_search()
             self.sequence_finder.start()
             self.stop_btn.setEnabled(True)
             self.continue_btn.setEnabled(False)
-            # Включаем сортировку обратно
-            self.sequences_table.setSortingEnabled(True)
 
     def on_sequence_found(self, sequence_data):
-        """Добавляет найденную последовательность в таблицу"""
-        # ВРЕМЕННО ОТКЛЮЧАЕМ СОРТИРОВКУ ПРИ ДОБАВЛЕНИИ НОВЫХ ДАННЫХ
-        was_sorting_enabled = self.sequences_table.isSortingEnabled()
-        if was_sorting_enabled:
-            self.sequences_table.setSortingEnabled(False)
+        """Добавляет найденную последовательность в коллекцию и сразу в дерево"""
+        self.debug_logger.log(f"\n--- ПОЛУЧЕНА ПОСЛЕДОВАТЕЛЬНОСТЬ ---")
+        self.debug_logger.log(f"Данные: {sequence_data}")
         
-        try:
-            self.debug_logger.log(f"\n--- ПОЛУЧЕНА ПОСЛЕДОВАТЕЛЬНОСТЬ ---")
-            self.debug_logger.log(f"Данные: {sequence_data}")
-            
-            # Проверяем, что данные корректны
-            required_keys = ['path', 'name', 'frame_range', 'frame_count', 'files', 'extension', 'type']
-            missing_keys = [key for key in required_keys if key not in sequence_data]
-            if missing_keys:
-                self.debug_logger.log(f"ОШИБКА: Отсутствуют ключи: {missing_keys}", "ERROR")
-                return
-                
-            # Проверяем, что ключевые поля не пустые
-            empty_fields = []
-            for key in ['path', 'name', 'extension', 'frame_range']:
-                if not sequence_data.get(key):
-                    empty_fields.append(key)
-            
-            if empty_fields:
-                self.debug_logger.log(f"ОШИБКА: Пустые поля: {empty_fields}", "ERROR")
-                return
-                    
-            row = self.sequences_table.rowCount()
-            self.debug_logger.log(f"Добавляем строку #{row} в таблицу")
-            self.sequences_table.insertRow(row)
-            
-            # Путь
-            path_item = QTableWidgetItem(sequence_data['path'])
-            path_item.setFlags(path_item.flags() & ~Qt.ItemIsEditable)
-            path_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)  # Выравнивание по левому краю
-            self.sequences_table.setItem(row, 0, path_item)
-            self.debug_logger.log(f"  Столбец 0 (Путь): '{sequence_data['path']}'")
-            
-            # Имя последовательности
-            name_item = QTableWidgetItem(sequence_data['name'])
-            name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
-            name_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)  # Выравнивание по правому краю
-            self.sequences_table.setItem(row, 1, name_item)
-            self.debug_logger.log(f"  Столбец 1 (Имя): '{sequence_data['name']}'")
-            
-            # Расширение
-            ext_item = QTableWidgetItem(sequence_data['extension'])
-            ext_item.setFlags(ext_item.flags() & ~Qt.ItemIsEditable)
-            ext_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)  # Выравнивание по правому краю
-            self.sequences_table.setItem(row, 2, ext_item)
-            self.debug_logger.log(f"  Столбец 2 (Расширение): '{sequence_data['extension']}'")
-            
-            # Диапазон
-            range_item = QTableWidgetItem(sequence_data['frame_range'])
-            range_item.setFlags(range_item.flags() & ~Qt.ItemIsEditable)
-            range_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)  # Выравнивание по правому краю
-            self.sequences_table.setItem(row, 3, range_item)
-            self.debug_logger.log(f"  Столбец 3 (Диапазон): '{sequence_data['frame_range']}'")
-            
-            # Количество кадров
-            count_item = QTableWidgetItem()
-            count_item.setData(Qt.DisplayRole, sequence_data['frame_count'])
-            count_item.setFlags(count_item.flags() & ~Qt.ItemIsEditable)
-            count_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)  # Выравнивание по правому краю
-            self.sequences_table.setItem(row, 4, count_item)
-            self.debug_logger.log(f"  Столбец 4 (Количество): '{sequence_data['frame_count']}'")
-            
-            # Сохраняем тип и файлы последовательности
-            key = f"{sequence_data['path']}/{sequence_data['name']}"
-            self.sequences[key] = {
-                'files': sequence_data['files'],
-                'type': sequence_data['type'],
-                'extension': sequence_data['extension']
-            }
-            self.debug_logger.log(f"  Сохранено в словарь sequences с ключом: '{key}'")
-            
-            # Подкрашиваем строку в зависимости от типа
-            self.color_row_by_type(row, sequence_data['type'])
-            self.debug_logger.log(f"  Строка окрашена по типу: '{sequence_data['type']}'")
-            
-            # Проверяем, что все ячейки заполнены
-            for col in range(5):
-                item = self.sequences_table.item(row, col)
-                if item is None:
-                    self.debug_logger.log(f"  ВНИМАНИЕ: Ячейка ({row}, {col}) пустая!", "WARNING")
-                else:
-                    self.debug_logger.log(f"  Ячейка ({row}, {col}): '{item.text()}'")
-            
-            self.debug_logger.log(f"--- КОНЕЦ ДОБАВЛЕНИЯ ПОСЛЕДОВАТЕЛЬНОСТИ ---\n")
+        # Проверяем, что данные корректны и добавляем недостающие поля
+        required_keys = ['path', 'name', 'frame_range', 'frame_count', 'files', 'extension', 'type']
         
-        finally:
-            # ВОССТАНАВЛИВАЕМ СОРТИРОВКУ
-            if was_sorting_enabled:
-                self.sequences_table.setSortingEnabled(True)
+        # Добавляем недостающие поля
+        if 'name' not in sequence_data:
+            sequence_data['name'] = os.path.basename(sequence_data.get('first_file', 'Unknown'))
+        if 'display_name' not in sequence_data:
+            sequence_data['display_name'] = sequence_data['name']
+        if 'frame_range' not in sequence_data:
+            sequence_data['frame_range'] = ''
+        if 'frame_count' not in sequence_data:
+            sequence_data['frame_count'] = len(sequence_data.get('files', []))
+        if 'type' not in sequence_data:
+            sequence_data['type'] = 'unknown'
+        
+        # Проверяем наличие обязательных ключей
+        missing_keys = [key for key in required_keys if key not in sequence_data]
+        if missing_keys:
+            self.debug_logger.log(f"ОШИБКА: Отсутствуют ключи: {missing_keys}", "ERROR")
+            return
+            
+        # Проверяем, что ключевые поля не пустые
+        empty_fields = []
+        for key in ['path', 'name', 'extension']:
+            if not sequence_data.get(key):
+                empty_fields.append(key)
+        
+        if empty_fields:
+            self.debug_logger.log(f"ОШИБКА: Пустые поля: {empty_fields}", "ERROR")
+            return
+            
+        # Сохраняем последовательность
+        key = f"{sequence_data['path']}/{sequence_data['name']}"
+        self.sequences[key] = sequence_data
+        self.debug_logger.log(f"  Сохранено в словарь sequences с ключом: '{key}'")
+        
+        # НЕМЕДЛЕННО добавляем в дерево
+        self.add_sequence_to_tree(sequence_data)
+        
+        self.debug_logger.log(f"--- КОНЕЦ ДОБАВЛЕНИЯ ПОСЛЕДОВАТЕЛЬНОСТИ ---\n")
 
-    def color_row_by_type(self, row, seq_type):
-        """Подкрашивает строку таблицы в зависимости от типа последовательности"""
-        # Получаем цвет из настроек
-        color_data = self.sequence_colors.get(seq_type)
-        if color_data and isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
-            color = QColor(color_data['r'], color_data['g'], color_data['b'])
-        else:
-            # Цвет по умолчанию - серый
-            color = QColor(240, 240, 240)
+
+    def add_sequence_to_tree(self, seq_info):
+        """Добавляет последовательность в дерево в реальном времени с сохранением структуры папок"""
+        try:
+            seq_path = seq_info['path']
+            display_name = seq_info.get('display_name', seq_info.get('name', 'Unknown'))
+            frame_range = seq_info.get('frame_range', '')
+            frame_count = seq_info.get('frame_count', 0)
+            seq_type = seq_info.get('type', 'unknown')
+            
+            self.debug_logger.log(f"add_sequence_to_tree: Добавляем '{display_name}' в папку '{seq_path}'")
+            
+            # Находим или создаем родительскую папку для последовательности
+            parent_item = self.find_or_create_folder_item(seq_path)
+            
+            # Создаем элемент для последовательности
+            seq_item = QTreeWidgetItem([
+                display_name,
+                seq_type,
+                frame_range,
+                str(frame_count),
+                seq_path
+            ])
+            seq_item.setData(0, Qt.UserRole, {"type": "sequence", "info": seq_info})
+            
+            # Применяем цвет в зависимости от типа последовательности
+            self.color_tree_item_by_type(seq_item, seq_type)
+            
+            # Добавляем последовательность в родительскую папку
+            parent_item.addChild(seq_item)
+            
+            # Обновляем счетчик файлов в папке
+            self.update_folder_count(parent_item)
+            
+            # РАСКРЫВАЕМ всю иерархию до корня для этой последовательности
+            self.expand_path_to_root(parent_item)
+            
+            self.debug_logger.log(f"Успешно добавлено в дерево: {display_name}")
+            
+        except Exception as e:
+            self.debug_logger.log(f"Ошибка при добавлении в дерево: {str(e)}", "ERROR")
+            import traceback
+            self.debug_logger.log(f"Трассировка: {traceback.format_exc()}", "ERROR")
+
+    def expand_path_to_root(self, item):
+        """Рекурсивно раскрывает все родительские элементы до корня"""
+        current_item = item
+        while current_item is not None:
+            current_item.setExpanded(True)
+            current_item = current_item.parent()
+
+
+    def find_or_create_folder_item(self, folder_path):
+        """Находит или создает элементы папок для указанного пути"""
+        # Если папка уже существует в словаре, возвращаем ее
+        if folder_path in self.folder_items:
+            item = self.folder_items[folder_path]
+            # РАСКРЫВАЕМ существующую папку
+            item.setExpanded(True)
+            return item
         
-        # Применяем цвет ко всей строке
-        for col in range(self.sequences_table.columnCount()):
-            item = self.sequences_table.item(row, col)
-            if item:
-                item.setBackground(color)
+        self.debug_logger.log(f"find_or_create_folder_item: Создаем папку '{folder_path}'")
+        
+        # Разбиваем путь на компоненты
+        parts = folder_path.split(os.sep)
+        current_path = ""
+        parent_item = self.root_item
+        
+        # Строим путь от корня до целевой папки
+        for part in parts:
+            if not part:  # Пропускаем пустые части
+                continue
+                
+            # Обновляем текущий путь
+            if current_path:
+                current_path = os.path.join(current_path, part)
+            else:
+                current_path = part
+            
+            # Если это корневая папка поиска, пропускаем (она уже создана)
+            if current_path == self.folder_path.text():
+                continue
+            
+            # Если папка еще не создана, создаем ее
+            if current_path not in self.folder_items:
+                folder_name = part
+                folder_item = QTreeWidgetItem([
+                    folder_name,
+                    "Папка",
+                    "",
+                    "0",
+                    current_path
+                ])
+                folder_item.setData(0, Qt.UserRole, {"type": "folder", "path": current_path})
+                
+                # Добавляем в родительскую папку
+                parent_item.addChild(folder_item)
+                self.folder_items[current_path] = folder_item
+                
+                # СРАЗУ РАСКРЫВАЕМ новую папку
+                folder_item.setExpanded(True)
+                
+                self.debug_logger.log(f"  Создана и раскрыта папка: '{folder_name}' -> '{current_path}'")
+            
+            # Обновляем родительский элемент для следующей итерации
+            parent_item = self.folder_items[current_path]
+            
+            # Убедимся, что родительская папка тоже раскрыта
+            if hasattr(parent_item, 'setExpanded'):
+                parent_item.setExpanded(True)
+        
+        return parent_item
+    
+
+    def update_folder_count(self, folder_item):
+        """Обновляет счетчик файлов в папке"""
+        try:
+            folder_data = folder_item.data(0, Qt.UserRole)
+            if folder_data and folder_data.get('type') == 'folder':
+                folder_path = folder_data.get('path')
+                
+                # Подсчитываем последовательности в этой папке
+                count = 0
+                for seq_info in self.sequences.values():
+                    if seq_info['path'] == folder_path:
+                        count += 1
+                
+                # Обновляем отображение счетчика
+                folder_item.setText(3, str(count))
+                
+                # Рекурсивно обновляем родительские папки
+                parent = folder_item.parent()
+                if parent:
+                    self.update_folder_count(parent)
+                else:
+                    # Если это корневой элемент, обновляем его
+                    root_count = sum(1 for seq_info in self.sequences.values())
+                    folder_item.setText(3, str(root_count))
+                    
+        except Exception as e:
+            self.debug_logger.log(f"Ошибка при обновлении счетчика папки: {str(e)}", "ERROR")
+
 
     def update_progress(self, message):
         self.progress_label.setText(message)
 
+    def expand_all_tree_items(self):
+        """Раскрывает все элементы дерева"""
+        def expand_item(item):
+            item.setExpanded(True)
+            for i in range(item.childCount()):
+                expand_item(item.child(i))
+        
+        for i in range(self.sequences_tree.topLevelItemCount()):
+            expand_item(self.sequences_tree.topLevelItem(i))
+
+# Можно вызвать этот метод в on_search_finished для полного раскрытия после завершения поиска
     def on_search_finished(self):
-        self.progress_label.setText("Поиск завершен")
+        """Обрабатывает завершение поиска"""
+        try:
+            # Обновляем статистику
+            sequence_count = len(self.sequences)
+            folder_count = len(self.folder_items)
+            
+            self.progress_label.setText(f"Поиск завершен. Найдено {sequence_count} последовательностей в {folder_count} папках")
+            self.debug_logger.log(f"Поиск завершен. Найдено {sequence_count} последовательностей в {folder_count} папках")
+            
+            # Дополнительная отладочная информация
+            total_tree_items = self.count_tree_items(self.root_item)
+            self.debug_logger.log(f"Всего элементов в дереве: {total_tree_items}")
+            
+            # РАСКРЫВАЕМ ВСЕ ДЕРЕВО после завершения поиска
+            self.expand_all_tree_items()
+            
+        except Exception as e:
+            self.debug_logger.log(f"Ошибка при завершении поиска: {str(e)}", "ERROR")
+            self.progress_label.setText(f"Ошибка при завершении поиска: {str(e)}")
+        
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.continue_btn.setEnabled(False)
         
-        # ПРИНУДИТЕЛЬНО ОБНОВЛЯЕМ ОТОБРАЖЕНИЕ ТАБЛИЦЫ
-        self.sequences_table.viewport().update()
-        
-        # Применяем выравнивание после завершения поиска
-        self.apply_sequences_table_alignment()
-        
-        self.debug_logger.log(f"=== ПОИСК ЗАВЕРШЕН ===")
-        self.debug_logger.log(f"Всего последовательностей в таблице: {self.sequences_table.rowCount()}")
-        self.debug_logger.log(f"Всего последовательностей в словаре: {len(self.sequences)}")
-        
         # Принудительно обновляем интерфейс
         QApplication.processEvents()
 
-    def on_sequence_selected(self):
-        current_row = self.sequences_table.currentRow()
-        if current_row < 0:
-            return
-        
-        # Получаем данные из выбранной строки
-        path_item = self.sequences_table.item(current_row, 0)
-        name_item = self.sequences_table.item(current_row, 1)
-        ext_item = self.sequences_table.item(current_row, 2)
-        
-        if not path_item or not name_item or not ext_item:
-            return
-            
-        path = path_item.text()
-        name = name_item.text()
-        extension = ext_item.text()
-        
-        key = f"{path}/{name}"
-        if key in self.sequences and self.sequences[key]['files']:
-            self.current_sequence_files = self.sequences[key]['files']
-            seq_type = self.sequences[key]['type']
-            
-            # Для всех файлов отображаем метаданные, если они доступны
-            if self.current_sequence_files:
-                self.display_metadata(self.current_sequence_files[0], extension)
-            else:
-                # Очищаем таблицу метаданных
-                self.metadata_table.setRowCount(0)
+
+    def count_tree_items(self, item):
+        """Рекурсивно подсчитывает количество элементов в дереве"""
+        count = 1  # Текущий элемент
+        for i in range(item.childCount()):
+            count += self.count_tree_items(item.child(i))
+        return count
+
 
     def display_metadata(self, file_path, extension):
         """Отображает метаданные для файла"""
@@ -1609,8 +2020,6 @@ class EXRMetadataViewer(QMainWindow):
                 except Exception as e:
                     self.current_metadata["Ошибка чтения"] = f"Не удалось прочитать метаданные изображения: {str(e)}"
                     self.debug_logger.log(f"Ошибка чтения изображения для {file_path}: {str(e)}", "ERROR")
-            
-            # ==================== ДОБАВЛЯЕМ PYMEDIAINFO ДЛЯ МЕДИАФАЙЛОВ ====================
             
             # Используем pymediainfo для видео, аудио и других медиафайлов
             if PYMEDIAINFO_AVAILABLE:
@@ -1764,116 +2173,6 @@ class EXRMetadataViewer(QMainWindow):
             self.debug_logger.log(f"Ошибка форматирования EXIF тега {tag}: {str(e)}", "WARNING")
             return str(value)
 
-
-    def show_sequences_table_context_menu(self, position):
-        """Контекстное меню для таблицы последовательностей"""
-        index = self.sequences_table.indexAt(position)
-        if not index.isValid():
-            return
-            
-        row = index.row()
-        path_item = self.sequences_table.item(row, 0)
-        name_item = self.sequences_table.item(row, 1)
-        
-        if path_item and name_item:
-            path = path_item.text()
-            name = name_item.text()
-            
-            key = f"{path}/{name}"
-            if key in self.sequences:
-                seq_type = self.sequences[key]['type']
-                
-                menu = QMenu(self)
-                open_action = menu.addAction("Открыть в проводнике")
-                menu.addSeparator()
-                color_action = menu.addAction(f"Изменить цвет для '{seq_type}'")
-                
-                action = menu.exec_(self.sequences_table.viewport().mapToGlobal(position))
-                
-                if action == open_action:
-                    self.open_in_explorer(path)
-                elif action == color_action:
-                    self.change_sequence_color(seq_type)
-
-    def change_sequence_color(self, seq_type):
-        """Изменяет цвет типа последовательности через контекстное меню"""
-        current_color_data = self.sequence_colors.get(seq_type)
-        current_color = QColor(200, 200, 255)  # Цвет по умолчанию
-        
-        if current_color_data and isinstance(current_color_data, dict) and 'r' in current_color_data and 'g' in current_color_data and 'b' in current_color_data:
-            current_color = QColor(current_color_data['r'], current_color_data['g'], current_color_data['b'])
-        
-        color = QColorDialog.getColor(current_color, self, f"Выберите цвет для типа '{seq_type}'")
-        if color.isValid():
-            self.sequence_colors[seq_type] = {
-                'r': color.red(),
-                'g': color.green(),
-                'b': color.blue()
-            }
-            
-            self.save_settings()
-            self.update_sequences_colors()
-
-    def update_sequences_colors(self):
-        """Обновляет цвета в таблице последовательностей"""
-        for row in range(self.sequences_table.rowCount()):
-            path_item = self.sequences_table.item(row, 0)
-            name_item = self.sequences_table.item(row, 1)
-            
-            if path_item and name_item:
-                path = path_item.text()
-                name = name_item.text()
-                
-                key = f"{path}/{name}"
-                if key in self.sequences:
-                    seq_type = self.sequences[key]['type']
-                    self.color_row_by_type(row, seq_type)
-
-    def open_in_explorer(self, path):
-        """Открывает папку в проводнике"""
-        if os.path.exists(path):
-            try:
-                if platform.system() == "Windows":
-                    os.startfile(path)
-                elif platform.system() == "Darwin":
-                    subprocess.Popen(["open", path])
-                else:
-                    subprocess.Popen(["xdg-open", path])
-            except Exception as e:
-                QMessageBox.warning(self, "Ошибка", f"Не удалось открыть папку: {str(e)}")
-        else:
-            QMessageBox.warning(self, "Ошибка", f"Папка не существует: {path}")
-
-    def filter_metadata(self):
-        """Фильтрует таблицу метаданных по введенному тексту"""
-        search_text = self.search_input.text().lower().strip()
-        
-        # Если поле поиска пустое, показываем все строки
-        if not search_text:
-            for row in range(self.metadata_table.rowCount()):
-                self.metadata_table.setRowHidden(row, False)
-            return
-        
-        # Иначе скрываем строки, которые не содержат искомый текст
-        for row in range(self.metadata_table.rowCount()):
-            field_item = self.metadata_table.item(row, 0)
-            value_item = self.metadata_table.item(row, 1)
-            
-            field_text = field_item.text().lower() if field_item else ""
-            value_text = value_item.text().lower() if value_item else ""
-            
-            # Показываем строку, если текст найден в поле или значении
-            if search_text in field_text or search_text in value_text:
-                self.metadata_table.setRowHidden(row, False)
-            else:
-                self.metadata_table.setRowHidden(row, True)
-
-    def clear_search(self):
-        """Очищает поле поиска и показывает все строки"""
-        self.search_input.clear()
-        for row in range(self.metadata_table.rowCount()):
-            self.metadata_table.setRowHidden(row, False)
-
     def format_metadata_value(self, value):
         """Форматирует значение метаданных, убирая лишние символы"""
         # Обработка специальных типов Imath
@@ -1977,6 +2276,88 @@ class EXRMetadataViewer(QMainWindow):
         
         # Для всех остальных типов используем строковое представление
         return str(value)
+
+    def filter_metadata(self):
+        """Фильтрует таблицу метаданных по введенному тексту"""
+        search_text = self.search_input.text().lower().strip()
+        
+        # Если поле поиска пустое, показываем все строки
+        if not search_text:
+            for row in range(self.metadata_table.rowCount()):
+                self.metadata_table.setRowHidden(row, False)
+            return
+        
+        # Иначе скрываем строки, которые не содержат искомый текст
+        for row in range(self.metadata_table.rowCount()):
+            field_item = self.metadata_table.item(row, 0)
+            value_item = self.metadata_table.item(row, 1)
+            
+            field_text = field_item.text().lower() if field_item else ""
+            value_text = value_item.text().lower() if value_item else ""
+            
+            # Показываем строку, если текст найден в поле или значении
+            if search_text in field_text or search_text in value_text:
+                self.metadata_table.setRowHidden(row, False)
+            else:
+                self.metadata_table.setRowHidden(row, True)
+
+    def clear_search(self):
+        """Очищает поле поиска и показывает все строки"""
+        self.search_input.clear()
+        for row in range(self.metadata_table.rowCount()):
+            self.metadata_table.setRowHidden(row, False)
+
+    def open_in_explorer(self, path):
+        """Открывает папку в проводнике"""
+        if os.path.exists(path):
+            try:
+                if platform.system() == "Windows":
+                    os.startfile(path)
+                elif platform.system() == "Darwin":
+                    subprocess.Popen(["open", path])
+                else:
+                    subprocess.Popen(["xdg-open", path])
+            except Exception as e:
+                QMessageBox.warning(self, "Ошибка", f"Не удалось открыть папку: {str(e)}")
+        else:
+            QMessageBox.warning(self, "Ошибка", f"Папка не существует: {path}")
+
+    def change_sequence_color(self, seq_type):
+        """Изменяет цвет типа последовательности через контекстное меню"""
+        current_color_data = self.sequence_colors.get(seq_type)
+        current_color = QColor(200, 200, 255)  # Цвет по умолчанию
+        
+        if current_color_data and isinstance(current_color_data, dict) and 'r' in current_color_data and 'g' in current_color_data and 'b' in current_color_data:
+            current_color = QColor(current_color_data['r'], current_color_data['g'], current_color_data['b'])
+        
+        color = QColorDialog.getColor(current_color, self, f"Выберите цвет для типа '{seq_type}'")
+        if color.isValid():
+            self.sequence_colors[seq_type] = {
+                'r': color.red(),
+                'g': color.green(),
+                'b': color.blue()
+            }
+            
+            self.save_settings()
+            self.update_sequences_colors()
+
+    def update_sequences_colors(self):
+        """Обновляет цвета в дереве последовательностей"""
+        # Проходим по всем элементам дерева и обновляем цвета
+        for i in range(self.sequences_tree.topLevelItemCount()):
+            top_item = self.sequences_tree.topLevelItem(i)
+            self.update_tree_item_colors(top_item)
+
+    def update_tree_item_colors(self, item):
+        """Рекурсивно обновляет цвета элементов дерева"""
+        item_data = item.data(0, Qt.UserRole)
+        if item_data and item_data['type'] == 'sequence':
+            seq_type = item_data['info']['type']
+            self.color_tree_item_by_type(item, seq_type)
+        
+        # Рекурсивно обрабатываем дочерние элементы
+        for i in range(item.childCount()):
+            self.update_tree_item_colors(item.child(i))
 
     def apply_field_color(self, row, field_name):
         """Применяет цвет к полю в таблице"""
@@ -2127,8 +2508,8 @@ class EXRMetadataViewer(QMainWindow):
             return
         
         # Полностью перерисовываем таблицу с новыми цветами
-        if self.sequences_table.currentRow() >= 0:
-            self.on_sequence_selected()
+        if self.sequences_tree.selectedItems():
+            self.on_tree_item_selected()
 
     def open_settings(self):
         dialog = SettingsDialog(self)
