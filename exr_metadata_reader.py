@@ -208,16 +208,9 @@ class SequenceFinder(QThread):
                 # Обрабатываем все файлы, независимо от расширения
                 self.progress_update.emit(f"Обработка: {file}")
                 
-                # Для видеофайлов не извлекаем информацию о последовательности
-                if ext in self.video_extensions:
-                    # Для видеофайлов используем полное имя как базовое и None как номер кадра
-                    base_name = os.path.splitext(file)[0]  # Полное имя без расширения
-                    frame_num = None
-                    self.debug_logger.log(f"  Видеофайл: {file} -> base_name: {base_name}, frame_num: None")
-                else:
-                    # Для не-видео файлов извлекаем базовое имя и номер кадра
-                    base_name, frame_num = self.extract_sequence_info(file)
-                    self.debug_logger.log(f"  Файл: {file} -> base_name: {base_name}, frame_num: {frame_num}")
+                # Для ВСЕХ файлов извлекаем базовое имя и номер кадра
+                base_name, frame_num = self.extract_sequence_info(file)
+                self.debug_logger.log(f"  Файл: {file} -> base_name: {base_name}, frame_num: {frame_num}")
                 
                 files_by_extension[ext].append((base_name, frame_num, file_path, file))
         
@@ -306,18 +299,44 @@ class SequenceFinder(QThread):
                     self.debug_logger.log(f"      Создана видео-последовательность: {unique_key}")
                 continue  # Переходим к следующему расширению
             
-            # Для не-видео файлов используем старую логику группировки
+            # Для НЕ-видео файлов используем логику группировки по базовому имени
             files_by_base_name = defaultdict(list)
             for base_name, frame_num, file_path, file_name in files_list:
-                files_by_base_name[base_name].append((frame_num, file_path, file_name))
-                self.debug_logger.log(f"    Файл {file_name} -> базовая группа: '{base_name}', номер кадра: {frame_num}")
+                # Для группировки используем base_name только если есть frame_num
+                # Если frame_num None, то это одиночный файл
+                if frame_num is not None:
+                    group_key = base_name
+                else:
+                    # Для файлов без номера кадра используем полное имя как ключ группы
+                    group_key = file_name
+                files_by_base_name[group_key].append((frame_num, file_path, file_name))
+                self.debug_logger.log(f"    Файл {file_name} -> базовая группа: '{group_key}', номер кадра: {frame_num}")
             
-            # Формируем последовательности для каждого базового имени
-            for base_name, files in files_by_base_name.items():
-                self.debug_logger.log(f"    Формируем последовательность для базового имени: '{base_name}'")
+            # Формируем последовательности для каждой группы
+            for group_key, files in files_by_base_name.items():
+                self.debug_logger.log(f"    Формируем последовательность для группы: '{group_key}'")
                 self.debug_logger.log(f"      Файлов в группе: {len(files)}")
                 
-                if len(files) >= 1:
+                if len(files) == 1:
+                    # Одиночный файл
+                    frame_num, file_path, file_name = files[0]
+                    unique_key = f"{directory}/{file_name}"
+                    
+                    sequences[unique_key] = {
+                        'files': [file_path],
+                        'frames': [frame_num] if frame_num is not None else [],
+                        'first_file': file_path,
+                        'frame_range': "одиночный файл",
+                        'path': directory,
+                        'display_name': file_name,
+                        'extension': ext,
+                        'type': f'single_{ext[1:]}',
+                        'frame_count': 1
+                    }
+                    self.debug_logger.log(f"      Создан одиночный файл: {unique_key}")
+                    
+                else:
+                    # Группа файлов - потенциальная последовательность
                     # Сортируем файлы по номеру кадра
                     files.sort(key=lambda x: x[0] if x[0] is not None else -1)
                     frame_numbers = [f[0] for f in files if f[0] is not None]  # Только валидные номера кадров
@@ -327,11 +346,12 @@ class SequenceFinder(QThread):
                     self.debug_logger.log(f"      Файлы: {file_names}")
                     self.debug_logger.log(f"      Номера кадров: {frame_numbers}")
                     
-                    # Определяем тип последовательности
+                    # Проверяем, является ли это последовательностью
                     if self.is_sequence(frame_numbers):
+                        # Это последовательность
                         seq_type = f'sequence_{ext[1:]}'
                         
-                        # Используем реальные номера кадров для диапазона
+                        # Формируем диапазон кадров
                         if frame_numbers:
                             min_frame = min(frame_numbers)
                             max_frame = max(frame_numbers)
@@ -344,19 +364,18 @@ class SequenceFinder(QThread):
                                 frame_range = f"{min_frame:0{max_digits}d}-{max_frame:0{max_digits}d}"
                             else:
                                 frame_range = f"{min_frame}-{max_frame}"
-                                
-                            self.debug_logger.log(f"      Диапазон кадров: {min_frame}..{max_frame} -> '{frame_range}'")
                         else:
                             frame_range = "одиночный файл"
                     else:
-                        seq_type = f'single_{ext[1:]}'
-                        frame_range = "одиночный файл"
+                        # Это не последовательность, а группа одиночных файлов
+                        seq_type = f'group_{ext[1:]}'
+                        frame_range = "группа файлов"
                     
-                    # Имя последовательности - только имя первого файла с расширением
+                    # Имя последовательности - имя первого файла
                     display_name = file_names[0]
                     
-                    # Используем путь + имя файла как ключ для уникальности
-                    unique_key = f"{directory}/{file_names[0]}"
+                    # Используем путь + имя группы как ключ для уникальности
+                    unique_key = f"{directory}/{group_key}"
                     
                     sequences[unique_key] = {
                         'files': file_paths,
@@ -370,7 +389,7 @@ class SequenceFinder(QThread):
                         'frame_count': len(files)
                     }
                     
-                    self.debug_logger.log(f"      Сформирована последовательность:")
+                    self.debug_logger.log(f"      Сформирована последовательность/группа:")
                     self.debug_logger.log(f"        Ключ: {unique_key}")
                     self.debug_logger.log(f"        Имя: {display_name}")
                     self.debug_logger.log(f"        Расширение: {ext}")
@@ -382,7 +401,6 @@ class SequenceFinder(QThread):
         return sequences
 
 
-
     def extract_sequence_info(self, filename):
         """Извлекает базовое имя и номер кадра из имени файла"""
         # Убираем расширение
@@ -390,40 +408,34 @@ class SequenceFinder(QThread):
         
         self.debug_logger.log(f"extract_sequence_info: Обрабатываем файл '{filename}' -> '{name_without_ext}'")
         
-        # ОБНОВЛЕННЫЙ список паттернов с улучшенной поддержкой различных форматов
+        # УЛУЧШЕННЫЙ список паттернов для лучшего распознавания DNG и других форматов
         patterns = [
-            # 1. ПАТТЕРНЫ ДЛЯ СТАНДАРТНЫХ НОМЕРОВ КАДРОВ (ВЫСОКИЙ ПРИОРИТЕТ)
+            # 1. ПАТТЕРНЫ ДЛЯ ФОРМАТА ТИПА D003C0015_250121_8H3408 (DNG файлы)
             
-            # 1.1. Числа в самом конце имени (перед расширением) - самый распространенный случай
-            r'^(.+?)(\d{1,8})$',
+            # 1.1. Паттерн для формата с префиксом и 4+ цифрами перед датой
+            r'^(.+?[A-Z])(\d{4,})_\d+_.+$',
             
-            # 1.2. Числа перед точкой или разделителем в конце имени (name.0001, name_0001)
-            r'^(.+?)[._ -](\d{1,8})$',
-            
-            # 1.3. Числа с фиксированной длиной в конце (типичные номера кадров)
-            r'^(.+?)(\d{4,8})([^0-9]*)$',
-            
-            # 2. ПАТТЕРНЫ ДЛЯ ФОРМАТА ТИПА D003C0015_250121_8H3408
-            
-            # 2.1. Паттерн для формата D003C0015 - число после буквы C (4+ цифры)
-            r'^(.+?[A-Z])(\d{4,})_.*$',
-            
-            # 2.2. Паттерн для чисел после определенных префиксов (C, A, R, S, F и т.д.)
+            # 1.2. Паттерн для чисел после определенных префиксов (C, A, R, S, F и т.д.)
             r'^(.+?[ACFRS])(\d{3,5})_.*$',
             
-            # 2.3. Паттерн для чисел, окруженных нецифровыми символами (общий случай)
+            # 2. ПАТТЕРНЫ ДЛЯ СТАНДАРТНЫХ НОМЕРОВ КАДРОВ (ВЫСОКИЙ ПРИОРИТЕТ)
+            
+            # 2.1. Числа в самом конце имени (перед расширением) - самый распространенный случай
+            r'^(.+?)(\d{1,8})$',
+            
+            # 2.2. Числа перед точкой или разделителем в конце имени (name.0001, name_0001)
+            r'^(.+?)[._ -](\d{1,8})$',
+            
+            # 2.3. Числа с фиксированной длиной в конце (типичные номера кадров)
+            r'^(.+?)(\d{4,8})([^0-9]*)$',
+            
+            # 3. ПАТТЕРНЫ ДЛЯ СЛОЖНЫХ ФОРМАТОВ
+            
+            # 3.1. Паттерн для чисел, окруженных нецифровыми символами
             r'^(.+?[^0-9])(\d{3,5})([^0-9].*)$',
-            
-            # 3. ПАТТЕРНЫ ДЛЯ СЛОЖНЫХ ФОРМАТОВ С ДАТАМИ И ДОП. ИНФОРМАЦИЕЙ
-            
-            # 3.1. Паттерн для формата с датой: имя_дата_дополнительная_информация_номер
-            r'^(.+?_\d{6}_[A-Z0-9]+?)(\d{3,4})$',
-            
-            # 3.2. Паттерн для извлечения последней группы цифр в сложных именах
-            r'^(.+?[^0-9])(\d{3,4})$',
         ]
         
-        # Сначала пробуем все паттерны по порядку (от высокого к низкому приоритету)
+        # Сначала пробуем все паттерны по порядку
         for i, pattern in enumerate(patterns):
             match = re.match(pattern, name_without_ext)
             if match:
@@ -437,30 +449,16 @@ class SequenceFinder(QThread):
                 except ValueError:
                     continue
         
-        # 4. РЕЗЕРВНЫЕ ПАТТЕРНЫ (если основные не сработали)
-        
-        # 4.1. Ищем любые числа в имени, предпочтение отдаем числам в конце
+        # РЕЗЕРВНЫЕ ПАТТЕРНЫ
         all_numbers = re.findall(r'\d+', name_without_ext)
         if all_numbers:
-            # Пробуем сначала числа в конце имени
-            for number in reversed(all_numbers):
-                # Проверяем, находится ли число в конце имени
-                if name_without_ext.endswith(number):
-                    base_name = name_without_ext[:-len(number)]
-                    try:
-                        frame_num = int(number)
-                        self.debug_logger.log(f"extract_sequence_info: '{filename}' -> fallback end number: base_name='{base_name}', frame_num={frame_num}")
-                        return base_name, frame_num
-                    except ValueError:
-                        continue
-            
-            # Если не нашли числа в конце, ищем числа с 3-6 цифрами (типичные номера кадров)
+            # Ищем числа с 3-6 цифрами (типичные номера кадров)
             frame_candidates = []
             for number in all_numbers:
-                if 3 <= len(number) <= 6:  # Оптимальный диапазон для номеров кадров
+                if 3 <= len(number) <= 6:
                     frame_candidates.append(number)
             
-            # Если нашли подходящие кандидаты, берем ПЕРВЫЙ (самый левый) - это важно для формата D003C0015
+            # Берем ПЕРВОЕ подходящее число (самое левое)
             if frame_candidates:
                 frame_num_str = frame_candidates[0]
                 frame_pos = name_without_ext.find(frame_num_str)
@@ -473,14 +471,14 @@ class SequenceFinder(QThread):
                     except ValueError:
                         pass
             
-            # Если не нашли подходящих по длине, берем последнее число
-            last_number = all_numbers[-1]
-            last_number_pos = name_without_ext.rfind(last_number)
-            if last_number_pos > 0:
-                base_name = name_without_ext[:last_number_pos]
+            # Если не нашли подходящих по длине, берем первое число
+            first_number = all_numbers[0]
+            first_number_pos = name_without_ext.find(first_number)
+            if first_number_pos > 0:
+                base_name = name_without_ext[:first_number_pos]
                 try:
-                    frame_num = int(last_number)
-                    self.debug_logger.log(f"extract_sequence_info: '{filename}' -> fallback last number: base_name='{base_name}', frame_num={frame_num}")
+                    frame_num = int(first_number)
+                    self.debug_logger.log(f"extract_sequence_info: '{filename}' -> fallback first number: base_name='{base_name}', frame_num={frame_num}")
                     return base_name, frame_num
                 except ValueError:
                     pass
