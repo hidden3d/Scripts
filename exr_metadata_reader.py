@@ -23,13 +23,42 @@ from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSettings
 from PyQt5.QtGui import QTextCursor, QColor, QTextCharFormat, QFont, QBrush
 
 # ==================== НАСТРОЙКИ ====================
-DEBUG = False  # По умолчанию логирование выключено
+DEBUG = True  # Включаем логирование для отладки
 DEFAULT_FONT_SIZE = 10  # Размер шрифта по умолчанию
 DEFAULT_COLUMN_WIDTHS = {  # Ширины столбцов по умолчанию
     'sequences': [200, 300, 80, 100, 100],  # Путь, Имя, Расширение, Диапазон, Количество
-    'metadata': [200, 500]  # Поле, Значение
+    'metadata': [300, 500]  # Поле, Значение
 }
 # ===================================================
+
+# Попытка импорта exifread для чтения метаданных изображений
+try:
+    import exifread
+    EXIFREAD_AVAILABLE = True
+except ImportError:
+    EXIFREAD_AVAILABLE = False
+    print("Библиотека exifread не установлена. Метаданные для JPEG/RAW файлов не будут доступны.")
+    print("Установите ее: pip install exifread")
+
+# Попытка импорта Pillow для чтения метаданных PNG, TIFF и других форматов
+try:
+    from PIL import Image
+    from PIL.ExifTags import TAGS, GPSTAGS
+    PILLOW_AVAILABLE = True
+except ImportError:
+    PILLOW_AVAILABLE = False
+    print("Библиотека Pillow не установлена. Метаданные для PNG/TIFF файлов не будут доступны.")
+    print("Установите ее: pip install Pillow")
+
+# Попытка импорта pymediainfo для чтения метаданных медиафайлов
+try:
+    from pymediainfo import MediaInfo
+    PYMEDIAINFO_AVAILABLE = True
+except ImportError:
+    PYMEDIAINFO_AVAILABLE = False
+    print("Библиотека pymediainfo не установлена. Расширенные метаданные для медиафайлов не будут доступны.")
+    print("Установите ее: pip install pymediainfo")
+
 
 class DebugLogger:
     """Класс для сбора отладочной информации"""
@@ -142,11 +171,12 @@ class SequenceFinder(QThread):
         self.directory = directory
         self.debug_logger = debug_logger
         self._is_running = True
-        # Поддерживаемые расширения для поиска
-        self.supported_extensions = {'.exr', '.jpg', '.jpeg', '.png', '.tga', '.tif', '.tiff', 
-                                   '.dpx', '.cin', '.mov', '.mp4', '.avi', '.mkv'}
+        # Ищем все файлы, независимо от расширения
+        self.supported_extensions = set()  # Пустое множество означает все файлы
         # Видео расширения, которые всегда считаем одиночными
-        self.video_extensions = {'.mov', '.mp4', '.avi', '.mkv'}
+        self.video_extensions = {'.mov', '.mp4', '.avi', '.mkv', '.wmv', '.flv', '.webm', 
+                               '.m4v', '.mpg', '.mpeg', '.m2v', '.m4v', '.3gp', '.3g2', 
+                               '.f4v', '.ogv', '.ts', '.mts', '.m2ts', '.mxf'}
 
     def stop(self):
         self._is_running = False
@@ -175,16 +205,21 @@ class SequenceFinder(QThread):
                 _, ext = os.path.splitext(file)
                 ext = ext.lower()
                 
-                # Проверяем, поддерживается ли расширение
-                if ext in self.supported_extensions:
-                    self.progress_update.emit(f"Обработка: {file}")
-                    
-                    # Извлекаем базовое имя и номер кадра
+                # Обрабатываем все файлы, независимо от расширения
+                self.progress_update.emit(f"Обработка: {file}")
+                
+                # Для видеофайлов не извлекаем информацию о последовательности
+                if ext in self.video_extensions:
+                    # Для видеофайлов используем полное имя как базовое и None как номер кадра
+                    base_name = os.path.splitext(file)[0]  # Полное имя без расширения
+                    frame_num = None
+                    self.debug_logger.log(f"  Видеофайл: {file} -> base_name: {base_name}, frame_num: None")
+                else:
+                    # Для не-видео файлов извлекаем базовое имя и номер кадра
                     base_name, frame_num = self.extract_sequence_info(file)
                     self.debug_logger.log(f"  Файл: {file} -> base_name: {base_name}, frame_num: {frame_num}")
-                    
-                    if base_name:
-                        files_by_extension[ext].append((base_name, frame_num, file_path, file))
+                
+                files_by_extension[ext].append((base_name, frame_num, file_path, file))
         
         self.debug_logger.log(f"find_sequences_in_directory: Для папки {directory} найдено:")
         for ext, files in files_by_extension.items():
@@ -249,20 +284,43 @@ class SequenceFinder(QThread):
         for ext, files_list in files_by_extension.items():
             self.debug_logger.log(f"  Обрабатываем расширение {ext}: {len(files_list)} файлов")
             
-            # Группируем файлы по базовому имени
+            # Для видеофайлов каждый файл - отдельная последовательность
+            if ext in self.video_extensions:
+                self.debug_logger.log(f"    Расширение {ext} является видео, обрабатываем каждый файл отдельно")
+                for base_name, frame_num, file_path, file_name in files_list:
+                    # Создаем отдельную последовательность для каждого видеофайла
+                    unique_key = f"{directory}/{file_name}"
+                    
+                    sequences[unique_key] = {
+                        'files': [file_path],
+                        'frames': [],  # Для видео нет номеров кадров
+                        'first_file': file_path,
+                        'frame_range': "одиночный файл",
+                        'path': directory,
+                        'display_name': file_name,
+                        'extension': ext,
+                        'type': f'video_single_{ext[1:]}',
+                        'frame_count': 1
+                    }
+                    
+                    self.debug_logger.log(f"      Создана видео-последовательность: {unique_key}")
+                continue  # Переходим к следующему расширению
+            
+            # Для не-видео файлов используем старую логику группировки
             files_by_base_name = defaultdict(list)
             for base_name, frame_num, file_path, file_name in files_list:
                 files_by_base_name[base_name].append((frame_num, file_path, file_name))
-                self.debug_logger.log(f"    Файл {file_name} -> базовая группа: {base_name}")
+                self.debug_logger.log(f"    Файл {file_name} -> базовая группа: '{base_name}', номер кадра: {frame_num}")
             
             # Формируем последовательности для каждого базового имени
             for base_name, files in files_by_base_name.items():
-                self.debug_logger.log(f"    Формируем последовательность для базового имени: {base_name}")
+                self.debug_logger.log(f"    Формируем последовательность для базового имени: '{base_name}'")
+                self.debug_logger.log(f"      Файлов в группе: {len(files)}")
                 
                 if len(files) >= 1:
                     # Сортируем файлы по номеру кадра
                     files.sort(key=lambda x: x[0] if x[0] is not None else -1)
-                    frame_numbers = [f[0] for f in files]
+                    frame_numbers = [f[0] for f in files if f[0] is not None]  # Только валидные номера кадров
                     file_paths = [f[1] for f in files]
                     file_names = [f[2] for f in files]
                     
@@ -270,24 +328,29 @@ class SequenceFinder(QThread):
                     self.debug_logger.log(f"      Номера кадров: {frame_numbers}")
                     
                     # Определяем тип последовательности
-                    if ext in self.video_extensions:
-                        # Видеофайлы всегда считаем одиночными
-                        seq_type = f'video_single_{ext[1:]}'
-                        frame_range = "одиночный файл"
-                    elif ext == '.exr':
-                        if self.is_sequence(frame_numbers):
-                            seq_type = 'exr_sequence'
-                            frame_range = f"{min(frame_numbers)}-{max(frame_numbers)}"
+                    if self.is_sequence(frame_numbers):
+                        seq_type = f'sequence_{ext[1:]}'
+                        
+                        # Используем реальные номера кадров для диапазона
+                        if frame_numbers:
+                            min_frame = min(frame_numbers)
+                            max_frame = max(frame_numbers)
+                            
+                            # Определяем количество цифр для форматирования
+                            max_digits = max(len(str(f)) for f in frame_numbers)
+                            
+                            # Если все номера кадров имеют одинаковую длину или есть ведущие нули
+                            if all(len(str(f)) == max_digits for f in frame_numbers) or any(len(str(f)) < max_digits for f in frame_numbers):
+                                frame_range = f"{min_frame:0{max_digits}d}-{max_frame:0{max_digits}d}"
+                            else:
+                                frame_range = f"{min_frame}-{max_frame}"
+                                
+                            self.debug_logger.log(f"      Диапазон кадров: {min_frame}..{max_frame} -> '{frame_range}'")
                         else:
-                            seq_type = 'exr_single'
                             frame_range = "одиночный файл"
                     else:
-                        if self.is_sequence(frame_numbers):
-                            seq_type = f'other_sequence_{ext[1:]}'
-                            frame_range = f"{min(frame_numbers)}-{max(frame_numbers)}"
-                        else:
-                            seq_type = f'other_single_{ext[1:]}'
-                            frame_range = "одиночный файл"
+                        seq_type = f'single_{ext[1:]}'
+                        frame_range = "одиночный файл"
                     
                     # Имя последовательности - только имя первого файла с расширением
                     display_name = file_names[0]
@@ -318,44 +381,115 @@ class SequenceFinder(QThread):
         self.debug_logger.log(f"form_sequences: Сформировано {len(sequences)} последовательностей")
         return sequences
 
+
+
     def extract_sequence_info(self, filename):
         """Извлекает базовое имя и номер кадра из имени файла"""
         # Убираем расширение
         name_without_ext = os.path.splitext(filename)[0]
         
-        # Ищем паттерны для номеров кадров
+        self.debug_logger.log(f"extract_sequence_info: Обрабатываем файл '{filename}' -> '{name_without_ext}'")
+        
+        # ОБНОВЛЕННЫЙ список паттернов с улучшенной поддержкой различных форматов
         patterns = [
-            r'(.+?)\.(\d+)$',  # name.0001
-            r'(.+?)_(\d+)$',   # name_0001
-            r'(.+?)-(\d+)$',   # name-0001
+            # 1. ПАТТЕРНЫ ДЛЯ СТАНДАРТНЫХ НОМЕРОВ КАДРОВ (ВЫСОКИЙ ПРИОРИТЕТ)
+            
+            # 1.1. Числа в самом конце имени (перед расширением) - самый распространенный случай
+            r'^(.+?)(\d{1,8})$',
+            
+            # 1.2. Числа перед точкой или разделителем в конце имени (name.0001, name_0001)
+            r'^(.+?)[._ -](\d{1,8})$',
+            
+            # 1.3. Числа с фиксированной длиной в конце (типичные номера кадров)
+            r'^(.+?)(\d{4,8})([^0-9]*)$',
+            
+            # 2. ПАТТЕРНЫ ДЛЯ ФОРМАТА ТИПА D003C0015_250121_8H3408
+            
+            # 2.1. Паттерн для формата D003C0015 - число после буквы C (4+ цифры)
+            r'^(.+?[A-Z])(\d{4,})_.*$',
+            
+            # 2.2. Паттерн для чисел после определенных префиксов (C, A, R, S, F и т.д.)
+            r'^(.+?[ACFRS])(\d{3,5})_.*$',
+            
+            # 2.3. Паттерн для чисел, окруженных нецифровыми символами (общий случай)
+            r'^(.+?[^0-9])(\d{3,5})([^0-9].*)$',
+            
+            # 3. ПАТТЕРНЫ ДЛЯ СЛОЖНЫХ ФОРМАТОВ С ДАТАМИ И ДОП. ИНФОРМАЦИЕЙ
+            
+            # 3.1. Паттерн для формата с датой: имя_дата_дополнительная_информация_номер
+            r'^(.+?_\d{6}_[A-Z0-9]+?)(\d{3,4})$',
+            
+            # 3.2. Паттерн для извлечения последней группы цифр в сложных именах
+            r'^(.+?[^0-9])(\d{3,4})$',
         ]
         
-        for pattern in patterns:
+        # Сначала пробуем все паттерны по порядку (от высокого к низкому приоритету)
+        for i, pattern in enumerate(patterns):
             match = re.match(pattern, name_without_ext)
             if match:
                 base_name = match.group(1)
+                frame_num_str = match.group(2)
+                
                 try:
-                    frame_num = int(match.group(2))
-                    self.debug_logger.log(f"extract_sequence_info: '{filename}' -> pattern '{pattern}': base_name='{base_name}', frame_num={frame_num}")
+                    frame_num = int(frame_num_str)
+                    self.debug_logger.log(f"extract_sequence_info: '{filename}' -> pattern {i+1} '{pattern}': base_name='{base_name}', frame_num={frame_num}")
                     return base_name, frame_num
                 except ValueError:
                     continue
         
-        # Если не нашли паттерн с числами, проверяем есть ли числа в имени
-        match = re.search(r'(.+?)(\d+)\.?.*$', name_without_ext)
-        if match:
-            base_name = match.group(1).rstrip('._-')
-            try:
-                frame_num = int(match.group(2))
-                self.debug_logger.log(f"extract_sequence_info: '{filename}' -> fallback pattern: base_name='{base_name}', frame_num={frame_num}")
-                return base_name, frame_num
-            except ValueError:
-                pass
+        # 4. РЕЗЕРВНЫЕ ПАТТЕРНЫ (если основные не сработали)
+        
+        # 4.1. Ищем любые числа в имени, предпочтение отдаем числам в конце
+        all_numbers = re.findall(r'\d+', name_without_ext)
+        if all_numbers:
+            # Пробуем сначала числа в конце имени
+            for number in reversed(all_numbers):
+                # Проверяем, находится ли число в конце имени
+                if name_without_ext.endswith(number):
+                    base_name = name_without_ext[:-len(number)]
+                    try:
+                        frame_num = int(number)
+                        self.debug_logger.log(f"extract_sequence_info: '{filename}' -> fallback end number: base_name='{base_name}', frame_num={frame_num}")
+                        return base_name, frame_num
+                    except ValueError:
+                        continue
+            
+            # Если не нашли числа в конце, ищем числа с 3-6 цифрами (типичные номера кадров)
+            frame_candidates = []
+            for number in all_numbers:
+                if 3 <= len(number) <= 6:  # Оптимальный диапазон для номеров кадров
+                    frame_candidates.append(number)
+            
+            # Если нашли подходящие кандидаты, берем ПЕРВЫЙ (самый левый) - это важно для формата D003C0015
+            if frame_candidates:
+                frame_num_str = frame_candidates[0]
+                frame_pos = name_without_ext.find(frame_num_str)
+                if frame_pos > 0:
+                    base_name = name_without_ext[:frame_pos]
+                    try:
+                        frame_num = int(frame_num_str)
+                        self.debug_logger.log(f"extract_sequence_info: '{filename}' -> fallback filtered numbers: base_name='{base_name}', frame_num={frame_num}")
+                        return base_name, frame_num
+                    except ValueError:
+                        pass
+            
+            # Если не нашли подходящих по длине, берем последнее число
+            last_number = all_numbers[-1]
+            last_number_pos = name_without_ext.rfind(last_number)
+            if last_number_pos > 0:
+                base_name = name_without_ext[:last_number_pos]
+                try:
+                    frame_num = int(last_number)
+                    self.debug_logger.log(f"extract_sequence_info: '{filename}' -> fallback last number: base_name='{base_name}', frame_num={frame_num}")
+                    return base_name, frame_num
+                except ValueError:
+                    pass
         
         # Если не нашли номер кадра, возвращаем полное имя как базовое
         result = (name_without_ext, None)
         self.debug_logger.log(f"extract_sequence_info: '{filename}' -> fallback: base_name='{name_without_ext}', frame_num=None")
         return result
+
 
     def is_sequence(self, frame_numbers):
         """Проверяет, являются ли номера кадров последовательными"""
@@ -383,6 +517,7 @@ class SequenceFinder(QThread):
             self.debug_logger.log(f"Ошибка в потоке поиска: {e}", "ERROR")
         finally:
             self.finished_signal.emit()
+
 
 
 class SettingsDialog(QDialog):
@@ -453,8 +588,27 @@ class SettingsDialog(QDialog):
         form_layout.addRow("Поле метаданных:", self.field_input)
         form_layout.addRow("", self.add_button)
         
-        # Список активных полей
-        layout.addWidget(QLabel("Активные поля:"))
+        # Список активных полей с кнопками управления порядком
+        layout.addWidget(QLabel("Активные поля (порядок отображения):"))
+        
+        # Панель кнопок управления порядком
+        order_buttons_layout = QHBoxLayout()
+        self.move_up_btn = QPushButton("Вверх")
+        self.move_down_btn = QPushButton("Вниз")
+        self.move_top_btn = QPushButton("В начало")
+        self.move_bottom_btn = QPushButton("В конец")
+        
+        self.move_up_btn.clicked.connect(self.move_field_up)
+        self.move_down_btn.clicked.connect(self.move_field_down)
+        self.move_top_btn.clicked.connect(self.move_field_top)
+        self.move_bottom_btn.clicked.connect(self.move_field_bottom)
+        
+        order_buttons_layout.addWidget(self.move_up_btn)
+        order_buttons_layout.addWidget(self.move_down_btn)
+        order_buttons_layout.addWidget(self.move_top_btn)
+        order_buttons_layout.addWidget(self.move_bottom_btn)
+        order_buttons_layout.addStretch()
+        
         self.active_list = QListWidget()
         self.active_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.active_list.customContextMenuRequested.connect(self.show_active_list_context_menu)
@@ -464,6 +618,7 @@ class SettingsDialog(QDialog):
         self.delete_active_btn.clicked.connect(self.delete_selected_active)
         
         layout.addLayout(form_layout)
+        layout.addLayout(order_buttons_layout)
         layout.addWidget(self.active_list)
         layout.addWidget(self.delete_active_btn)
         
@@ -528,15 +683,17 @@ class SettingsDialog(QDialog):
 
     def load_current_settings(self):
         """Загружает текущие настройки из родительского окна"""
-        # Загружаем активные поля метаданных
+        # Загружаем активные поля метаданных в правильном порядке
         self.active_list.clear()
-        for field_name, color_data in self.parent.color_metadata.items():
-            if isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
-                if not color_data.get('removed', False):
-                    color = QColor(color_data['r'], color_data['g'], color_data['b'])
-                    item = QListWidgetItem(field_name)
-                    item.setBackground(color)
-                    self.active_list.addItem(item)
+        for field_name in self.parent.ordered_metadata_fields:
+            if field_name in self.parent.color_metadata:
+                color_data = self.parent.color_metadata[field_name]
+                if isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
+                    if not color_data.get('removed', False):
+                        color = QColor(color_data['r'], color_data['g'], color_data['b'])
+                        item = QListWidgetItem(field_name)
+                        item.setBackground(color)
+                        self.active_list.addItem(item)
         
         # Загружаем корзину метаданных
         self.trash_list.clear()
@@ -588,6 +745,10 @@ class SettingsDialog(QDialog):
                 'b': color.blue(),
                 'removed': False
             }
+            
+            # Добавляем поле в конец списка порядка
+            if field_name not in self.parent.ordered_metadata_fields:
+                self.parent.ordered_metadata_fields.append(field_name)
             
             # Сохраняем настройки
             self.parent.save_settings()
@@ -655,6 +816,10 @@ class SettingsDialog(QDialog):
             # Удаляем из активных
             del self.parent.color_metadata[field_name]
             
+            # Удаляем из списка порядка
+            if field_name in self.parent.ordered_metadata_fields:
+                self.parent.ordered_metadata_fields.remove(field_name)
+            
             # Сохраняем настройки
             self.parent.save_settings()
             
@@ -690,6 +855,10 @@ class SettingsDialog(QDialog):
             # Возвращаем в активные
             color_data = self.parent.removed_metadata[field_name]
             self.parent.color_metadata[field_name] = color_data
+            
+            # Добавляем в конец списка порядка, если его там нет
+            if field_name not in self.parent.ordered_metadata_fields:
+                self.parent.ordered_metadata_fields.append(field_name)
             
             # Удаляем из корзины
             del self.parent.removed_metadata[field_name]
@@ -733,6 +902,60 @@ class SettingsDialog(QDialog):
             
             # Обновляем интерфейс
             self.load_current_settings()
+
+    def move_field_up(self):
+        """Перемещает выбранное поле вверх в списке"""
+        current_row = self.active_list.currentRow()
+        if current_row > 0:
+            field_name = self.active_list.item(current_row).text()
+            # Обновляем порядок в родительском классе
+            index = self.parent.ordered_metadata_fields.index(field_name)
+            if index > 0:
+                self.parent.ordered_metadata_fields[index], self.parent.ordered_metadata_fields[index-1] = \
+                    self.parent.ordered_metadata_fields[index-1], self.parent.ordered_metadata_fields[index]
+                self.parent.save_settings()
+                self.load_current_settings()
+                self.active_list.setCurrentRow(current_row - 1)
+
+    def move_field_down(self):
+        """Перемещает выбранное поле вниз в списке"""
+        current_row = self.active_list.currentRow()
+        if current_row >= 0 and current_row < self.active_list.count() - 1:
+            field_name = self.active_list.item(current_row).text()
+            # Обновляем порядок в родительском классе
+            index = self.parent.ordered_metadata_fields.index(field_name)
+            if index < len(self.parent.ordered_metadata_fields) - 1:
+                self.parent.ordered_metadata_fields[index], self.parent.ordered_metadata_fields[index+1] = \
+                    self.parent.ordered_metadata_fields[index+1], self.parent.ordered_metadata_fields[index]
+                self.parent.save_settings()
+                self.load_current_settings()
+                self.active_list.setCurrentRow(current_row + 1)
+
+    def move_field_top(self):
+        """Перемещает выбранное поле в начало списка"""
+        current_row = self.active_list.currentRow()
+        if current_row > 0:
+            field_name = self.active_list.item(current_row).text()
+            # Обновляем порядок в родительском классе
+            if field_name in self.parent.ordered_metadata_fields:
+                self.parent.ordered_metadata_fields.remove(field_name)
+                self.parent.ordered_metadata_fields.insert(0, field_name)
+                self.parent.save_settings()
+                self.load_current_settings()
+                self.active_list.setCurrentRow(0)
+
+    def move_field_bottom(self):
+        """Перемещает выбранное поле в конец списка"""
+        current_row = self.active_list.currentRow()
+        if current_row >= 0 and current_row < self.active_list.count() - 1:
+            field_name = self.active_list.item(current_row).text()
+            # Обновляем порядок в родительском классе
+            if field_name in self.parent.ordered_metadata_fields:
+                self.parent.ordered_metadata_fields.remove(field_name)
+                self.parent.ordered_metadata_fields.append(field_name)
+                self.parent.save_settings()
+                self.load_current_settings()
+                self.active_list.setCurrentRow(self.active_list.count() - 1)
 
     def show_active_list_context_menu(self, position):
         current_row = self.active_list.currentRow()
@@ -847,13 +1070,14 @@ class EXRMetadataViewer(QMainWindow):
         self.color_metadata = {}  # {field_name: {'r': int, 'g': int, 'b': int, 'removed': False}}
         self.removed_metadata = {}  # {field_name: {'r': int, 'g': int, 'b': int, 'removed': True}}
         self.sequence_colors = {}  # {seq_type: {'r': int, 'g': int, 'b': int}}
+        self.ordered_metadata_fields = []  # Порядок отображения полей метаданных
         
         self.settings_file = "exr_viewer_settings.json"
         self.load_settings()
         self.setup_ui()
 
     def setup_ui(self):
-        self.setWindowTitle("EXR Sequence Metadata Viewer")
+        self.setWindowTitle("Universal File Sequence Metadata Viewer")
         self.setGeometry(100, 100, 1200, 800)
         
         # Устанавливаем шрифт приложения
@@ -920,11 +1144,18 @@ class EXRMetadataViewer(QMainWindow):
             self.sequences_table.setColumnWidth(i, width)
         
         # Настраиваем режимы изменения размеров столбцов
+        # Только столбец "Путь" будет растягиваться, остальные - фиксированные
         self.sequences_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)  # Путь растягивается
-        self.sequences_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Interactive)  # Имя - изменяемый
-        self.sequences_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Interactive)  # Расширение - изменяемый
-        self.sequences_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Interactive)  # Диапазон - изменяемый
-        self.sequences_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Interactive)  # Количество - изменяемый
+        self.sequences_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Interactive)    # Имя - фиксированная
+        self.sequences_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Interactive)    # Расширение - фиксированная
+        self.sequences_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Interactive)    # Диапазон - фиксированная
+        self.sequences_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Interactive)    # Количество - фиксированная
+        
+        # Устанавливаем фиксированные ширины для столбцов 1-4
+        self.sequences_table.setColumnWidth(1, DEFAULT_COLUMN_WIDTHS['sequences'][1])
+        self.sequences_table.setColumnWidth(2, DEFAULT_COLUMN_WIDTHS['sequences'][2])
+        self.sequences_table.setColumnWidth(3, DEFAULT_COLUMN_WIDTHS['sequences'][3])
+        self.sequences_table.setColumnWidth(4, DEFAULT_COLUMN_WIDTHS['sequences'][4])
         
         self.sequences_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.sequences_table.setSortingEnabled(True)
@@ -949,8 +1180,11 @@ class EXRMetadataViewer(QMainWindow):
             self.metadata_table.setColumnWidth(i, width)
         
         # Настраиваем режимы изменения размеров столбцов
-        self.metadata_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)  # Поле - изменяемый
+        self.metadata_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)    # Поле - фиксированная
         self.metadata_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)  # Значение растягивается до конца
+        
+        # Устанавливаем фиксированную ширину для столбца "Поле"
+        self.metadata_table.setColumnWidth(0, DEFAULT_COLUMN_WIDTHS['metadata'][0])
         
         self.metadata_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.metadata_table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -1023,7 +1257,7 @@ class EXRMetadataViewer(QMainWindow):
             self.debug_logger.log("Логирование выключено")
 
     def browse_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Выберите папку с EXR файлами")
+        folder = QFileDialog.getExistingDirectory(self, "Выберите папку с файлами")
         if folder:
             self.folder_path.setText(folder)
 
@@ -1233,7 +1467,6 @@ class EXRMetadataViewer(QMainWindow):
         
         # ПРИНУДИТЕЛЬНО ОБНОВЛЯЕМ ОТОБРАЖЕНИЕ ТАБЛИЦЫ
         self.sequences_table.viewport().update()
-        self.sequences_table.resizeColumnsToContents()
         
         # Применяем выравнивание после завершения поиска
         self.apply_sequences_table_alignment()
@@ -1267,16 +1500,241 @@ class EXRMetadataViewer(QMainWindow):
             self.current_sequence_files = self.sequences[key]['files']
             seq_type = self.sequences[key]['type']
             
-            # Только для EXR файлов отображаем метаданные
-            if extension.lower() == '.exr' and self.current_sequence_files:
-                self.display_metadata(self.current_sequence_files[0])
+            # Для всех файлов отображаем метаданные, если они доступны
+            if self.current_sequence_files:
+                self.display_metadata(self.current_sequence_files[0], extension)
             else:
-                # Для других типов очищаем таблицу метаданных
+                # Очищаем таблицу метаданных
                 self.metadata_table.setRowCount(0)
-                # Показываем сообщение о неподдерживаемом формате
+
+    def display_metadata(self, file_path, extension):
+        """Отображает метаданные для файла"""
+        try:
+            if not os.path.exists(file_path):
                 self.metadata_table.setRowCount(1)
-                self.metadata_table.setItem(0, 0, QTableWidgetItem("Информация"))
-                self.metadata_table.setItem(0, 1, QTableWidgetItem(f"Метаданные для формата {extension} не поддерживаются"))
+                self.metadata_table.setItem(0, 0, QTableWidgetItem("Ошибка"))
+                self.metadata_table.setItem(0, 1, QTableWidgetItem(f"Файл не найден: {file_path}"))
+                return
+            
+            # Собираем все метаданные
+            self.current_metadata = {}
+            
+            # Для EXR файлов используем OpenEXR для чтения метаданных
+            if extension.lower() == '.exr':
+                try:
+                    exr_file = OpenEXR.InputFile(file_path)
+                    header = exr_file.header()
+                    
+                    for key, value in header.items():
+                        self.current_metadata[key] = self.format_metadata_value(value)
+                    self.debug_logger.log(f"Прочитано {len(header)} метаданных EXR из {file_path}")
+                except Exception as e:
+                    self.current_metadata["Ошибка чтения EXR"] = f"Не удалось прочитать EXR метаданные: {str(e)}"
+                    self.debug_logger.log(f"Ошибка чтения EXR для {file_path}: {str(e)}", "ERROR")
+            
+            # Для JPEG и RAW файлов используем exifread
+            elif extension.lower() in ['.jpg', '.jpeg', '.arw', '.cr2', '.dng', '.nef', '.tif', '.tiff'] and EXIFREAD_AVAILABLE:
+                try:
+                    with open(file_path, 'rb') as f:
+                        tags = exifread.process_file(f, details=False)
+                    
+                    if tags:
+                        for tag, value in tags.items():
+                            # Форматируем значение для лучшего отображения
+                            formatted_value = self.format_exif_value(tag, value)
+                            self.current_metadata[f"EXIF {tag}"] = formatted_value
+                        self.debug_logger.log(f"Прочитано {len(tags)} EXIF тегов из {file_path}")
+                    else:
+                        self.current_metadata["EXIF"] = "EXIF данные не найдены"
+                        self.debug_logger.log(f"EXIF данные не найдены в {file_path}")
+                except Exception as e:
+                    self.current_metadata["Ошибка чтения EXIF"] = f"Не удалось прочитать EXIF метаданные: {str(e)}"
+                    self.debug_logger.log(f"Ошибка чтения EXIF для {file_path}: {str(e)}", "ERROR")
+            
+            # Для PNG, TIFF и других изображений используем Pillow
+            elif extension.lower() in ['.png', '.bmp', '.gif', '.webp'] and PILLOW_AVAILABLE:
+                try:
+                    with Image.open(file_path) as img:
+                        # Получаем базовую информацию об изображении
+                        self.current_metadata["Формат"] = img.format
+                        self.current_metadata["Режим"] = img.mode
+                        self.current_metadata["Размер"] = f"{img.width} x {img.height}"
+                        
+                        # Получаем EXIF данные, если они есть
+                        exif_data = img._getexif()
+                        if exif_data:
+                            for tag_id, value in exif_data.items():
+                                tag_name = TAGS.get(tag_id, tag_id)
+                                formatted_value = self.format_exif_value(tag_name, value)
+                                self.current_metadata[f"EXIF {tag_name}"] = formatted_value
+                            self.debug_logger.log(f"Прочитано {len(exif_data)} EXIF тегов из {file_path}")
+                        else:
+                            self.current_metadata["EXIF"] = "EXIF данные не найдены"
+                            self.debug_logger.log(f"EXIF данные не найдены в {file_path}")
+                        
+                        # Получаем другую информацию
+                        info = img.info
+                        for key, value in info.items():
+                            if key != 'exif':  # EXIF уже обработали отдельно
+                                self.current_metadata[key] = str(value)
+                except Exception as e:
+                    self.current_metadata["Ошибка чтения"] = f"Не удалось прочитать метаданные изображения: {str(e)}"
+                    self.debug_logger.log(f"Ошибка чтения изображения для {file_path}: {str(e)}", "ERROR")
+            
+            # ==================== ДОБАВЛЯЕМ PYMEDIAINFO ДЛЯ МЕДИАФАЙЛОВ ====================
+            
+            # Используем pymediainfo для видео, аудио и других медиафайлов
+            if PYMEDIAINFO_AVAILABLE:
+                # Определяем, является ли файл медиафайлом (видео, аудио, изображения)
+                media_extensions = [
+                    # Видео форматы
+                    '.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg',
+                    '.m2v', '.m4v', '.3gp', '.3g2', '.f4v', '.ogv', '.ts', '.mts', '.m2ts',
+                    # Аудио форматы
+                    '.mp3', '.wav', '.aac', '.flac', '.ogg', '.wma', '.m4a', '.aiff', '.aif',
+                    '.amr', '.ape', '.opus', '.ra', '.rm', '.voc', '.8svx',
+                    # Другие медиаформаты
+                    '.swf', '.dv', '.mxf', '.nut', '.yuv'
+                ]
+                
+                if extension.lower() in media_extensions:
+                    try:
+                        media_info = MediaInfo.parse(file_path)
+                        self.debug_logger.log(f"Прочитано {len(media_info.tracks)} треков MediaInfo из {file_path}")
+                        
+                        for track in media_info.tracks:
+                            track_type = track.track_type
+                            
+                            # Добавляем заголовок для типа трека
+                            self.current_metadata[f"MediaInfo - {track_type} Track"] = "---"
+                            
+                            # Получаем все атрибуты трека
+                            for attribute_name in dir(track):
+                                # Пропускаем служебные атрибуты
+                                if attribute_name.startswith('_') or attribute_name in ['to_data', 'to_json']:
+                                    continue
+                                
+                                try:
+                                    attribute_value = getattr(track, attribute_name)
+                                    
+                                    # Пропускаем None, пустые строки и слишком длинные значения
+                                    if attribute_value is not None and str(attribute_value).strip() != '':
+                                        # Форматируем длинные значения
+                                        str_value = str(attribute_value)
+                                        if len(str_value) > 500:
+                                            str_value = str_value[:500] + "... [урезано]"
+                                        
+                                        self.current_metadata[f"MediaInfo {track_type} - {attribute_name}"] = str_value
+                                except Exception as e:
+                                    self.debug_logger.log(f"Ошибка чтения атрибута {attribute_name} для трека {track_type}: {str(e)}", "WARNING")
+                        
+                    except Exception as e:
+                        self.current_metadata["Ошибка чтения MediaInfo"] = f"Не удалось прочитать MediaInfo метаданные: {str(e)}"
+                        self.debug_logger.log(f"Ошибка чтения MediaInfo для {file_path}: {str(e)}", "ERROR")
+            
+            # Для всех файлов добавляем базовую информацию
+            file_stats = os.stat(file_path)
+            self.current_metadata["Имя файла"] = os.path.basename(file_path)
+            self.current_metadata["Путь"] = file_path
+            self.current_metadata["Размер файла"] = f"{file_stats.st_size} байт ({file_stats.st_size / 1024 / 1024:.2f} MB)"
+            self.current_metadata["Дата создания"] = datetime.datetime.fromtimestamp(file_stats.st_ctime).strftime("%Y-%m-%d %H:%M:%S")
+            self.current_metadata["Дата изменения"] = datetime.datetime.fromtimestamp(file_stats.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+            
+            self.debug_logger.log(f"Всего собрано {len(self.current_metadata)} метаданных для {file_path}")
+            
+            # Разделяем метаданные на цветные и обычные
+            colored_metadata = {}
+            normal_metadata = {}
+            
+            for key, value in self.current_metadata.items():
+                if key in self.color_metadata and not self.color_metadata[key].get('removed', False):
+                    colored_metadata[key] = value
+                else:
+                    normal_metadata[key] = value
+            
+            # Сортируем цветные метаданные в соответствии с порядком из ordered_metadata_fields
+            sorted_colored = []
+            for field_name in self.ordered_metadata_fields:
+                if field_name in colored_metadata:
+                    sorted_colored.append((field_name, colored_metadata[field_name]))
+            
+            # Добавляем оставшиеся цветные поля, которых нет в ordered_metadata_fields (на всякий случай)
+            for field_name, value in colored_metadata.items():
+                if field_name not in self.ordered_metadata_fields:
+                    sorted_colored.append((field_name, value))
+            
+            # Сортируем обычные метаданные по ключу
+            sorted_normal = sorted(normal_metadata.items())
+            
+            # Объединяем: сначала цветные в указанном порядке, потом обычные
+            sorted_metadata = sorted_colored + sorted_normal
+            
+            # Заполняем таблицу
+            self.metadata_table.setRowCount(len(sorted_metadata))
+            
+            for row, (key, value) in enumerate(sorted_metadata):
+                # Поле
+                key_item = QTableWidgetItem(key)
+                key_item.setFlags(key_item.flags() & ~Qt.ItemIsEditable)
+                
+                # Значение
+                value_item = QTableWidgetItem(str(value))
+                value_item.setFlags(value_item.flags() & ~Qt.ItemIsEditable)
+                
+                self.metadata_table.setItem(row, 0, key_item)
+                self.metadata_table.setItem(row, 1, value_item)
+                
+                # Применяем цвет, если поле есть в цветном списке
+                self.apply_field_color(row, key)
+            
+            # Сбрасываем фильтр поиска при отображении новых данных
+            self.clear_search()
+            
+        except Exception as e:
+            self.metadata_table.setRowCount(1)
+            self.metadata_table.setItem(0, 0, QTableWidgetItem("Ошибка"))
+            self.metadata_table.setItem(0, 1, QTableWidgetItem(f"Ошибка чтения метаданных: {str(e)}"))
+            self.debug_logger.log(f"Общая ошибка чтения метаданных для {file_path}: {str(e)}", "ERROR")
+
+    def format_exif_value(self, tag, value):
+        """Форматирует значение EXIF для лучшего отображения"""
+        try:
+            # Если значение - bytes, декодируем его
+            if isinstance(value, bytes):
+                try:
+                    # Пробуем декодировать как UTF-8
+                    return value.decode('utf-8').strip()
+                except UnicodeDecodeError:
+                    # Если не получается, возвращаем строковое представление
+                    return str(value)
+            
+            # Для некоторых специфических тегов можно добавить специальную обработку
+            if tag in ['EXIF ExposureTime', 'EXIF ShutterSpeedValue']:
+                # Обработка времени экспозиции
+                if hasattr(value, 'num') and hasattr(value, 'den'):
+                    return f"{value.num}/{value.den} сек"
+            
+            if tag in ['EXIF FNumber', 'EXIF ApertureValue']:
+                # Обработка диафрагмы
+                if hasattr(value, 'num') and hasattr(value, 'den'):
+                    return f"f/{value.num/value.den:.1f}"
+            
+            if tag == 'EXIF FocalLength':
+                # Фокусное расстояние
+                if hasattr(value, 'num') and hasattr(value, 'den'):
+                    return f"{value.num/value.den} мм"
+            
+            if tag == 'EXIF ISOSpeedRatings':
+                # ISO
+                return f"ISO {value}"
+            
+            # Для всех остальных случаев возвращаем строковое представление
+            return str(value)
+            
+        except Exception as e:
+            self.debug_logger.log(f"Ошибка форматирования EXIF тега {tag}: {str(e)}", "WARNING")
+            return str(value)
+
 
     def show_sequences_table_context_menu(self, position):
         """Контекстное меню для таблицы последовательностей"""
@@ -1491,65 +1949,6 @@ class EXRMetadataViewer(QMainWindow):
         # Для всех остальных типов используем строковое представление
         return str(value)
 
-    def display_metadata(self, file_path):
-        try:
-            if not os.path.exists(file_path):
-                self.metadata_table.setRowCount(1)
-                self.metadata_table.setItem(0, 0, QTableWidgetItem("Ошибка"))
-                self.metadata_table.setItem(0, 1, QTableWidgetItem(f"Файл не найден: {file_path}"))
-                return
-            
-            exr_file = OpenEXR.InputFile(file_path)
-            header = exr_file.header()
-            
-            # Собираем все метаданные
-            self.current_metadata = {}
-            for key, value in header.items():
-                self.current_metadata[key] = self.format_metadata_value(value)
-            
-            # Разделяем метаданные на цветные и обычные
-            colored_metadata = {}
-            normal_metadata = {}
-            
-            for key, value in self.current_metadata.items():
-                if key in self.color_metadata and not self.color_metadata[key].get('removed', False):
-                    colored_metadata[key] = value
-                else:
-                    normal_metadata[key] = value
-            
-            # Сортируем оба словаря по ключу
-            sorted_colored = sorted(colored_metadata.items())
-            sorted_normal = sorted(normal_metadata.items())
-            
-            # Объединяем: сначала цветные, потом обычные
-            sorted_metadata = sorted_colored + sorted_normal
-            
-            # Заполняем таблицу
-            self.metadata_table.setRowCount(len(sorted_metadata))
-            
-            for row, (key, value) in enumerate(sorted_metadata):
-                # Поле
-                key_item = QTableWidgetItem(key)
-                key_item.setFlags(key_item.flags() & ~Qt.ItemIsEditable)
-                
-                # Значение
-                value_item = QTableWidgetItem(str(value))
-                value_item.setFlags(value_item.flags() & ~Qt.ItemIsEditable)
-                
-                self.metadata_table.setItem(row, 0, key_item)
-                self.metadata_table.setItem(row, 1, value_item)
-                
-                # Применяем цвет, если поле есть в цветном списке
-                self.apply_field_color(row, key)
-            
-            # Сбрасываем фильтр поиска при отображении новых данных
-            self.clear_search()
-            
-        except Exception as e:
-            self.metadata_table.setRowCount(1)
-            self.metadata_table.setItem(0, 0, QTableWidgetItem("Ошибка"))
-            self.metadata_table.setItem(0, 1, QTableWidgetItem(f"Ошибка чтения метаданных: {str(e)}"))
-
     def apply_field_color(self, row, field_name):
         """Применяет цвет к полю в таблице"""
         color = self.get_field_color(field_name)
@@ -1647,6 +2046,10 @@ class EXRMetadataViewer(QMainWindow):
                 'removed': False
             }
             
+            # Добавляем поле в конец списка порядка, если его там нет
+            if field_name not in self.ordered_metadata_fields:
+                self.ordered_metadata_fields.append(field_name)
+            
             self.save_settings()
             self.update_metadata_colors()
             
@@ -1679,6 +2082,10 @@ class EXRMetadataViewer(QMainWindow):
             
             # Удаляем из активных
             del self.color_metadata[field_name]
+            
+            # Удаляем из списка порядка
+            if field_name in self.ordered_metadata_fields:
+                self.ordered_metadata_fields.remove(field_name)
             
             self.save_settings()
             self.update_metadata_colors()
@@ -1720,12 +2127,20 @@ class EXRMetadataViewer(QMainWindow):
                     
                     # Загружаем цвета последовательностей
                     self.sequence_colors = settings.get('sequence_colors', {})
+                    
+                    # Загружаем порядок полей метаданных
+                    self.ordered_metadata_fields = settings.get('ordered_metadata_fields', [])
+                    
+                    # Если ordered_metadata_fields пуст, инициализируем его из color_metadata
+                    if not self.ordered_metadata_fields and self.color_metadata:
+                        self.ordered_metadata_fields = list(self.color_metadata.keys())
                         
         except Exception as e:
             self.debug_logger.log(f"Ошибка загрузки настроек: {e}", "ERROR")
             self.color_metadata = {}
             self.removed_metadata = {}
             self.sequence_colors = {}
+            self.ordered_metadata_fields = []
 
     def save_settings(self):
         """Сохраняет настройки в файл"""
@@ -1749,7 +2164,8 @@ class EXRMetadataViewer(QMainWindow):
             settings = {
                 'color_metadata': cleaned_color_metadata,
                 'removed_metadata': cleaned_removed_metadata,
-                'sequence_colors': cleaned_sequence_colors
+                'sequence_colors': cleaned_sequence_colors,
+                'ordered_metadata_fields': self.ordered_metadata_fields
             }
             
             with open(self.settings_file, 'w', encoding='utf-8') as f:
