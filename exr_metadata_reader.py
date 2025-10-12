@@ -359,11 +359,17 @@ class SequenceFinder(QThread):
                             # Определяем количество цифр для форматирования
                             max_digits = max(len(str(f)) for f in frame_numbers)
                             
-                            # Если все номера кадров имеют одинаковую длину или есть ведущие нули
-                            if all(len(str(f)) == max_digits for f in frame_numbers) or any(len(str(f)) < max_digits for f in frame_numbers):
+                            self.debug_logger.log(f"      Минимальный кадр: {min_frame}, максимальный: {max_frame}, макс. цифр: {max_digits}")
+                            
+                            # Проверяем, есть ли ведущие нули
+                            has_leading_zeros = any(len(str(f)) < max_digits for f in frame_numbers)
+                            
+                            if has_leading_zeros or all(len(str(f)) == max_digits for f in frame_numbers):
                                 frame_range = f"{min_frame:0{max_digits}d}-{max_frame:0{max_digits}d}"
                             else:
                                 frame_range = f"{min_frame}-{max_frame}"
+                                
+                            self.debug_logger.log(f"      Диапазон кадров: {min_frame}..{max_frame} -> '{frame_range}'")
                         else:
                             frame_range = "одиночный файл"
                     else:
@@ -408,31 +414,31 @@ class SequenceFinder(QThread):
         
         self.debug_logger.log(f"extract_sequence_info: Обрабатываем файл '{filename}' -> '{name_without_ext}'")
         
-        # УЛУЧШЕННЫЙ список паттернов для лучшего распознавания DNG и других форматов
+        # УЛУЧШЕННЫЙ список паттернов для лучшего распознавания сложных форматов
         patterns = [
-            # 1. ПАТТЕРНЫ ДЛЯ ФОРМАТА ТИПА D003C0015_250121_8H3408 (DNG файлы)
+            # 1. ПАТТЕРНЫ ДЛЯ СЛОЖНЫХ EXR С НОМЕРАМИ В КОНЦЕ
+            # A_0160C003_240903_041957_a1CGM.mxf00380118.exr -> 00380118
+            r'^(.+?\.\w+?)(\d{6,8})$',
             
-            # 1.1. Паттерн для формата с префиксом и 4+ цифрами перед датой
-            r'^(.+?[A-Z])(\d{4,})_\d+_.+$',
+            # 2. ПАТТЕРНЫ ДЛЯ СТАНДАРТНЫХ EXR С НОМЕРАМИ КАДРОВ В КОНЦЕ
+            # A_0104C003_240510_141409_a1DPL.00000001.exr -> 00000001
+            r'^(.+?\.)(\d{6,8})$',
             
-            # 1.2. Паттерн для чисел после определенных префиксов (C, A, R, S, F и т.д.)
-            r'^(.+?[ACFRS])(\d{3,5})_.*$',
+            # 3. ПАТТЕРНЫ ДЛЯ ФОРМАТА С ПРЕФИКСОМ И НОМЕРОМ КАДРА
+            # A_0051C010_240406_182948_a1DPL01693065.exr -> 01693065
+            r'^(.+?[A-Z])(\d{6,8})$',
             
-            # 2. ПАТТЕРНЫ ДЛЯ СТАНДАРТНЫХ НОМЕРОВ КАДРОВ (ВЫСОКИЙ ПРИОРИТЕТ)
+            # 4. ПАТТЕРНЫ ДЛЯ ФОРМАТА С ПОДЧЕРКИВАНИЕМ И НОМЕРОМ КАДРА
+            # V006C0030_240318_8J4U_000247.DNG -> 000247
+            r'^(.+?_)(\d{3,6})$',
             
-            # 2.1. Числа в самом конце имени (перед расширением) - самый распространенный случай
+            # 5. ПАТТЕРНЫ ДЛЯ ФОРМАТА DNG С ПРЕФИКСОМ
+            # D003C0015_250121_8H3408.DNG -> 0015
+            r'^(.+?[A-Z])(\d{3,5})_.*$',
+            
+            # 6. СТАНДАРТНЫЕ ПАТТЕРНЫ ДЛЯ ЧИСЕЛ В КОНЦЕ
             r'^(.+?)(\d{1,8})$',
-            
-            # 2.2. Числа перед точкой или разделителем в конце имени (name.0001, name_0001)
             r'^(.+?)[._ -](\d{1,8})$',
-            
-            # 2.3. Числа с фиксированной длиной в конце (типичные номера кадров)
-            r'^(.+?)(\d{4,8})([^0-9]*)$',
-            
-            # 3. ПАТТЕРНЫ ДЛЯ СЛОЖНЫХ ФОРМАТОВ
-            
-            # 3.1. Паттерн для чисел, окруженных нецифровыми символами
-            r'^(.+?[^0-9])(\d{3,5})([^0-9].*)$',
         ]
         
         # Сначала пробуем все паттерны по порядку
@@ -449,36 +455,55 @@ class SequenceFinder(QThread):
                 except ValueError:
                     continue
         
-        # РЕЗЕРВНЫЕ ПАТТЕРНЫ
+        # РЕЗЕРВНЫЕ ПАТТЕРНЫ - ищем последнюю группу цифр подходящей длины
         all_numbers = re.findall(r'\d+', name_without_ext)
         if all_numbers:
-            # Ищем числа с 3-6 цифрами (типичные номера кадров)
+            # Сначала ищем числа с 6-8 цифрами (типичные для EXR)
             frame_candidates = []
             for number in all_numbers:
-                if 3 <= len(number) <= 6:
+                if 6 <= len(number) <= 8:
                     frame_candidates.append(number)
             
-            # Берем ПЕРВОЕ подходящее число (самое левое)
+            # Берем ПОСЛЕДНЕЕ подходящее число (самое правое)
             if frame_candidates:
-                frame_num_str = frame_candidates[0]
-                frame_pos = name_without_ext.find(frame_num_str)
+                frame_num_str = frame_candidates[-1]
+                frame_pos = name_without_ext.rfind(frame_num_str)
                 if frame_pos > 0:
                     base_name = name_without_ext[:frame_pos]
                     try:
                         frame_num = int(frame_num_str)
-                        self.debug_logger.log(f"extract_sequence_info: '{filename}' -> fallback filtered numbers: base_name='{base_name}', frame_num={frame_num}")
+                        self.debug_logger.log(f"extract_sequence_info: '{filename}' -> fallback EXR numbers (last): base_name='{base_name}', frame_num={frame_num}")
                         return base_name, frame_num
                     except ValueError:
                         pass
             
-            # Если не нашли подходящих по длине, берем первое число
-            first_number = all_numbers[0]
-            first_number_pos = name_without_ext.find(first_number)
-            if first_number_pos > 0:
-                base_name = name_without_ext[:first_number_pos]
+            # Если не нашли EXR номера, ищем любые числа с 4-6 цифрами
+            frame_candidates = []
+            for number in all_numbers:
+                if 4 <= len(number) <= 6:
+                    frame_candidates.append(number)
+            
+            if frame_candidates:
+                # Берем ПОСЛЕДНЕЕ число (самое правое)
+                frame_num_str = frame_candidates[-1]
+                frame_pos = name_without_ext.rfind(frame_num_str)
+                if frame_pos > 0:
+                    base_name = name_without_ext[:frame_pos]
+                    try:
+                        frame_num = int(frame_num_str)
+                        self.debug_logger.log(f"extract_sequence_info: '{filename}' -> fallback filtered numbers (last): base_name='{base_name}', frame_num={frame_num}")
+                        return base_name, frame_num
+                    except ValueError:
+                        pass
+            
+            # Если не нашли подходящих по длине, берем последнее число
+            last_number = all_numbers[-1]
+            last_number_pos = name_without_ext.rfind(last_number)
+            if last_number_pos > 0:
+                base_name = name_without_ext[:last_number_pos]
                 try:
-                    frame_num = int(first_number)
-                    self.debug_logger.log(f"extract_sequence_info: '{filename}' -> fallback first number: base_name='{base_name}', frame_num={frame_num}")
+                    frame_num = int(last_number)
+                    self.debug_logger.log(f"extract_sequence_info: '{filename}' -> fallback last number: base_name='{base_name}', frame_num={frame_num}")
                     return base_name, frame_num
                 except ValueError:
                     pass
@@ -492,11 +517,13 @@ class SequenceFinder(QThread):
     def is_sequence(self, frame_numbers):
         """Проверяет, являются ли номера кадров последовательными"""
         if len(frame_numbers) < 2:
+            self.debug_logger.log(f"is_sequence: недостаточно кадров ({len(frame_numbers)})")
             return False
         
         # Фильтруем None значения (одиночные файлы)
         valid_frames = [f for f in frame_numbers if f is not None]
         if len(valid_frames) < 2:
+            self.debug_logger.log(f"is_sequence: недостаточно валидных кадров ({len(valid_frames)})")
             return False
         
         sorted_frames = sorted(valid_frames)
@@ -505,8 +532,12 @@ class SequenceFinder(QThread):
         differences = [sorted_frames[i] - sorted_frames[i-1] for i in range(1, len(sorted_frames))]
         unique_differences = set(differences)
         
+        self.debug_logger.log(f"is_sequence: кадры {sorted_frames}, различия {differences}, уникальные различия {unique_differences}")
+        
         # Допускаем последовательности с постоянным шагом (1, 2, 10 и т.д.)
-        return len(unique_differences) == 1
+        result = len(unique_differences) == 1
+        self.debug_logger.log(f"is_sequence: результат {result}")
+        return result
 
     def run(self):
         try:
