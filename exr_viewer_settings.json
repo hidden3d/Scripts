@@ -1,0 +1,180 @@
+{
+  "color_metadata": {
+    "cameraModel": {
+      "r": 216,
+      "g": 255,
+      "b": 221,
+      "removed": false
+    },
+    "camera_sensor": {
+      "r": 216,
+      "g": 255,
+      "b": 221,
+      "removed": false
+    },
+    "owner": {
+      "r": 255,
+      "g": 228,
+      "b": 228,
+      "removed": false
+    },
+    "resolveorigfilename": {
+      "r": 255,
+      "g": 228,
+      "b": 228,
+      "removed": false
+    },
+    "lensModel": {
+      "r": 216,
+      "g": 232,
+      "b": 255,
+      "removed": false
+    },
+    "camera_focal": {
+      "r": 216,
+      "g": 232,
+      "b": 255,
+      "removed": false
+    },
+    "camera_lens_type": {
+      "r": 216,
+      "g": 232,
+      "b": 255,
+      "removed": false
+    },
+    "camera_type": {
+      "r": 216,
+      "g": 255,
+      "b": 221,
+      "removed": false
+    },
+    "clipName": {
+      "r": 255,
+      "g": 228,
+      "b": 228,
+      "removed": false
+    },
+    "dataWindow": {
+      "r": 235,
+      "g": 220,
+      "b": 255,
+      "removed": false
+    },
+    "displayWindow": {
+      "r": 235,
+      "g": 220,
+      "b": 255,
+      "removed": false
+    },
+    "arriraw/cameraDevice/cameraModel": {
+      "r": 216,
+      "g": 255,
+      "b": 221,
+      "removed": false
+    },
+    "camera_camera_type": {
+      "r": 216,
+      "g": 255,
+      "b": 221,
+      "removed": false
+    },
+    "camera_id": {
+      "r": 216,
+      "g": 255,
+      "b": 221,
+      "removed": false
+    },
+    "arriraw/lensDevice/lensModel": {
+      "r": 216,
+      "g": 232,
+      "b": 255,
+      "removed": false
+    },
+    "arriraw/slateInfo/clipName": {
+      "r": 255,
+      "g": 228,
+      "b": 228,
+      "removed": false
+    },
+    "reelName": {
+      "r": 255,
+      "g": 228,
+      "b": 228,
+      "removed": false
+    },
+    "EXIF Image Tag 0xC614": {
+      "r": 216,
+      "g": 255,
+      "b": 221,
+      "removed": false
+    },
+    "EXIF Image LensModel": {
+      "r": 216,
+      "g": 232,
+      "b": 255,
+      "removed": false
+    }
+  },
+  "removed_metadata": {
+    "camera_acceleration_z": {
+      "r": 22,
+      "g": 255,
+      "b": 6,
+      "removed": false
+    },
+    "cameraCCTSetting": {
+      "r": 255,
+      "g": 0,
+      "b": 153,
+      "removed": false
+    }
+  },
+  "sequence_colors": {
+    "video_single_mov": {
+      "r": 237,
+      "g": 255,
+      "b": 235
+    },
+    "video_single_mp4": {
+      "r": 253,
+      "g": 229,
+      "b": 255
+    },
+    "sequence_exr": {
+      "r": 217,
+      "g": 242,
+      "b": 255
+    },
+    "group_exr": {
+      "r": 255,
+      "g": 196,
+      "b": 56
+    },
+    "sequence_dng": {
+      "r": 253,
+      "g": 215,
+      "b": 255
+    }
+  },
+  "ordered_metadata_fields": [
+    "cameraModel",
+    "camera_sensor",
+    "arriraw/cameraDevice/cameraModel",
+    "camera_camera_type",
+    "camera_type",
+    "camera_id",
+    "EXIF Image Tag 0xC614",
+    "lensModel",
+    "camera_focal",
+    "camera_lens_type",
+    "arriraw/lensDevice/lensModel",
+    "EXIF Image LensModel",
+    "owner",
+    "clipName",
+    "arriraw/slateInfo/clipName",
+    "reelName",
+    "resolveorigfilename",
+    "dataWindow",
+    "displayWindow"
+  ]
+}
