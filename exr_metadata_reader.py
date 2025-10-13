@@ -27,7 +27,7 @@ from PyQt5.QtWidgets import QTreeWidget, QTreeWidgetItem
 
 DEBUG = False  # Включаем логирование для отладки
 
-SETTINGS_FILE_HARD = ""
+SETTINGS_FILE_HARD = "/home/hidden/Documents/DEV/exr_viewer_settings.json"
 
 DEFAULT_FONT_SIZE = 10  # Размер шрифта по умолчанию
 DEFAULT_COLUMN_WIDTHS = {  # Ширины столбцов по умолчанию
@@ -1111,7 +1111,12 @@ class EXRMetadataViewer(QMainWindow):
         self.folder_items = {}  # {folder_path: QTreeWidgetItem}
         self.root_item = None
         
-        self.settings_file = "exr_viewer_settings.json"
+        # Используем жесткий путь если задан, иначе локальный файл
+        if SETTINGS_FILE_HARD:
+            self.settings_file = SETTINGS_FILE_HARD
+        else:
+            self.settings_file = "exr_viewer_settings.json"
+
         self.load_settings()
         self.setup_ui()
 
@@ -2550,6 +2555,12 @@ class EXRMetadataViewer(QMainWindow):
     def load_settings(self):
         """Загружает настройки из файла"""
         try:
+            # Создаем директорию для настроек если ее нет (для жесткого пути)
+            if SETTINGS_FILE_HARD:
+                settings_dir = os.path.dirname(SETTINGS_FILE_HARD)
+                if settings_dir and not os.path.exists(settings_dir):
+                    os.makedirs(settings_dir, exist_ok=True)
+                    
             if os.path.exists(self.settings_file):
                 with open(self.settings_file, 'r', encoding='utf-8') as f:
                     settings = json.load(f)
@@ -2578,6 +2589,12 @@ class EXRMetadataViewer(QMainWindow):
     def save_settings(self):
         """Сохраняет настройки в файл"""
         try:
+            # Создаем директорию для настроек если ее нет (для жесткого пути)
+            if SETTINGS_FILE_HARD:
+                settings_dir = os.path.dirname(SETTINGS_FILE_HARD)
+                if settings_dir and not os.path.exists(settings_dir):
+                    os.makedirs(settings_dir, exist_ok=True)
+
             # Убедимся, что все данные в правильном формате
             cleaned_color_metadata = {}
             for field_name, color_data in self.color_metadata.items():
