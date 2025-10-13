@@ -24,7 +24,11 @@ from PyQt5.QtGui import QTextCursor, QColor, QTextCharFormat, QFont, QBrush
 from PyQt5.QtWidgets import QTreeWidget, QTreeWidgetItem
 
 # ==================== НАСТРОЙКИ ====================
+
 DEBUG = False  # Включаем логирование для отладки
+
+SETTINGS_FILE_HARD = ""
+
 DEFAULT_FONT_SIZE = 10  # Размер шрифта по умолчанию
 DEFAULT_COLUMN_WIDTHS = {  # Ширины столбцов по умолчанию
     'sequences': [200, 300, 80, 100, 100],  # Путь, Имя, Расширение, Диапазон, Количество
@@ -1268,17 +1272,23 @@ class EXRMetadataViewer(QMainWindow):
             'files': []
         }
         
-        # Собираем все уникальные пути из последовательностей
+        # Собираем все уникальные пути из последовательностей, которые находятся внутри корневой папки
         all_paths = set()
         for seq_info in self.sequences.values():
             path = seq_info['path']
-            all_paths.add(path)
             
-            # Добавляем все родительские пути
-            parent_path = path
-            while parent_path and parent_path.startswith(root_path) and parent_path != root_path:
-                all_paths.add(parent_path)
-                parent_path = os.path.dirname(parent_path)
+            # Добавляем только пути, которые находятся внутри корневой папки
+            if path.startswith(root_path):
+                all_paths.add(path)
+                
+                # Добавляем все родительские пути внутри корневой папки
+                parent_path = path
+                while (parent_path and 
+                       parent_path.startswith(root_path) and 
+                       parent_path != root_path and 
+                       os.path.dirname(parent_path) != parent_path):
+                    all_paths.add(parent_path)
+                    parent_path = os.path.dirname(parent_path)
         
         # Создаем узлы для всех путей
         for path in sorted(all_paths):
@@ -1298,7 +1308,7 @@ class EXRMetadataViewer(QMainWindow):
             # Убедимся, что у последовательности есть все необходимые поля
             self.ensure_sequence_fields(seq_info)
             
-            # Добавляем последовательность в папку
+            # Добавляем последовательность в папку только если она внутри корневой папки
             if path in self.tree_structure:
                 self.tree_structure[path]['sequences'].append(seq_info)
         
@@ -1391,8 +1401,8 @@ class EXRMetadataViewer(QMainWindow):
             root_info['name'], 
             "Папка", 
             "", 
-            str(len(root_info['sequences'])), 
-            root_path
+            "", #str(len(root_info['sequences'])), 
+            "" #root_path
         ])
         root_item.setData(0, Qt.UserRole, {"type": "folder", "path": root_path})
         
@@ -1461,8 +1471,8 @@ class EXRMetadataViewer(QMainWindow):
                 subfolder_info['name'], 
                 "Папка", 
                 "", 
-                str(len(subfolder_info['sequences'])), 
-                subfolder_path
+                "", #str(len(subfolder_info['sequences'])), 
+                "" #subfolder_path
             ])
             subfolder_item.setData(0, Qt.UserRole, {"type": "folder", "path": subfolder_path})
             
@@ -1754,6 +1764,7 @@ class EXRMetadataViewer(QMainWindow):
         self.debug_logger.log(f"--- КОНЕЦ ДОБАВЛЕНИЯ ПОСЛЕДОВАТЕЛЬНОСТИ ---\n")
 
 
+
     def add_sequence_to_tree(self, seq_info):
         """Добавляет последовательность в дерево в реальном времени с сохранением структуры папок"""
         try:
@@ -1764,6 +1775,12 @@ class EXRMetadataViewer(QMainWindow):
             seq_type = seq_info.get('type', 'unknown')
             
             self.debug_logger.log(f"add_sequence_to_tree: Добавляем '{display_name}' в папку '{seq_path}'")
+            
+            # Проверяем, что путь последовательности находится внутри корневой папки
+            root_path = self.folder_path.text()
+            if not seq_path.startswith(root_path):
+                self.debug_logger.log(f"  Пропускаем последовательность вне корневой папки: {seq_path}")
+                return
             
             # Находим или создаем родительскую папку для последовательности
             parent_item = self.find_or_create_folder_item(seq_path)
@@ -1784,9 +1801,6 @@ class EXRMetadataViewer(QMainWindow):
             # Добавляем последовательность в родительскую папку
             parent_item.addChild(seq_item)
             
-            # Обновляем счетчик файлов в папке
-            self.update_folder_count(parent_item)
-            
             # РАСКРЫВАЕМ всю иерархию до корня для этой последовательности
             self.expand_path_to_root(parent_item)
             
@@ -1797,12 +1811,15 @@ class EXRMetadataViewer(QMainWindow):
             import traceback
             self.debug_logger.log(f"Трассировка: {traceback.format_exc()}", "ERROR")
 
+
+
     def expand_path_to_root(self, item):
         """Рекурсивно раскрывает все родительские элементы до корня"""
         current_item = item
         while current_item is not None:
             current_item.setExpanded(True)
             current_item = current_item.parent()
+
 
 
     def find_or_create_folder_item(self, folder_path):
@@ -1816,9 +1833,22 @@ class EXRMetadataViewer(QMainWindow):
         
         self.debug_logger.log(f"find_or_create_folder_item: Создаем папку '{folder_path}'")
         
-        # Разбиваем путь на компоненты
-        parts = folder_path.split(os.sep)
-        current_path = ""
+        # Получаем корневую папку поиска
+        root_path = self.folder_path.text()
+        
+        # Если путь совпадает с корневым, возвращаем корневой элемент
+        if folder_path == root_path:
+            return self.root_item
+        
+        # Определяем относительный путь от корневой папки
+        if folder_path.startswith(root_path):
+            relative_path = folder_path[len(root_path):].lstrip(os.sep)
+        else:
+            relative_path = folder_path
+        
+        # Разбиваем относительный путь на компоненты
+        parts = relative_path.split(os.sep)
+        current_path = root_path
         parent_item = self.root_item
         
         # Строим путь от корня до целевой папки
@@ -1827,14 +1857,7 @@ class EXRMetadataViewer(QMainWindow):
                 continue
                 
             # Обновляем текущий путь
-            if current_path:
-                current_path = os.path.join(current_path, part)
-            else:
-                current_path = part
-            
-            # Если это корневая папка поиска, пропускаем (она уже создана)
-            if current_path == self.folder_path.text():
-                continue
+            current_path = os.path.join(current_path, part)
             
             # Если папка еще не создана, создаем ее
             if current_path not in self.folder_items:
@@ -1843,8 +1866,8 @@ class EXRMetadataViewer(QMainWindow):
                     folder_name,
                     "Папка",
                     "",
-                    "0",
-                    current_path
+                    "", #"0",
+                    "" #current_path
                 ])
                 folder_item.setData(0, Qt.UserRole, {"type": "folder", "path": current_path})
                 
