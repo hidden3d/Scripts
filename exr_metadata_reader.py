@@ -31,6 +31,8 @@ from PyQt5.QtWidgets import QTreeWidget, QTreeWidgetItem
 DEBUG = False  # Включаем логирование для отладки
 
 SETTINGS_FILE_HARD = "/home/hidden/Documents/DEV/exr_viewer_settings.json"
+# Путь к ARRI Reference Tool
+ARRI_REFERENCE_TOOL_PATH = "/home/hidden/Downloads/arri/art-cmd_0.4.1_rhel8_gcc85_x64/bin/art-cmd"
 
 DEFAULT_FONT_SIZE = 10  # Размер шрифта по умолчанию
 DEFAULT_COLUMN_WIDTHS = {  # Ширины столбцов по умолчанию
@@ -38,8 +40,7 @@ DEFAULT_COLUMN_WIDTHS = {  # Ширины столбцов по умолчани
     'metadata': [300, 500]  # Поле, Значение
 }
 
-# Путь к ARRI Reference Tool
-ARRI_REFERENCE_TOOL_PATH = "/home/hidden/Downloads/arri/art-cmd_0.4.1_rhel8_gcc85_x64/bin/art-cmd"
+
 # ===================================================
 
 # Попытка импорта exifread для чтения метаданных изображений
