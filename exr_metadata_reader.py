@@ -1232,13 +1232,28 @@ class EXRMetadataViewer(QMainWindow):
         self.sequences_tree.setColumnWidth(4, 400)  # Путь
         
         self.sequences_tree.setSelectionBehavior(QAbstractItemView.SelectRows)
-# ОТКЛЮЧАЕМ СОРТИРОВКУ для сохранения порядка добавления
         self.sequences_tree.setSortingEnabled(True)
         self.sequences_tree.itemSelectionChanged.connect(self.on_tree_item_selected)
         self.sequences_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.sequences_tree.customContextMenuRequested.connect(self.show_tree_context_menu)
         
         sequences_layout.addWidget(self.sequences_tree)
+        
+        # ДОБАВЛЯЕМ ПОИСК ПО ПОСЛЕДОВАТЕЛЬНОСТЯМ
+        sequences_search_layout = QHBoxLayout()
+        sequences_search_layout.addWidget(QLabel("Поиск по последовательностям:"))
+        self.sequences_search_input = QLineEdit()
+        self.sequences_search_input.setPlaceholderText("Введите текст для поиска...")
+        self.sequences_search_input.textChanged.connect(self.filter_sequences)
+        sequences_search_layout.addWidget(self.sequences_search_input)
+        
+        # Кнопка сброса поиска
+        self.clear_sequences_search_btn = QPushButton("Очистить")
+        self.clear_sequences_search_btn.clicked.connect(self.clear_sequences_search)
+        sequences_search_layout.addWidget(self.clear_sequences_search_btn)
+        
+        sequences_layout.addLayout(sequences_search_layout)
+        
         sequences_widget.setLayout(sequences_layout)
         
         # Нижняя часть - таблица метаданных
@@ -1305,6 +1320,121 @@ class EXRMetadataViewer(QMainWindow):
         # Изначально кнопки Стоп и Продолжить неактивны
         self.stop_btn.setEnabled(False)
         self.continue_btn.setEnabled(False)
+
+
+
+
+
+    def filter_sequences(self):
+        """Фильтрует дерево последовательностей по введенному тексту"""
+        search_text = self.sequences_search_input.text().lower().strip()
+        
+        # Если поле поиска пустое, показываем все элементы
+        if not search_text:
+            self.show_all_tree_items()
+            return
+        
+        # Скрываем все элементы сначала
+        self.hide_all_tree_items()
+        
+        # Показываем только соответствующие поиску элементы и их родителей
+        root = self.sequences_tree.invisibleRootItem()
+        self.filter_tree_items(root, search_text)
+
+    def filter_tree_items(self, parent_item, search_text):
+        """Рекурсивно фильтрует элементы дерева"""
+        visible_children = 0
+        
+        for i in range(parent_item.childCount()):
+            child = parent_item.child(i)
+            
+            # Проверяем, соответствует ли элемент поиску
+            matches_search = self.item_matches_search(child, search_text)
+            
+            # Рекурсивно проверяем детей
+            child_visible_children = self.filter_tree_items(child, search_text)
+            
+            # Показываем элемент если:
+            # 1. Он сам соответствует поиску ИЛИ
+            # 2. У него есть видимые дети
+            if matches_search or child_visible_children > 0:
+                child.setHidden(False)
+                visible_children += 1
+                # Раскрываем родительские элементы, чтобы были видны найденные
+                self.expand_parents(child)
+            else:
+                child.setHidden(True)
+        
+        return visible_children
+
+    def item_matches_search(self, item, search_text):
+        """Проверяет, соответствует ли элемент дерева поисковому запросу"""
+        # Проверяем все столбцы элемента
+        for col in range(self.sequences_tree.columnCount()):
+            text = item.text(col).lower()
+            if search_text in text:
+                return True
+        
+        # Также проверяем данные элемента (если есть)
+        item_data = item.data(0, Qt.UserRole)
+        if item_data:
+            if item_data.get('type') == 'sequence':
+                seq_info = item_data.get('info', {})
+                # Проверяем различные поля последовательности
+                fields_to_check = [
+                    seq_info.get('name', ''),
+                    seq_info.get('display_name', ''),
+                    seq_info.get('type', ''),
+                    seq_info.get('frame_range', ''),
+                    seq_info.get('extension', ''),
+                    seq_info.get('path', '')
+                ]
+                for field in fields_to_check:
+                    if search_text in str(field).lower():
+                        return True
+            elif item_data.get('type') == 'folder':
+                # Для папок проверяем путь
+                path = item_data.get('path', '')
+                if search_text in path.lower():
+                    return True
+        
+        return False
+
+    def expand_parents(self, item):
+        """Раскрывает всех родителей элемента"""
+        parent = item.parent()
+        while parent:
+            parent.setExpanded(True)
+            parent = parent.parent()
+
+    def show_all_tree_items(self):
+        """Показывает все элементы дерева"""
+        root = self.sequences_tree.invisibleRootItem()
+        self.show_tree_items_recursive(root)
+
+    def show_tree_items_recursive(self, parent_item):
+        """Рекурсивно показывает все элементы дерева"""
+        for i in range(parent_item.childCount()):
+            child = parent_item.child(i)
+            child.setHidden(False)
+            self.show_tree_items_recursive(child)
+
+    def hide_all_tree_items(self):
+        """Скрывает все элементы дерева"""
+        root = self.sequences_tree.invisibleRootItem()
+        self.hide_tree_items_recursive(root)
+
+    def hide_tree_items_recursive(self, parent_item):
+        """Рекурсивно скрывает все элементы дерева"""
+        for i in range(parent_item.childCount()):
+            child = parent_item.child(i)
+            child.setHidden(True)
+            self.hide_tree_items_recursive(child)
+
+    def clear_sequences_search(self):
+        """Очищает поле поиска последовательностей и показывает все элементы"""
+        self.sequences_search_input.clear()
+        self.show_all_tree_items()
 
 
 
@@ -2064,6 +2194,9 @@ class EXRMetadataViewer(QMainWindow):
             
             # РАСКРЫВАЕМ ВСЕ ДЕРЕВО после завершения поиска
             self.expand_all_tree_items()
+            
+            # СБРАСЫВАЕМ ПОИСК ПОСЛЕДОВАТЕЛЬНОСТЕЙ
+            self.clear_sequences_search()
             
         except Exception as e:
             self.debug_logger.log(f"Ошибка при завершении поиска: {str(e)}", "ERROR")
