@@ -1169,16 +1169,18 @@ class EXRMetadataViewer(QMainWindow):
         self.stop_btn = QPushButton("СТОП")
         self.continue_btn = QPushButton("ПРОДОЛЖИТЬ")
         self.settings_btn = QPushButton("Настройки цветов")
+
+        # Добавляем галочку для чтения MXF через ART
+        self.art_checkbox = QCheckBox("Читать Arri")
+        self.art_checkbox.setChecked(self.use_art_for_mxf)
+        self.art_checkbox.stateChanged.connect(self.toggle_art_usage)
         
         # Добавляем галочку для включения/выключения логирования
         self.log_checkbox = QCheckBox("Логирование")
         self.log_checkbox.setChecked(DEBUG)
         self.log_checkbox.stateChanged.connect(self.toggle_logging)
         
-        # Добавляем галочку для чтения MXF через ART
-        self.art_checkbox = QCheckBox("Читать MXF через ART")
-        self.art_checkbox.setChecked(self.use_art_for_mxf)
-        self.art_checkbox.stateChanged.connect(self.toggle_art_usage)
+        self.log_btn = QPushButton("Лог")
         
         # Добавляем выбор инструмента для чтения метаданных
         self.metadata_tool_label = QLabel("Инструмент метаданных:")
@@ -1188,7 +1190,7 @@ class EXRMetadataViewer(QMainWindow):
         self.metadata_tool_combo.setCurrentText(METADATA_TOOLS.get(self.default_metadata_tool, 'MediaInfo'))
         self.metadata_tool_combo.currentIndexChanged.connect(self.change_metadata_tool)
         
-        self.log_btn = QPushButton("Лог")
+        
         
         self.start_btn.clicked.connect(self.start_search)
         self.stop_btn.clicked.connect(self.stop_search)
@@ -1200,11 +1202,13 @@ class EXRMetadataViewer(QMainWindow):
         control_layout.addWidget(self.stop_btn)
         control_layout.addWidget(self.continue_btn)
         control_layout.addWidget(self.settings_btn)
-        control_layout.addWidget(self.log_checkbox)
         control_layout.addWidget(self.art_checkbox)
+        control_layout.addWidget(self.log_checkbox)
+        control_layout.addWidget(self.log_btn)
+        
         control_layout.addWidget(self.metadata_tool_label)
         control_layout.addWidget(self.metadata_tool_combo)
-        control_layout.addWidget(self.log_btn)
+        
         control_layout.addStretch()
         
         # Создаем разделитель для таблиц
