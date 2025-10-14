@@ -2159,7 +2159,7 @@ class EXRMetadataViewer(QMainWindow):
             # СТАНДАРТНАЯ ЛОГИКА (когда forced_tool = None)
             else:
                 # Для MXF файлов (логика остается прежней)
-                if extension.lower() == '.mxf':
+                if extension.lower() == '.mxf' or '.arr' or '.arx':
                     # Если включена галочка и ART доступен, используем ART
                     if self.use_art_for_mxf and os.path.exists(ARRI_REFERENCE_TOOL_PATH):
                         try:
