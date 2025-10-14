@@ -1,3 +1,4 @@
+
 import os
 import sys
 import json
@@ -9,6 +10,8 @@ from collections import defaultdict
 import ast
 import datetime
 import logging
+import tempfile
+import shutil
 
 import OpenEXR
 import Imath
@@ -34,6 +37,9 @@ DEFAULT_COLUMN_WIDTHS = {  # Ширины столбцов по умолчани
     'sequences': [200, 300, 80, 100, 100],  # Путь, Имя, Расширение, Диапазон, Количество
     'metadata': [300, 500]  # Поле, Значение
 }
+
+# Путь к ARRI Reference Tool
+ARRI_REFERENCE_TOOL_PATH = "/home/hidden/Downloads/arri/art-cmd_0.4.1_rhel8_gcc85_x64/bin/art-cmd"
 # ===================================================
 
 # Попытка импорта exifread для чтения метаданных изображений
@@ -385,7 +391,7 @@ class SequenceFinder(QThread):
                     # Имя последовательности - имя первого файла
                     display_name = file_names[0]
                     
-                    # Используем путь + имя группы как ключ для уникальности
+                    # Используем путь + имени группы как ключ для уникальности
                     unique_key = f"{directory}/{group_key}"
                     
                     sequences[unique_key] = {
@@ -1106,6 +1112,9 @@ class EXRMetadataViewer(QMainWindow):
         self.sequence_colors = {}  # {seq_type: {'r': int, 'g': int, 'b': int}}
         self.ordered_metadata_fields = []  # Порядок отображения полей метаданных
         
+        # Настройки
+        self.use_art_for_mxf = False  # По умолчанию используем MediaInfo для MXF
+        
         # Для древовидной структуры
         self.tree_structure = {}  # {path: {subfolders: {}, sequences: []}}
         self.folder_items = {}  # {folder_path: QTreeWidgetItem}
@@ -1155,6 +1164,11 @@ class EXRMetadataViewer(QMainWindow):
         self.log_checkbox.setChecked(DEBUG)
         self.log_checkbox.stateChanged.connect(self.toggle_logging)
         
+        # Добавляем галочку для чтения MXF через ART
+        self.art_checkbox = QCheckBox("Читать MXF через ART")
+        self.art_checkbox.setChecked(self.use_art_for_mxf)
+        self.art_checkbox.stateChanged.connect(self.toggle_art_usage)
+        
         self.log_btn = QPushButton("Лог")
         
         self.start_btn.clicked.connect(self.start_search)
@@ -1168,6 +1182,7 @@ class EXRMetadataViewer(QMainWindow):
         control_layout.addWidget(self.continue_btn)
         control_layout.addWidget(self.settings_btn)
         control_layout.addWidget(self.log_checkbox)
+        control_layout.addWidget(self.art_checkbox)
         control_layout.addWidget(self.log_btn)
         control_layout.addStretch()
         
@@ -1204,7 +1219,10 @@ class EXRMetadataViewer(QMainWindow):
         # Нижняя часть - таблица метаданных
         metadata_widget = QWidget()
         metadata_layout = QVBoxLayout()
-        metadata_layout.addWidget(QLabel("Метаданные выбранного элемента:"))
+        
+        # Метка для отображения источника метаданных
+        self.metadata_source_label = QLabel("Метаданные выбранного элемента:")
+        metadata_layout.addWidget(self.metadata_source_label)
         
         self.metadata_table = QTableWidget()
         self.metadata_table.setColumnCount(2)
@@ -1262,6 +1280,15 @@ class EXRMetadataViewer(QMainWindow):
         # Изначально кнопки Стоп и Продолжить неактивны
         self.stop_btn.setEnabled(False)
         self.continue_btn.setEnabled(False)
+
+    def toggle_art_usage(self, state):
+        """Включает/выключает использование ART для MXF файлов"""
+        self.use_art_for_mxf = state == Qt.Checked
+        self.save_settings()
+        if state == Qt.Checked:
+            self.debug_logger.log("Включено чтение MXF через ART")
+        else:
+            self.debug_logger.log("Выключено чтение MXF через ART")
 
     def build_tree_structure(self):
         """Строит полную древовидную структуру папок и последовательностей"""
@@ -1556,6 +1583,7 @@ class EXRMetadataViewer(QMainWindow):
             self.metadata_table.setRowCount(0)
             self.current_sequence_files = []
             self.current_metadata = {}
+            self.metadata_source_label.setText("Метаданные выбранного элемента:")
 
     def show_tree_context_menu(self, position):
         """Контекстное меню для дерева"""
@@ -1652,6 +1680,7 @@ class EXRMetadataViewer(QMainWindow):
         self.current_sequence_files = []
         self.current_metadata = {}
         self.folder_items = {}  # Очищаем словарь папок
+        self.metadata_source_label.setText("Метаданные выбранного элемента:")
         
         # Создаем корневой элемент
         root_path = folder
@@ -1974,6 +2003,28 @@ class EXRMetadataViewer(QMainWindow):
             count += self.count_tree_items(item.child(i))
         return count
 
+    def flatten_json(self, json_data, parent_key='', separator='.'):
+        """
+        Рекурсивно разбирает JSON на отдельные ключи и значения
+        """
+        items = {}
+        if isinstance(json_data, dict):
+            for key, value in json_data.items():
+                new_key = f"{parent_key}{separator}{key}" if parent_key else key
+                if isinstance(value, (dict, list)):
+                    items.update(self.flatten_json(value, new_key, separator))
+                else:
+                    items[new_key] = value
+        elif isinstance(json_data, list):
+            for i, value in enumerate(json_data):
+                new_key = f"{parent_key}{separator}{i}" if parent_key else str(i)
+                if isinstance(value, (dict, list)):
+                    items.update(self.flatten_json(value, new_key, separator))
+                else:
+                    items[new_key] = value
+        else:
+            items[parent_key] = json_data
+        return items
 
     def display_metadata(self, file_path, extension):
         """Отображает метаданные для файла"""
@@ -1982,22 +2033,101 @@ class EXRMetadataViewer(QMainWindow):
                 self.metadata_table.setRowCount(1)
                 self.metadata_table.setItem(0, 0, QTableWidgetItem("Ошибка"))
                 self.metadata_table.setItem(0, 1, QTableWidgetItem(f"Файл не найден: {file_path}"))
+                self.metadata_source_label.setText("Метаданные выбранного элемента: Ошибка")
                 return
             
             # Собираем все метаданные
             self.current_metadata = {}
+            metadata_source = "System"
+            
+            # Для MXF файлов
+            if extension.lower() == '.mxf':
+                # Если включена галочка и ART доступен, используем ART
+                if self.use_art_for_mxf and os.path.exists(ARRI_REFERENCE_TOOL_PATH):
+                    try:
+                        # Создаем временный файл для вывода ARRI Tool
+                        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp_file:
+                            temp_json_path = temp_file.name
+                        
+                        # Запускаем ARRI Reference Tool
+                        cmd = [
+                            ARRI_REFERENCE_TOOL_PATH,
+                            'export',
+                            '--duration', '1',
+                            '--input', file_path,
+                            '--output', temp_json_path
+                        ]
+                        
+                        self.debug_logger.log(f"Запуск ARRI Reference Tool: {' '.join(cmd)}")
+                        
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                        
+                        if result.returncode == 0 and os.path.exists(temp_json_path):
+                            # Успешно получили метаданные от ARRI Tool
+                            with open(temp_json_path, 'r', encoding='utf-8') as f:
+                                arri_metadata = json.load(f)
+                            
+                            # Разбираем JSON на отдельные ключи и значения
+                            flattened_metadata = self.flatten_json(arri_metadata)
+                            
+                            # Добавляем метаданные в общий словарь
+                            for key, value in flattened_metadata.items():
+                                self.current_metadata[f"ARRI.{key}"] = self.format_metadata_value(value)
+                            
+                            metadata_source = "ARRI Reference Tool"
+                            self.debug_logger.log(f"Прочитано {len(flattened_metadata)} метаданных ARRI из {file_path}")
+                            
+                            # Удаляем временный файл
+                            os.unlink(temp_json_path)
+                        else:
+                            self.debug_logger.log(f"ARRI Tool вернул ошибку: {result.stderr}", "WARNING")
+                            # Если ARRI Tool не сработал, используем MediaInfo
+                            if PYMEDIAINFO_AVAILABLE:
+                                self.debug_logger.log("Используем MediaInfo как fallback для MXF")
+                                self.add_mediainfo_metadata(file_path)
+                                metadata_source = "MediaInfo (ART fallback)"
+                            else:
+                                self.current_metadata["ARRI Tool Error"] = f"ARRI Tool failed: {result.stderr}"
+                                metadata_source = "ARRI Tool Failed"
+                                
+                    except subprocess.TimeoutExpired:
+                        self.debug_logger.log("ARRI Tool timeout", "WARNING")
+                        if PYMEDIAINFO_AVAILABLE:
+                            self.add_mediainfo_metadata(file_path)
+                            metadata_source = "MediaInfo (ART timeout fallback)"
+                        else:
+                            self.current_metadata["ARRI Tool Error"] = "ARRI Tool timeout"
+                            metadata_source = "ARRI Tool Timeout"
+                    except Exception as e:
+                        self.debug_logger.log(f"Ошибка ARRI Tool: {str(e)}", "WARNING")
+                        if PYMEDIAINFO_AVAILABLE:
+                            self.add_mediainfo_metadata(file_path)
+                            metadata_source = "MediaInfo (ART error fallback)"
+                        else:
+                            self.current_metadata["ARRI Tool Error"] = f"ARRI Tool error: {str(e)}"
+                            metadata_source = "ARRI Tool Error"
+                else:
+                    # По умолчанию используем MediaInfo для MXF
+                    if PYMEDIAINFO_AVAILABLE:
+                        self.add_mediainfo_metadata(file_path)
+                        metadata_source = "MediaInfo"
+                    else:
+                        self.current_metadata["MediaInfo Error"] = "MediaInfo не доступен"
+                        metadata_source = "MediaInfo Not Available"
             
             # Для EXR файлов используем OpenEXR для чтения метаданных
-            if extension.lower() == '.exr':
+            elif extension.lower() == '.exr':
                 try:
                     exr_file = OpenEXR.InputFile(file_path)
                     header = exr_file.header()
                     
                     for key, value in header.items():
                         self.current_metadata[key] = self.format_metadata_value(value)
+                    metadata_source = "OpenEXR"
                     self.debug_logger.log(f"Прочитано {len(header)} метаданных EXR из {file_path}")
                 except Exception as e:
                     self.current_metadata["Ошибка чтения EXR"] = f"Не удалось прочитать EXR метаданные: {str(e)}"
+                    metadata_source = "OpenEXR Error"
                     self.debug_logger.log(f"Ошибка чтения EXR для {file_path}: {str(e)}", "ERROR")
             
             # Для JPEG и RAW файлов используем exifread
@@ -2011,12 +2141,15 @@ class EXRMetadataViewer(QMainWindow):
                             # Форматируем значение для лучшего отображения
                             formatted_value = self.format_exif_value(tag, value)
                             self.current_metadata[f"EXIF {tag}"] = formatted_value
+                        metadata_source = "exifread"
                         self.debug_logger.log(f"Прочитано {len(tags)} EXIF тегов из {file_path}")
                     else:
                         self.current_metadata["EXIF"] = "EXIF данные не найдены"
+                        metadata_source = "exifread"
                         self.debug_logger.log(f"EXIF данные не найдены в {file_path}")
                 except Exception as e:
                     self.current_metadata["Ошибка чтения EXIF"] = f"Не удалось прочитать EXIF метаданные: {str(e)}"
+                    metadata_source = "exifread Error"
                     self.debug_logger.log(f"Ошибка чтения EXIF для {file_path}: {str(e)}", "ERROR")
             
             # Для PNG, TIFF и других изображений используем Pillow
@@ -2035,9 +2168,11 @@ class EXRMetadataViewer(QMainWindow):
                                 tag_name = TAGS.get(tag_id, tag_id)
                                 formatted_value = self.format_exif_value(tag_name, value)
                                 self.current_metadata[f"EXIF {tag_name}"] = formatted_value
+                            metadata_source = "Pillow"
                             self.debug_logger.log(f"Прочитано {len(exif_data)} EXIF тегов из {file_path}")
                         else:
                             self.current_metadata["EXIF"] = "EXIF данные не найдены"
+                            metadata_source = "Pillow"
                             self.debug_logger.log(f"EXIF данные не найдены в {file_path}")
                         
                         # Получаем другую информацию
@@ -2047,11 +2182,11 @@ class EXRMetadataViewer(QMainWindow):
                                 self.current_metadata[key] = str(value)
                 except Exception as e:
                     self.current_metadata["Ошибка чтения"] = f"Не удалось прочитать метаданные изображения: {str(e)}"
+                    metadata_source = "Pillow Error"
                     self.debug_logger.log(f"Ошибка чтения изображения для {file_path}: {str(e)}", "ERROR")
             
-            # Используем pymediainfo для видео, аудио и других медиафайлов
-            if PYMEDIAINFO_AVAILABLE:
-                # Определяем, является ли файл медиафайлом (видео, аудио, изображения)
+            # Используем pymediainfo для видео, аудио и других медиафайлов (кроме MXF, которые уже обработаны)
+            elif PYMEDIAINFO_AVAILABLE and extension.lower() not in ['.mxf']:
                 media_extensions = [
                     # Видео форматы
                     '.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg',
@@ -2060,43 +2195,12 @@ class EXRMetadataViewer(QMainWindow):
                     '.mp3', '.wav', '.aac', '.flac', '.ogg', '.wma', '.m4a', '.aiff', '.aif',
                     '.amr', '.ape', '.opus', '.ra', '.rm', '.voc', '.8svx',
                     # Другие медиаформаты
-                    '.swf', '.dv', '.mxf', '.nut', '.yuv'
+                    '.swf', '.dv', '.nut', '.yuv'
                 ]
                 
                 if extension.lower() in media_extensions:
-                    try:
-                        media_info = MediaInfo.parse(file_path)
-                        self.debug_logger.log(f"Прочитано {len(media_info.tracks)} треков MediaInfo из {file_path}")
-                        
-                        for track in media_info.tracks:
-                            track_type = track.track_type
-                            
-                            # Добавляем заголовок для типа трека
-                            self.current_metadata[f"MediaInfo - {track_type} Track"] = "---"
-                            
-                            # Получаем все атрибуты трека
-                            for attribute_name in dir(track):
-                                # Пропускаем служебные атрибуты
-                                if attribute_name.startswith('_') or attribute_name in ['to_data', 'to_json']:
-                                    continue
-                                
-                                try:
-                                    attribute_value = getattr(track, attribute_name)
-                                    
-                                    # Пропускаем None, пустые строки и слишком длинные значения
-                                    if attribute_value is not None and str(attribute_value).strip() != '':
-                                        # Форматируем длинные значения
-                                        str_value = str(attribute_value)
-                                        if len(str_value) > 500:
-                                            str_value = str_value[:500] + "... [урезано]"
-                                        
-                                        self.current_metadata[f"MediaInfo {track_type} - {attribute_name}"] = str_value
-                                except Exception as e:
-                                    self.debug_logger.log(f"Ошибка чтения атрибута {attribute_name} для трека {track_type}: {str(e)}", "WARNING")
-                        
-                    except Exception as e:
-                        self.current_metadata["Ошибка чтения MediaInfo"] = f"Не удалось прочитать MediaInfo метаданные: {str(e)}"
-                        self.debug_logger.log(f"Ошибка чтения MediaInfo для {file_path}: {str(e)}", "ERROR")
+                    self.add_mediainfo_metadata(file_path)
+                    metadata_source = "MediaInfo"
             
             # Для всех файлов добавляем базовую информацию
             file_stats = os.stat(file_path)
@@ -2153,6 +2257,9 @@ class EXRMetadataViewer(QMainWindow):
                 # Применяем цвет, если поле есть в цветном списке
                 self.apply_field_color(row, key)
             
+            # Обновляем метку с источником метаданных
+            self.metadata_source_label.setText(f"Метаданные выбранного элемента ({metadata_source}):")
+            
             # Сбрасываем фильтр поиска при отображении новых данных
             self.clear_search()
             
@@ -2160,7 +2267,44 @@ class EXRMetadataViewer(QMainWindow):
             self.metadata_table.setRowCount(1)
             self.metadata_table.setItem(0, 0, QTableWidgetItem("Ошибка"))
             self.metadata_table.setItem(0, 1, QTableWidgetItem(f"Ошибка чтения метаданных: {str(e)}"))
+            self.metadata_source_label.setText("Метаданные выбранного элемента: Ошибка")
             self.debug_logger.log(f"Общая ошибка чтения метаданных для {file_path}: {str(e)}", "ERROR")
+
+    def add_mediainfo_metadata(self, file_path):
+        """Добавляет метаданные через MediaInfo"""
+        try:
+            media_info = MediaInfo.parse(file_path)
+            self.debug_logger.log(f"Прочитано {len(media_info.tracks)} треков MediaInfo из {file_path}")
+            
+            for track in media_info.tracks:
+                track_type = track.track_type
+                
+                # Добавляем заголовок для типа трека
+                self.current_metadata[f"MediaInfo - {track_type} Track"] = "---"
+                
+                # Получаем все атрибуты трека
+                for attribute_name in dir(track):
+                    # Пропускаем служебные атрибуты
+                    if attribute_name.startswith('_') or attribute_name in ['to_data', 'to_json']:
+                        continue
+                    
+                    try:
+                        attribute_value = getattr(track, attribute_name)
+                        
+                        # Пропускаем None, пустые строки и слишком длинные значения
+                        if attribute_value is not None and str(attribute_value).strip() != '':
+                            # Форматируем длинные значения
+                            str_value = str(attribute_value)
+                            if len(str_value) > 500:
+                                str_value = str_value[:500] + "... [урезано]"
+                            
+                            self.current_metadata[f"MediaInfo {track_type} - {attribute_name}"] = str_value
+                    except Exception as e:
+                        self.debug_logger.log(f"Ошибка чтения атрибута {attribute_name} для трека {track_type}: {str(e)}", "WARNING")
+                        
+        except Exception as e:
+            self.current_metadata["Ошибка чтения MediaInfo"] = f"Не удалось прочитать MediaInfo метаданные: {str(e)}"
+            self.debug_logger.log(f"Ошибка чтения MediaInfo для {file_path}: {str(e)}", "ERROR")
 
     def format_exif_value(self, tag, value):
         """Форматирует значение EXIF для лучшего отображения"""
@@ -2575,6 +2719,9 @@ class EXRMetadataViewer(QMainWindow):
                     # Загружаем порядок полей метаданных
                     self.ordered_metadata_fields = settings.get('ordered_metadata_fields', [])
                     
+                    # Загружаем настройку использования ART для MXF
+                    self.use_art_for_mxf = settings.get('use_art_for_mxf', False)
+                    
                     # Если ordered_metadata_fields пуст, инициализируем его из color_metadata
                     if not self.ordered_metadata_fields and self.color_metadata:
                         self.ordered_metadata_fields = list(self.color_metadata.keys())
@@ -2585,6 +2732,7 @@ class EXRMetadataViewer(QMainWindow):
             self.removed_metadata = {}
             self.sequence_colors = {}
             self.ordered_metadata_fields = []
+            self.use_art_for_mxf = False
 
     def save_settings(self):
         """Сохраняет настройки в файл"""
@@ -2615,7 +2763,8 @@ class EXRMetadataViewer(QMainWindow):
                 'color_metadata': cleaned_color_metadata,
                 'removed_metadata': cleaned_removed_metadata,
                 'sequence_colors': cleaned_sequence_colors,
-                'ordered_metadata_fields': self.ordered_metadata_fields
+                'ordered_metadata_fields': self.ordered_metadata_fields,
+                'use_art_for_mxf': self.use_art_for_mxf
             }
             
             with open(self.settings_file, 'w', encoding='utf-8') as f:

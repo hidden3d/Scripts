@@ -154,6 +154,11 @@
       "r": 253,
       "g": 215,
       "b": 255
+    },
+    "video_single_mxf": {
+      "r": 226,
+      "g": 199,
+      "b": 255
     }
   },
   "ordered_metadata_fields": [
@@ -176,5 +181,6 @@
     "resolveorigfilename",
     "dataWindow",
     "displayWindow"
-  ]
+  ],
+  "use_art_for_mxf": false
 }
