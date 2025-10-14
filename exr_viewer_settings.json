@@ -113,6 +113,30 @@
       "g": 232,
       "b": 255,
       "removed": false
+    },
+    "EXIF EXIF FocalLength": {
+      "r": 216,
+      "g": 232,
+      "b": 255,
+      "removed": false
+    },
+    "EXIF EXIF FocalLengthIn35mmFilm": {
+      "r": 216,
+      "g": 232,
+      "b": 255,
+      "removed": false
+    },
+    "EXIF Image ImageLength": {
+      "r": 235,
+      "g": 220,
+      "b": 255,
+      "removed": false
+    },
+    "EXIF Image ImageWidth": {
+      "r": 235,
+      "g": 220,
+      "b": 255,
+      "removed": false
     }
   },
   "removed_metadata": {
@@ -131,9 +155,9 @@
   },
   "sequence_colors": {
     "video_single_mov": {
-      "r": 237,
+      "r": 246,
       "g": 255,
-      "b": 235
+      "b": 198
     },
     "video_single_mp4": {
       "r": 253,
@@ -159,6 +183,16 @@
       "r": 226,
       "g": 199,
       "b": 255
+    },
+    "single_jpg": {
+      "r": 255,
+      "g": 188,
+      "b": 188
+    },
+    "sequence_jpg": {
+      "r": 255,
+      "g": 203,
+      "b": 203
     }
   },
   "ordered_metadata_fields": [
@@ -174,13 +208,17 @@
     "camera_lens_type",
     "arriraw/lensDevice/lensModel",
     "EXIF Image LensModel",
+    "EXIF EXIF FocalLength",
+    "EXIF EXIF FocalLengthIn35mmFilm",
     "owner",
     "clipName",
     "arriraw/slateInfo/clipName",
     "reelName",
     "resolveorigfilename",
     "dataWindow",
-    "displayWindow"
+    "displayWindow",
+    "EXIF Image ImageLength",
+    "EXIF Image ImageWidth"
   ],
   "use_art_for_mxf": false
 }

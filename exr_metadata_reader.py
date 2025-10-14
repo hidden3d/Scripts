@@ -34,7 +34,7 @@ SETTINGS_FILE_HARD = "/home/hidden/Documents/DEV/exr_viewer_settings.json"
 
 DEFAULT_FONT_SIZE = 10  # Размер шрифта по умолчанию
 DEFAULT_COLUMN_WIDTHS = {  # Ширины столбцов по умолчанию
-    'sequences': [200, 300, 80, 100, 100],  # Путь, Имя, Расширение, Диапазон, Количество
+    'sequences': [500, 500, 80, 100, 100],  # Путь, Имя, Расширение, Диапазон, Количество
     'metadata': [300, 500]  # Поле, Значение
 }
 
@@ -1200,10 +1200,10 @@ class EXRMetadataViewer(QMainWindow):
         self.sequences_tree.setHeaderLabels(["Имя", "Тип", "Диапазон", "Количество", "Путь"])
         
         # Настраиваем ширины столбцов
-        self.sequences_tree.setColumnWidth(0, 300)  # Имя
-        self.sequences_tree.setColumnWidth(1, 120)  # Тип
-        self.sequences_tree.setColumnWidth(2, 120)  # Диапазон
-        self.sequences_tree.setColumnWidth(3, 80)   # Количество
+        self.sequences_tree.setColumnWidth(0, 500)  # Имя
+        self.sequences_tree.setColumnWidth(1, 200)  # Тип
+        self.sequences_tree.setColumnWidth(2, 200)  # Диапазон
+        self.sequences_tree.setColumnWidth(3, 100)   # Количество
         self.sequences_tree.setColumnWidth(4, 400)  # Путь
         
         self.sequences_tree.setSelectionBehavior(QAbstractItemView.SelectRows)
