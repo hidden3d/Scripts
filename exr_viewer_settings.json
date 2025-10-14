@@ -137,6 +137,42 @@
       "g": 220,
       "b": 255,
       "removed": false
+    },
+    "ARRI.descriptiveMetadataSets.0.metadataSetPayload.cameraModel": {
+      "r": 216,
+      "g": 255,
+      "b": 221,
+      "removed": false
+    },
+    "ARRI.descriptiveMetadataSets.1.metadataSetPayload.lensModel": {
+      "r": 216,
+      "g": 232,
+      "b": 255,
+      "removed": false
+    },
+    "ARRI.frameBasedMetadata.frames.0.frameBasedMetadataSets.Lens State.lensFocalLength": {
+      "r": 216,
+      "g": 232,
+      "b": 255,
+      "removed": false
+    },
+    "ARRI.clipBasedMetadataSets.0.metadataSetPayload.sensorDimensions.height": {
+      "r": 186,
+      "g": 218,
+      "b": 109,
+      "removed": false
+    },
+    "ARRI.clipBasedMetadataSets.0.metadataSetName": {
+      "r": 186,
+      "g": 218,
+      "b": 109,
+      "removed": false
+    },
+    "ARRI.clipBasedMetadataSets.0.metadataSetPayload.sensorDimensions.width": {
+      "r": 186,
+      "g": 218,
+      "b": 109,
+      "removed": false
     }
   },
   "removed_metadata": {
@@ -193,6 +229,11 @@
       "r": 255,
       "g": 203,
       "b": 203
+    },
+    "sequence_arx": {
+      "r": 232,
+      "g": 255,
+      "b": 216
     }
   },
   "ordered_metadata_fields": [
@@ -203,6 +244,7 @@
     "camera_type",
     "camera_id",
     "EXIF Image Tag 0xC614",
+    "ARRI.descriptiveMetadataSets.0.metadataSetPayload.cameraModel",
     "lensModel",
     "camera_focal",
     "camera_lens_type",
@@ -210,6 +252,8 @@
     "EXIF Image LensModel",
     "EXIF EXIF FocalLength",
     "EXIF EXIF FocalLengthIn35mmFilm",
+    "ARRI.descriptiveMetadataSets.1.metadataSetPayload.lensModel",
+    "ARRI.frameBasedMetadata.frames.0.frameBasedMetadataSets.Lens State.lensFocalLength",
     "owner",
     "clipName",
     "arriraw/slateInfo/clipName",
@@ -218,7 +262,10 @@
     "dataWindow",
     "displayWindow",
     "EXIF Image ImageLength",
-    "EXIF Image ImageWidth"
+    "EXIF Image ImageWidth",
+    "ARRI.clipBasedMetadataSets.0.metadataSetName",
+    "ARRI.clipBasedMetadataSets.0.metadataSetPayload.sensorDimensions.height",
+    "ARRI.clipBasedMetadataSets.0.metadataSetPayload.sensorDimensions.width"
   ],
   "use_art_for_mxf": false
 }
