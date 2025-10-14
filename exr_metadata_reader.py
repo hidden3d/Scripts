@@ -40,6 +40,10 @@ DEFAULT_COLUMN_WIDTHS = {  # Ширины столбцов по умолчани
     'metadata': [300, 500]  # Поле, Значение
 }
 
+METADATA_TOOLS = {
+    'mediainfo': 'MediaInfo',
+    'ffprobe': 'FFprobe'
+}
 
 # ===================================================
 
@@ -1115,12 +1119,18 @@ class EXRMetadataViewer(QMainWindow):
         
         # Настройки
         self.use_art_for_mxf = False  # По умолчанию используем MediaInfo для MXF
+        self.default_metadata_tool = 'mediainfo'  # Инструмент по умолчанию для чтения метаданных
         
         # Для древовидной структуры
         self.tree_structure = {}  # {path: {subfolders: {}, sequences: []}}
         self.folder_items = {}  # {folder_path: QTreeWidgetItem}
         self.root_item = None
+
+        self.forced_metadata_tool = None  # Текущий форсированный инструмент
+        self.forced_metadata_file = None  # Файл, для которого применено форсированное чтение
         
+
+
         # Используем жесткий путь если задан, иначе локальный файл
         if SETTINGS_FILE_HARD:
             self.settings_file = SETTINGS_FILE_HARD
@@ -1170,6 +1180,14 @@ class EXRMetadataViewer(QMainWindow):
         self.art_checkbox.setChecked(self.use_art_for_mxf)
         self.art_checkbox.stateChanged.connect(self.toggle_art_usage)
         
+        # Добавляем выбор инструмента для чтения метаданных
+        self.metadata_tool_label = QLabel("Инструмент метаданных:")
+        self.metadata_tool_combo = QComboBox()
+        for tool_key, tool_name in METADATA_TOOLS.items():
+            self.metadata_tool_combo.addItem(tool_name, tool_key)
+        self.metadata_tool_combo.setCurrentText(METADATA_TOOLS.get(self.default_metadata_tool, 'MediaInfo'))
+        self.metadata_tool_combo.currentIndexChanged.connect(self.change_metadata_tool)
+        
         self.log_btn = QPushButton("Лог")
         
         self.start_btn.clicked.connect(self.start_search)
@@ -1184,6 +1202,8 @@ class EXRMetadataViewer(QMainWindow):
         control_layout.addWidget(self.settings_btn)
         control_layout.addWidget(self.log_checkbox)
         control_layout.addWidget(self.art_checkbox)
+        control_layout.addWidget(self.metadata_tool_label)
+        control_layout.addWidget(self.metadata_tool_combo)
         control_layout.addWidget(self.log_btn)
         control_layout.addStretch()
         
@@ -1281,6 +1301,82 @@ class EXRMetadataViewer(QMainWindow):
         # Изначально кнопки Стоп и Продолжить неактивны
         self.stop_btn.setEnabled(False)
         self.continue_btn.setEnabled(False)
+
+
+
+    def change_metadata_tool(self, index):
+        """Изменяет инструмент для чтения метаданных"""
+        tool_key = self.metadata_tool_combo.currentData()
+        self.default_metadata_tool = tool_key
+        self.save_settings()
+        self.debug_logger.log(f"Изменен инструмент метаданных на: {METADATA_TOOLS[tool_key]}")
+
+
+    def show_tree_context_menu(self, position):
+        """Контекстное меню для дерева"""
+        index = self.sequences_tree.indexAt(position)
+        if not index.isValid():
+            return
+            
+        item = self.sequences_tree.itemFromIndex(index)
+        item_data = item.data(0, Qt.UserRole)
+        
+        if not item_data:
+            return
+            
+        menu = QMenu(self)
+        
+        if item_data['type'] == 'folder':
+            open_action = menu.addAction("Открыть в проводнике")
+            expand_all_action = menu.addAction("Раскрыть все вложенные")
+            collapse_all_action = menu.addAction("Свернуть все вложенные")
+            
+            open_action.triggered.connect(lambda: self.open_in_explorer(item_data['path']))
+            expand_all_action.triggered.connect(lambda: self.expand_folder_recursive(item))
+            collapse_all_action.triggered.connect(lambda: self.collapse_folder_recursive(item))
+        else:
+            # Для последовательности или одиночного файла
+            seq_info = item_data['info']
+            open_action = menu.addAction("Открыть в проводнике")
+            open_action.triggered.connect(lambda: self.open_in_explorer(seq_info['path']))
+            
+            menu.addSeparator()
+            
+            # ВСЕГДА добавляем пункты для принудительного чтения метаданных для ЛЮБОГО файла
+            if len(seq_info['files']) > 0:
+                file_path = seq_info['files'][0]
+                extension = seq_info['extension'].lower()
+                
+                # Показываем эти пункты для ВСЕХ файлов, независимо от расширения
+                mediainfo_action = menu.addAction("Читать принудительно mediainfo")
+                ffprobe_action = menu.addAction("Читать принудительно ffprobe")
+                
+                mediainfo_action.triggered.connect(lambda: self.force_read_metadata(file_path, extension, 'mediainfo'))
+                ffprobe_action.triggered.connect(lambda: self.force_read_metadata(file_path, extension, 'ffprobe'))
+                
+                menu.addSeparator()
+            
+            color_action = menu.addAction(f"Изменить цвет для '{seq_info['type']}'")
+            color_action.triggered.connect(lambda: self.change_sequence_color(seq_info['type']))
+        
+        menu.exec_(self.sequences_tree.viewport().mapToGlobal(position))
+
+
+    def force_read_metadata(self, file_path, extension, tool):
+        """Принудительно читает метаданные с помощью указанного инструмента"""
+        self.debug_logger.log(f"Принудительное чтение метаданных для {file_path} с помощью {tool}")
+        
+        # Устанавливаем состояние форсированного чтения
+        self.forced_metadata_tool = tool
+        self.forced_metadata_file = file_path
+        
+        # Читаем метаданные с выбранным инструментом
+        self.display_metadata(file_path, extension, forced_tool=tool)
+
+
+
+
+
 
     def toggle_art_usage(self, state):
         """Включает/выключает использование ART для MXF файлов"""
@@ -1578,48 +1674,28 @@ class EXRMetadataViewer(QMainWindow):
             extension = seq_info['extension']
             
             if self.current_sequence_files:
-                self.display_metadata(self.current_sequence_files[0], extension)
+                current_file = self.current_sequence_files[0]
+                
+                # Сбрасываем форсированное чтение, если выбран другой файл
+                if self.forced_metadata_file != current_file:
+                    self.forced_metadata_tool = None
+                    self.forced_metadata_file = None
+                    
+                # Определяем, использовать ли форсированный инструмент
+                if self.forced_metadata_tool and self.forced_metadata_file == current_file:
+                    self.display_metadata(current_file, extension, forced_tool=self.forced_metadata_tool)
+                else:
+                    self.display_metadata(current_file, extension)
         else:
-            # Для папки очищаем метаданные
+            # Для папки очищаем метаданные и состояние форсированного чтения
             self.metadata_table.setRowCount(0)
             self.current_sequence_files = []
             self.current_metadata = {}
+            self.forced_metadata_tool = None
+            self.forced_metadata_file = None
             self.metadata_source_label.setText("Метаданные выбранного элемента:")
 
-    def show_tree_context_menu(self, position):
-        """Контекстное меню для дерева"""
-        index = self.sequences_tree.indexAt(position)
-        if not index.isValid():
-            return
-            
-        item = self.sequences_tree.itemFromIndex(index)
-        item_data = item.data(0, Qt.UserRole)
-        
-        if not item_data:
-            return
-            
-        menu = QMenu(self)
-        
-        if item_data['type'] == 'folder':
-            open_action = menu.addAction("Открыть в проводнике")
-            expand_all_action = menu.addAction("Раскрыть все вложенные")
-            collapse_all_action = menu.addAction("Свернуть все вложенные")
-            
-            open_action.triggered.connect(lambda: self.open_in_explorer(item_data['path']))
-            expand_all_action.triggered.connect(lambda: self.expand_folder_recursive(item))
-            collapse_all_action.triggered.connect(lambda: self.collapse_folder_recursive(item))
-        else:
-            # Для последовательности
-            seq_info = item_data['info']
-            open_action = menu.addAction("Открыть в проводнике")
-            open_action.triggered.connect(lambda: self.open_in_explorer(seq_info['path']))
-            
-            menu.addSeparator()
-            
-            color_action = menu.addAction(f"Изменить цвет для '{seq_info['type']}'")
-            color_action.triggered.connect(lambda: self.change_sequence_color(seq_info['type']))
-        
-        menu.exec_(self.sequences_tree.viewport().mapToGlobal(position))
+
 
     def expand_folder_recursive(self, item):
         """Рекурсивно раскрывает папку и все вложенные"""
@@ -2027,7 +2103,17 @@ class EXRMetadataViewer(QMainWindow):
             items[parent_key] = json_data
         return items
 
-    def display_metadata(self, file_path, extension):
+
+
+
+
+
+
+
+
+
+
+    def display_metadata(self, file_path, extension, forced_tool=None):
         """Отображает метаданные для файла"""
         try:
             if not os.path.exists(file_path):
@@ -2037,171 +2123,198 @@ class EXRMetadataViewer(QMainWindow):
                 self.metadata_source_label.setText("Метаданные выбранного элемента: Ошибка")
                 return
             
+            # Сбрасываем состояние форсированного чтения, если выбран другой файл
+            if forced_tool is None and self.forced_metadata_file != file_path:
+                self.forced_metadata_tool = None
+                self.forced_metadata_file = None
+            
+            # Определяем инструмент для чтения метаданных
+            # ПРИОРИТЕТ: принудительный инструмент > сохраненный форсированный > инструмент по умолчанию
+            if forced_tool:
+                metadata_tool = forced_tool
+            elif self.forced_metadata_tool and self.forced_metadata_file == file_path:
+                metadata_tool = self.forced_metadata_tool
+            else:
+                metadata_tool = self.default_metadata_tool
+                
+            self.debug_logger.log(f"Чтение метаданных для {file_path} с помощью {metadata_tool}")
+            
             # Собираем все метаданные
             self.current_metadata = {}
             metadata_source = "System"
             
-            # Для MXF файлов
-            if extension.lower() == '.mxf':
-                # Если включена галочка и ART доступен, используем ART
-                if self.use_art_for_mxf and os.path.exists(ARRI_REFERENCE_TOOL_PATH):
-                    try:
-                        # Создаем временный файл для вывода ARRI Tool
-                        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp_file:
-                            temp_json_path = temp_file.name
-                        
-                        # Запускаем ARRI Reference Tool
-                        cmd = [
-                            ARRI_REFERENCE_TOOL_PATH,
-                            'export',
-                            '--duration', '1',
-                            '--input', file_path,
-                            '--output', temp_json_path
-                        ]
-                        
-                        self.debug_logger.log(f"Запуск ARRI Reference Tool: {' '.join(cmd)}")
-                        
-                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-                        
-                        if result.returncode == 0 and os.path.exists(temp_json_path):
-                            # Успешно получили метаданные от ARRI Tool
-                            with open(temp_json_path, 'r', encoding='utf-8') as f:
-                                arri_metadata = json.load(f)
-                            
-                            # Разбираем JSON на отдельные ключи и значения
-                            flattened_metadata = self.flatten_json(arri_metadata)
-                            
-                            # Добавляем метаданные в общий словарь
-                            for key, value in flattened_metadata.items():
-                                self.current_metadata[f"ARRI.{key}"] = self.format_metadata_value(value)
-                            
-                            metadata_source = "ARRI Reference Tool"
-                            self.debug_logger.log(f"Прочитано {len(flattened_metadata)} метаданных ARRI из {file_path}")
-                            
-                            # Удаляем временный файл
-                            os.unlink(temp_json_path)
-                        else:
-                            self.debug_logger.log(f"ARRI Tool вернул ошибку: {result.stderr}", "WARNING")
-                            # Если ARRI Tool не сработал, используем MediaInfo
-                            if PYMEDIAINFO_AVAILABLE:
-                                self.debug_logger.log("Используем MediaInfo как fallback для MXF")
-                                self.add_mediainfo_metadata(file_path)
-                                metadata_source = "MediaInfo (ART fallback)"
-                            else:
-                                self.current_metadata["ARRI Tool Error"] = f"ARRI Tool failed: {result.stderr}"
-                                metadata_source = "ARRI Tool Failed"
-                                
-                    except subprocess.TimeoutExpired:
-                        self.debug_logger.log("ARRI Tool timeout", "WARNING")
-                        if PYMEDIAINFO_AVAILABLE:
-                            self.add_mediainfo_metadata(file_path)
-                            metadata_source = "MediaInfo (ART timeout fallback)"
-                        else:
-                            self.current_metadata["ARRI Tool Error"] = "ARRI Tool timeout"
-                            metadata_source = "ARRI Tool Timeout"
-                    except Exception as e:
-                        self.debug_logger.log(f"Ошибка ARRI Tool: {str(e)}", "WARNING")
-                        if PYMEDIAINFO_AVAILABLE:
-                            self.add_mediainfo_metadata(file_path)
-                            metadata_source = "MediaInfo (ART error fallback)"
-                        else:
-                            self.current_metadata["ARRI Tool Error"] = f"ARRI Tool error: {str(e)}"
-                            metadata_source = "ARRI Tool Error"
-                else:
-                    # По умолчанию используем MediaInfo для MXF
+            # ЕСЛИ УКАЗАН ПРИНУДИТЕЛЬНЫЙ ИНСТРУМЕНТ - ИСПОЛЬЗУЕМ ЕГО ДЛЯ ЛЮБОГО ФАЙЛА
+            if forced_tool:
+                if forced_tool == 'ffprobe':
+                    self.add_ffprobe_metadata(file_path)
+                    metadata_source = "FFprobe (принудительно)"
+                else:  # mediainfo
                     if PYMEDIAINFO_AVAILABLE:
                         self.add_mediainfo_metadata(file_path)
-                        metadata_source = "MediaInfo"
+                        metadata_source = "MediaInfo (принудительно)"
                     else:
                         self.current_metadata["MediaInfo Error"] = "MediaInfo не доступен"
                         metadata_source = "MediaInfo Not Available"
             
-            # Для EXR файлов используем OpenEXR для чтения метаданных
-            elif extension.lower() == '.exr':
-                try:
-                    exr_file = OpenEXR.InputFile(file_path)
-                    header = exr_file.header()
-                    
-                    for key, value in header.items():
-                        self.current_metadata[key] = self.format_metadata_value(value)
-                    metadata_source = "OpenEXR"
-                    self.debug_logger.log(f"Прочитано {len(header)} метаданных EXR из {file_path}")
-                except Exception as e:
-                    self.current_metadata["Ошибка чтения EXR"] = f"Не удалось прочитать EXR метаданные: {str(e)}"
-                    metadata_source = "OpenEXR Error"
-                    self.debug_logger.log(f"Ошибка чтения EXR для {file_path}: {str(e)}", "ERROR")
-            
-            # Для JPEG и RAW файлов используем exifread
-            elif extension.lower() in ['.jpg', '.jpeg', '.arw', '.cr2', '.dng', '.nef', '.tif', '.tiff'] and EXIFREAD_AVAILABLE:
-                try:
-                    with open(file_path, 'rb') as f:
-                        tags = exifread.process_file(f, details=False)
-                    
-                    if tags:
-                        for tag, value in tags.items():
-                            # Форматируем значение для лучшего отображения
-                            formatted_value = self.format_exif_value(tag, value)
-                            self.current_metadata[f"EXIF {tag}"] = formatted_value
-                        metadata_source = "exifread"
-                        self.debug_logger.log(f"Прочитано {len(tags)} EXIF тегов из {file_path}")
+            # СТАНДАРТНАЯ ЛОГИКА (когда forced_tool = None)
+            else:
+                # Для MXF файлов (логика остается прежней)
+                if extension.lower() == '.mxf':
+                    # Если включена галочка и ART доступен, используем ART
+                    if self.use_art_for_mxf and os.path.exists(ARRI_REFERENCE_TOOL_PATH):
+                        try:
+                            # Создаем временный файл для вывода ARRI Tool
+                            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp_file:
+                                temp_json_path = temp_file.name
+                            
+                            # Запускаем ARRI Reference Tool
+                            cmd = [
+                                ARRI_REFERENCE_TOOL_PATH,
+                                'export',
+                                '--duration', '1',
+                                '--input', file_path,
+                                '--output', temp_json_path
+                            ]
+                            
+                            self.debug_logger.log(f"Запуск ARRI Reference Tool: {' '.join(cmd)}")
+                            
+                            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                            
+                            if result.returncode == 0 and os.path.exists(temp_json_path):
+                                # Успешно получили метаданные от ARRI Tool
+                                with open(temp_json_path, 'r', encoding='utf-8') as f:
+                                    arri_metadata = json.load(f)
+                                
+                                # Разбираем JSON на отдельные ключи и значения
+                                flattened_metadata = self.flatten_json(arri_metadata)
+                                
+                                # Добавляем метаданные в общий словарь
+                                for key, value in flattened_metadata.items():
+                                    self.current_metadata[f"ARRI.{key}"] = self.format_metadata_value(value)
+                                
+                                metadata_source = "ARRI Reference Tool"
+                                self.debug_logger.log(f"Прочитано {len(flattened_metadata)} метаданных ARRI из {file_path}")
+                                
+                                # Удаляем временный файл
+                                os.unlink(temp_json_path)
+                            else:
+                                self.debug_logger.log(f"ARRI Tool вернул ошибку: {result.stderr}", "WARNING")
+                                # Если ARRI Tool не сработал, используем MediaInfo
+                                if PYMEDIAINFO_AVAILABLE:
+                                    self.debug_logger.log("Используем MediaInfo как fallback для MXF")
+                                    self.add_mediainfo_metadata(file_path)
+                                    metadata_source = "MediaInfo (ART fallback)"
+                                else:
+                                    self.current_metadata["ARRI Tool Error"] = f"ARRI Tool failed: {result.stderr}"
+                                    metadata_source = "ARRI Tool Failed"
+                                    
+                        except subprocess.TimeoutExpired:
+                            self.debug_logger.log("ARRI Tool timeout", "WARNING")
+                            if PYMEDIAINFO_AVAILABLE:
+                                self.add_mediainfo_metadata(file_path)
+                                metadata_source = "MediaInfo (ART timeout fallback)"
+                            else:
+                                self.current_metadata["ARRI Tool Error"] = "ARRI Tool timeout"
+                                metadata_source = "ARRI Tool Timeout"
+                        except Exception as e:
+                            self.debug_logger.log(f"Ошибка ARRI Tool: {str(e)}", "WARNING")
+                            if PYMEDIAINFO_AVAILABLE:
+                                self.add_mediainfo_metadata(file_path)
+                                metadata_source = "MediaInfo (ART error fallback)"
+                            else:
+                                self.current_metadata["ARRI Tool Error"] = f"ARRI Tool error: {str(e)}"
+                                metadata_source = "ARRI Tool Error"
                     else:
-                        self.current_metadata["EXIF"] = "EXIF данные не найдены"
-                        metadata_source = "exifread"
-                        self.debug_logger.log(f"EXIF данные не найдены в {file_path}")
-                except Exception as e:
-                    self.current_metadata["Ошибка чтения EXIF"] = f"Не удалось прочитать EXIF метаданные: {str(e)}"
-                    metadata_source = "exifread Error"
-                    self.debug_logger.log(f"Ошибка чтения EXIF для {file_path}: {str(e)}", "ERROR")
-            
-            # Для PNG, TIFF и других изображений используем Pillow
-            elif extension.lower() in ['.png', '.bmp', '.gif', '.webp'] and PILLOW_AVAILABLE:
-                try:
-                    with Image.open(file_path) as img:
-                        # Получаем базовую информацию об изображении
-                        self.current_metadata["Формат"] = img.format
-                        self.current_metadata["Режим"] = img.mode
-                        self.current_metadata["Размер"] = f"{img.width} x {img.height}"
+                        # По умолчанию используем MediaInfo для MXF
+                        if PYMEDIAINFO_AVAILABLE:
+                            self.add_mediainfo_metadata(file_path)
+                            metadata_source = "MediaInfo"
+                        else:
+                            self.current_metadata["MediaInfo Error"] = "MediaInfo не доступен"
+                            metadata_source = "MediaInfo Not Available"
+                
+                # Для EXR файлов используем OpenEXR для чтения метаданных
+                elif extension.lower() == '.exr':
+                    try:
+                        exr_file = OpenEXR.InputFile(file_path)
+                        header = exr_file.header()
                         
-                        # Получаем EXIF данные, если они есть
-                        exif_data = img._getexif()
-                        if exif_data:
-                            for tag_id, value in exif_data.items():
-                                tag_name = TAGS.get(tag_id, tag_id)
-                                formatted_value = self.format_exif_value(tag_name, value)
-                                self.current_metadata[f"EXIF {tag_name}"] = formatted_value
-                            metadata_source = "Pillow"
-                            self.debug_logger.log(f"Прочитано {len(exif_data)} EXIF тегов из {file_path}")
+                        for key, value in header.items():
+                            self.current_metadata[key] = self.format_metadata_value(value)
+                        metadata_source = "OpenEXR"
+                        self.debug_logger.log(f"Прочитано {len(header)} метаданных EXR из {file_path}")
+                    except Exception as e:
+                        self.current_metadata["Ошибка чтения EXR"] = f"Не удалось прочитать EXR метаданные: {str(e)}"
+                        metadata_source = "OpenEXR Error"
+                        self.debug_logger.log(f"Ошибка чтения EXR для {file_path}: {str(e)}", "ERROR")
+                
+                # Для JPEG и RAW файлов используем exifread
+                elif extension.lower() in ['.jpg', '.jpeg', '.arw', '.cr2', '.dng', '.nef', '.tif', '.tiff'] and EXIFREAD_AVAILABLE:
+                    try:
+                        with open(file_path, 'rb') as f:
+                            tags = exifread.process_file(f, details=False)
+                        
+                        if tags:
+                            for tag, value in tags.items():
+                                # Форматируем значение для лучшего отображения
+                                formatted_value = self.format_exif_value(tag, value)
+                                self.current_metadata[f"EXIF {tag}"] = formatted_value
+                            metadata_source = "exifread"
+                            self.debug_logger.log(f"Прочитано {len(tags)} EXIF тегов из {file_path}")
                         else:
                             self.current_metadata["EXIF"] = "EXIF данные не найдены"
-                            metadata_source = "Pillow"
+                            metadata_source = "exifread"
                             self.debug_logger.log(f"EXIF данные не найдены в {file_path}")
-                        
-                        # Получаем другую информацию
-                        info = img.info
-                        for key, value in info.items():
-                            if key != 'exif':  # EXIF уже обработали отдельно
-                                self.current_metadata[key] = str(value)
-                except Exception as e:
-                    self.current_metadata["Ошибка чтения"] = f"Не удалось прочитать метаданные изображения: {str(e)}"
-                    metadata_source = "Pillow Error"
-                    self.debug_logger.log(f"Ошибка чтения изображения для {file_path}: {str(e)}", "ERROR")
-            
-            # Используем pymediainfo для видео, аудио и других медиафайлов (кроме MXF, которые уже обработаны)
-            elif PYMEDIAINFO_AVAILABLE and extension.lower() not in ['.mxf']:
-                media_extensions = [
-                    # Видео форматы
-                    '.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg',
-                    '.m2v', '.m4v', '.3gp', '.3g2', '.f4v', '.ogv', '.ts', '.mts', '.m2ts',
-                    # Аудио форматы
-                    '.mp3', '.wav', '.aac', '.flac', '.ogg', '.wma', '.m4a', '.aiff', '.aif',
-                    '.amr', '.ape', '.opus', '.ra', '.rm', '.voc', '.8svx',
-                    # Другие медиаформаты
-                    '.swf', '.dv', '.nut', '.yuv'
-                ]
+                    except Exception as e:
+                        self.current_metadata["Ошибка чтения EXIF"] = f"Не удалось прочитать EXIF метаданные: {str(e)}"
+                        metadata_source = "exifread Error"
+                        self.debug_logger.log(f"Ошибка чтения EXIF для {file_path}: {str(e)}", "ERROR")
                 
-                if extension.lower() in media_extensions:
-                    self.add_mediainfo_metadata(file_path)
-                    metadata_source = "MediaInfo"
+                # Для PNG, TIFF и других изображений используем Pillow
+                elif extension.lower() in ['.png', '.bmp', '.gif', '.webp'] and PILLOW_AVAILABLE:
+                    try:
+                        with Image.open(file_path) as img:
+                            # Получаем базовую информацию об изображении
+                            self.current_metadata["Формат"] = img.format
+                            self.current_metadata["Режим"] = img.mode
+                            self.current_metadata["Размер"] = f"{img.width} x {img.height}"
+                            
+                            # Получаем EXIF данные, если они есть
+                            exif_data = img._getexif()
+                            if exif_data:
+                                for tag_id, value in exif_data.items():
+                                    tag_name = TAGS.get(tag_id, tag_id)
+                                    formatted_value = self.format_exif_value(tag_name, value)
+                                    self.current_metadata[f"EXIF {tag_name}"] = formatted_value
+                                metadata_source = "Pillow"
+                                self.debug_logger.log(f"Прочитано {len(exif_data)} EXIF тегов из {file_path}")
+                            else:
+                                self.current_metadata["EXIF"] = "EXIF данные не найдены"
+                                metadata_source = "Pillow"
+                                self.debug_logger.log(f"EXIF данные не найдены в {file_path}")
+                            
+                            # Получаем другую информацию
+                            info = img.info
+                            for key, value in info.items():
+                                if key != 'exif':  # EXIF уже обработали отдельно
+                                    self.current_metadata[key] = str(value)
+                    except Exception as e:
+                        self.current_metadata["Ошибка чтения"] = f"Не удалось прочитать метаданные изображения: {str(e)}"
+                        metadata_source = "Pillow Error"
+                        self.debug_logger.log(f"Ошибка чтения изображения для {file_path}: {str(e)}", "ERROR")
+                
+                # Для остальных файлов используем выбранный инструмент по умолчанию
+                else:
+                    if metadata_tool == 'ffprobe':
+                        self.add_ffprobe_metadata(file_path)
+                        metadata_source = "FFprobe"
+                    else:  # mediainfo
+                        if PYMEDIAINFO_AVAILABLE:
+                            self.add_mediainfo_metadata(file_path)
+                            metadata_source = "MediaInfo"
+                        else:
+                            self.current_metadata["MediaInfo Error"] = "MediaInfo не доступен"
+                            metadata_source = "MediaInfo Not Available"
             
             # Для всех файлов добавляем базовую информацию
             file_stats = os.stat(file_path)
@@ -2212,6 +2325,14 @@ class EXRMetadataViewer(QMainWindow):
             self.current_metadata["Дата изменения"] = datetime.datetime.fromtimestamp(file_stats.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
             
             self.debug_logger.log(f"Всего собрано {len(self.current_metadata)} метаданных для {file_path}")
+
+                        # Если использовался принудительный инструмент, добавляем отметку
+            if forced_tool:
+                metadata_source = f"{metadata_source} (принудительно)"
+            
+            
+
+
             
             # Разделяем метаданные на цветные и обычные
             colored_metadata = {}
@@ -2270,6 +2391,125 @@ class EXRMetadataViewer(QMainWindow):
             self.metadata_table.setItem(0, 1, QTableWidgetItem(f"Ошибка чтения метаданных: {str(e)}"))
             self.metadata_source_label.setText("Метаданные выбранного элемента: Ошибка")
             self.debug_logger.log(f"Общая ошибка чтения метаданных для {file_path}: {str(e)}", "ERROR")
+
+        if self.forced_metadata_tool and self.forced_metadata_file == file_path:
+            tool_name = METADATA_TOOLS.get(self.forced_metadata_tool, self.forced_metadata_tool)
+            self.metadata_source_label.setText(f"Метаданные выбранного элемента ({tool_name} - принудительно):")
+        else:
+            self.metadata_source_label.setText(f"Метаданные выбранного элемента ({metadata_source}):")
+
+
+
+    def add_ffprobe_metadata(self, file_path):
+        """Добавляет метаданные через FFprobe"""
+        try:
+            # Проверяем доступность ffprobe
+            result = subprocess.run(['ffprobe', '-version'], capture_output=True, text=True)
+            if result.returncode != 0:
+                self.current_metadata["Ошибка FFprobe"] = "FFprobe не доступен в системе"
+                self.debug_logger.log("FFprobe не доступен в системе", "WARNING")
+                return
+            
+            # Запускаем ffprobe для получения метаданных в формате JSON
+            cmd = [
+                'ffprobe', 
+                '-v', 'quiet',
+                '-print_format', 'json',
+                '-show_format',
+                '-show_streams',
+                '-show_chapters',
+                '-show_programs',
+                file_path
+            ]
+            
+            self.debug_logger.log(f"Запуск FFprobe: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0:
+                ffprobe_data = json.loads(result.stdout)
+                
+                # Обрабатываем формат
+                if 'format' in ffprobe_data:
+                    format_data = ffprobe_data['format']
+                    for key, value in format_data.items():
+                        if key != 'tags':  # Теги обработаем отдельно
+                            self.current_metadata[f"FFprobe Format - {key}"] = self.format_ffprobe_value(value)
+                    
+                    # Обрабатываем теги формата
+                    if 'tags' in format_data:
+                        for tag_key, tag_value in format_data['tags'].items():
+                            self.current_metadata[f"FFprobe Format Tag - {tag_key}"] = self.format_ffprobe_value(tag_value)
+                
+                # Обрабатываем потоки
+                if 'streams' in ffprobe_data:
+                    for i, stream in enumerate(ffprobe_data['streams']):
+                        stream_type = stream.get('codec_type', 'unknown')
+                        for key, value in stream.items():
+                            if key != 'tags' and key != 'disposition':
+                                self.current_metadata[f"FFprobe Stream {i} ({stream_type}) - {key}"] = self.format_ffprobe_value(value)
+                        
+                        # Обрабатываем теги потока
+                        if 'tags' in stream:
+                            for tag_key, tag_value in stream['tags'].items():
+                                self.current_metadata[f"FFprobe Stream {i} ({stream_type}) Tag - {tag_key}"] = self.format_ffprobe_value(tag_value)
+                        
+                        # Обрабатываем disposition
+                        if 'disposition' in stream:
+                            for disp_key, disp_value in stream['disposition'].items():
+                                if disp_value == 1:  # Показываем только активные disposition
+                                    self.current_metadata[f"FFprobe Stream {i} ({stream_type}) Disposition - {disp_key}"] = "Да"
+                
+                # Обрабатываем программы
+                if 'programs' in ffprobe_data:
+                    for i, program in enumerate(ffprobe_data['programs']):
+                        for key, value in program.items():
+                            if key != 'streams' and key != 'tags':
+                                self.current_metadata[f"FFprobe Program {i} - {key}"] = self.format_ffprobe_value(value)
+                        
+                        if 'tags' in program:
+                            for tag_key, tag_value in program['tags'].items():
+                                self.current_metadata[f"FFprobe Program {i} Tag - {tag_key}"] = self.format_ffprobe_value(tag_value)
+                
+                # Обрабатываем главы
+                if 'chapters' in ffprobe_data:
+                    for i, chapter in enumerate(ffprobe_data['chapters']):
+                        for key, value in chapter.items():
+                            if key != 'tags':
+                                self.current_metadata[f"FFprobe Chapter {i} - {key}"] = self.format_ffprobe_value(value)
+                        
+                        if 'tags' in chapter:
+                            for tag_key, tag_value in chapter['tags'].items():
+                                self.current_metadata[f"FFprobe Chapter {i} Tag - {tag_key}"] = self.format_ffprobe_value(tag_value)
+                
+                self.debug_logger.log(f"Прочитано {len(ffprobe_data)} разделов FFprobe из {file_path}")
+                
+            else:
+                self.current_metadata["Ошибка FFprobe"] = f"FFprobe вернул ошибку: {result.stderr}"
+                self.debug_logger.log(f"Ошибка FFprobe для {file_path}: {result.stderr}", "ERROR")
+                
+        except subprocess.TimeoutExpired:
+            self.current_metadata["Ошибка FFprobe"] = "Таймаут выполнения FFprobe"
+            self.debug_logger.log(f"Таймаут FFprobe для {file_path}", "ERROR")
+        except Exception as e:
+            self.current_metadata["Ошибка FFprobe"] = f"Не удалось прочитать FFprobe метаданные: {str(e)}"
+            self.debug_logger.log(f"Ошибка чтения FFprobe для {file_path}: {str(e)}", "ERROR")
+
+    def format_ffprobe_value(self, value):
+        """Форматирует значение FFprobe для лучшего отображения"""
+        if isinstance(value, (int, float)):
+            return str(value)
+        elif isinstance(value, str):
+            return value
+        elif isinstance(value, dict):
+            return json.dumps(value, ensure_ascii=False)
+        elif isinstance(value, list):
+            return ", ".join(str(item) for item in value)
+        else:
+            return str(value)
+
+
+
+
 
     def add_mediainfo_metadata(self, file_path):
         """Добавляет метаданные через MediaInfo"""
