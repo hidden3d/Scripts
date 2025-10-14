@@ -2139,31 +2139,103 @@ class EXRMetadataViewer(QMainWindow):
             elif self.forced_metadata_tool and self.forced_metadata_file == file_path:
                 metadata_tool = self.forced_metadata_tool
             else:
-                metadata_tool = self.default_metadata_tool
-                
-            self.debug_logger.log(f"Чтение метаданных для {file_path} с помощью {metadata_tool}")
+                metadata_tool = None  # Будем определять по типу файла
+            
+            self.debug_logger.log(f"Чтение метаданных для {file_path} с помощью {metadata_tool if metadata_tool else 'автоматического выбора'}")
             
             # Собираем все метаданные
             self.current_metadata = {}
-            metadata_source = "System"
+            metadata_source = "Unknown"
             
             # ЕСЛИ УКАЗАН ПРИНУДИТЕЛЬНЫЙ ИНСТРУМЕНТ - ИСПОЛЬЗУЕМ ЕГО ДЛЯ ЛЮБОГО ФАЙЛА
-            if forced_tool:
-                if forced_tool == 'ffprobe':
+            if metadata_tool:
+                if metadata_tool == 'ffprobe':
                     self.add_ffprobe_metadata(file_path)
-                    metadata_source = "FFprobe (принудительно)"
+                    metadata_source = f"FFprobe ({'принудительно' if forced_tool else 'сохранено'})"
                 else:  # mediainfo
                     if PYMEDIAINFO_AVAILABLE:
                         self.add_mediainfo_metadata(file_path)
-                        metadata_source = "MediaInfo (принудительно)"
+                        metadata_source = f"MediaInfo ({'принудительно' if forced_tool else 'сохранено'})"
                     else:
                         self.current_metadata["MediaInfo Error"] = "MediaInfo не доступен"
                         metadata_source = "MediaInfo Not Available"
             
-            # СТАНДАРТНАЯ ЛОГИКА (когда forced_tool = None)
+            # СТАНДАРТНАЯ ЛОГИКА (когда инструмент не указан принудительно)
             else:
+                extension_lower = extension.lower()
+                
+                # Для EXR файлов используем OpenEXR для чтения метаданных
+                if extension_lower == '.exr':
+                    try:
+                        exr_file = OpenEXR.InputFile(file_path)
+                        header = exr_file.header()
+                        
+                        for key, value in header.items():
+                            self.current_metadata[key] = self.format_metadata_value(value)
+                        metadata_source = "OpenEXR"
+                        self.debug_logger.log(f"Прочитано {len(header)} метаданных EXR из {file_path}")
+                    except Exception as e:
+                        self.current_metadata["Ошибка чтения EXR"] = f"Не удалось прочитать EXR метаданные: {str(e)}"
+                        metadata_source = "OpenEXR Error"
+                        self.debug_logger.log(f"Ошибка чтения EXR для {file_path}: {str(e)}", "ERROR")
+                
+                # Для JPEG и RAW файлов используем exifread
+                elif extension_lower in ['.jpg', '.jpeg', '.arw', '.cr2', '.dng', '.nef', '.tif', '.tiff'] and EXIFREAD_AVAILABLE:
+                    try:
+                        with open(file_path, 'rb') as f:
+                            tags = exifread.process_file(f, details=False)
+                        
+                        if tags:
+                            for tag, value in tags.items():
+                                # Форматируем значение для лучшего отображения
+                                formatted_value = self.format_exif_value(tag, value)
+                                self.current_metadata[f"EXIF {tag}"] = formatted_value
+                            metadata_source = "exifread"
+                            self.debug_logger.log(f"Прочитано {len(tags)} EXIF тегов из {file_path}")
+                        else:
+                            self.current_metadata["EXIF"] = "EXIF данные не найдены"
+                            metadata_source = "exifread"
+                            self.debug_logger.log(f"EXIF данные не найдены в {file_path}")
+                    except Exception as e:
+                        self.current_metadata["Ошибка чтения EXIF"] = f"Не удалось прочитать EXIF метаданные: {str(e)}"
+                        metadata_source = "exifread Error"
+                        self.debug_logger.log(f"Ошибка чтения EXIF для {file_path}: {str(e)}", "ERROR")
+                
+                # Для PNG, TIFF и других изображений используем Pillow
+                elif extension_lower in ['.png', '.bmp', '.gif', '.webp'] and PILLOW_AVAILABLE:
+                    try:
+                        with Image.open(file_path) as img:
+                            # Получаем базовую информацию об изображении
+                            self.current_metadata["Формат"] = img.format
+                            self.current_metadata["Режим"] = img.mode
+                            self.current_metadata["Размер"] = f"{img.width} x {img.height}"
+                            
+                            # Получаем EXIF данные, если они есть
+                            exif_data = img._getexif()
+                            if exif_data:
+                                for tag_id, value in exif_data.items():
+                                    tag_name = TAGS.get(tag_id, tag_id)
+                                    formatted_value = self.format_exif_value(tag_name, value)
+                                    self.current_metadata[f"EXIF {tag_name}"] = formatted_value
+                                metadata_source = "Pillow"
+                                self.debug_logger.log(f"Прочитано {len(exif_data)} EXIF тегов из {file_path}")
+                            else:
+                                self.current_metadata["EXIF"] = "EXIF данные не найдены"
+                                metadata_source = "Pillow"
+                                self.debug_logger.log(f"EXIF данные не найдены в {file_path}")
+                            
+                            # Получаем другую информацию
+                            info = img.info
+                            for key, value in info.items():
+                                if key != 'exif':  # EXIF уже обработали отдельно
+                                    self.current_metadata[key] = str(value)
+                    except Exception as e:
+                        self.current_metadata["Ошибка чтения"] = f"Не удалось прочитать метаданные изображения: {str(e)}"
+                        metadata_source = "Pillow Error"
+                        self.debug_logger.log(f"Ошибка чтения изображения для {file_path}: {str(e)}", "ERROR")
+                
                 # Для MXF файлов (логика остается прежней)
-                if extension.lower() == '.mxf' or '.arr' or '.arx':
+                elif extension_lower in ['.mxf', '.arr', '.arx']:
                     # Если включена галочка и ART доступен, используем ART
                     if self.use_art_for_mxf and os.path.exists(ARRI_REFERENCE_TOOL_PATH):
                         try:
@@ -2237,79 +2309,9 @@ class EXRMetadataViewer(QMainWindow):
                             self.current_metadata["MediaInfo Error"] = "MediaInfo не доступен"
                             metadata_source = "MediaInfo Not Available"
                 
-                # Для EXR файлов используем OpenEXR для чтения метаданных
-                elif extension.lower() == '.exr':
-                    try:
-                        exr_file = OpenEXR.InputFile(file_path)
-                        header = exr_file.header()
-                        
-                        for key, value in header.items():
-                            self.current_metadata[key] = self.format_metadata_value(value)
-                        metadata_source = "OpenEXR"
-                        self.debug_logger.log(f"Прочитано {len(header)} метаданных EXR из {file_path}")
-                    except Exception as e:
-                        self.current_metadata["Ошибка чтения EXR"] = f"Не удалось прочитать EXR метаданные: {str(e)}"
-                        metadata_source = "OpenEXR Error"
-                        self.debug_logger.log(f"Ошибка чтения EXR для {file_path}: {str(e)}", "ERROR")
-                
-                # Для JPEG и RAW файлов используем exifread
-                elif extension.lower() in ['.jpg', '.jpeg', '.arw', '.cr2', '.dng', '.nef', '.tif', '.tiff'] and EXIFREAD_AVAILABLE:
-                    try:
-                        with open(file_path, 'rb') as f:
-                            tags = exifread.process_file(f, details=False)
-                        
-                        if tags:
-                            for tag, value in tags.items():
-                                # Форматируем значение для лучшего отображения
-                                formatted_value = self.format_exif_value(tag, value)
-                                self.current_metadata[f"EXIF {tag}"] = formatted_value
-                            metadata_source = "exifread"
-                            self.debug_logger.log(f"Прочитано {len(tags)} EXIF тегов из {file_path}")
-                        else:
-                            self.current_metadata["EXIF"] = "EXIF данные не найдены"
-                            metadata_source = "exifread"
-                            self.debug_logger.log(f"EXIF данные не найдены в {file_path}")
-                    except Exception as e:
-                        self.current_metadata["Ошибка чтения EXIF"] = f"Не удалось прочитать EXIF метаданные: {str(e)}"
-                        metadata_source = "exifread Error"
-                        self.debug_logger.log(f"Ошибка чтения EXIF для {file_path}: {str(e)}", "ERROR")
-                
-                # Для PNG, TIFF и других изображений используем Pillow
-                elif extension.lower() in ['.png', '.bmp', '.gif', '.webp'] and PILLOW_AVAILABLE:
-                    try:
-                        with Image.open(file_path) as img:
-                            # Получаем базовую информацию об изображении
-                            self.current_metadata["Формат"] = img.format
-                            self.current_metadata["Режим"] = img.mode
-                            self.current_metadata["Размер"] = f"{img.width} x {img.height}"
-                            
-                            # Получаем EXIF данные, если они есть
-                            exif_data = img._getexif()
-                            if exif_data:
-                                for tag_id, value in exif_data.items():
-                                    tag_name = TAGS.get(tag_id, tag_id)
-                                    formatted_value = self.format_exif_value(tag_name, value)
-                                    self.current_metadata[f"EXIF {tag_name}"] = formatted_value
-                                metadata_source = "Pillow"
-                                self.debug_logger.log(f"Прочитано {len(exif_data)} EXIF тегов из {file_path}")
-                            else:
-                                self.current_metadata["EXIF"] = "EXIF данные не найдены"
-                                metadata_source = "Pillow"
-                                self.debug_logger.log(f"EXIF данные не найдены в {file_path}")
-                            
-                            # Получаем другую информацию
-                            info = img.info
-                            for key, value in info.items():
-                                if key != 'exif':  # EXIF уже обработали отдельно
-                                    self.current_metadata[key] = str(value)
-                    except Exception as e:
-                        self.current_metadata["Ошибка чтения"] = f"Не удалось прочитать метаданные изображения: {str(e)}"
-                        metadata_source = "Pillow Error"
-                        self.debug_logger.log(f"Ошибка чтения изображения для {file_path}: {str(e)}", "ERROR")
-                
-                # Для остальных файлов используем выбранный инструмент по умолчанию
+                # Для остальных файлов (включая видео) используем выбранный инструмент по умолчанию
                 else:
-                    if metadata_tool == 'ffprobe':
+                    if self.default_metadata_tool == 'ffprobe':
                         self.add_ffprobe_metadata(file_path)
                         metadata_source = "FFprobe"
                     else:  # mediainfo
@@ -2330,13 +2332,9 @@ class EXRMetadataViewer(QMainWindow):
             
             self.debug_logger.log(f"Всего собрано {len(self.current_metadata)} метаданных для {file_path}")
 
-                        # Если использовался принудительный инструмент, добавляем отметку
+            # Если использовался принудительный инструмент, добавляем отметку
             if forced_tool:
                 metadata_source = f"{metadata_source} (принудительно)"
-            
-            
-
-
             
             # Разделяем метаданные на цветные и обычные
             colored_metadata = {}
@@ -2384,7 +2382,11 @@ class EXRMetadataViewer(QMainWindow):
                 self.apply_field_color(row, key)
             
             # Обновляем метку с источником метаданных
-            self.metadata_source_label.setText(f"Метаданные выбранного элемента ({metadata_source}):")
+            if self.forced_metadata_tool and self.forced_metadata_file == file_path:
+                tool_name = METADATA_TOOLS.get(self.forced_metadata_tool, self.forced_metadata_tool)
+                self.metadata_source_label.setText(f"Метаданные выбранного элемента ({tool_name} - принудительно):")
+            else:
+                self.metadata_source_label.setText(f"Метаданные выбранного элемента ({metadata_source}):")
             
             # Сбрасываем фильтр поиска при отображении новых данных
             self.clear_search()
@@ -2395,12 +2397,6 @@ class EXRMetadataViewer(QMainWindow):
             self.metadata_table.setItem(0, 1, QTableWidgetItem(f"Ошибка чтения метаданных: {str(e)}"))
             self.metadata_source_label.setText("Метаданные выбранного элемента: Ошибка")
             self.debug_logger.log(f"Общая ошибка чтения метаданных для {file_path}: {str(e)}", "ERROR")
-
-        if self.forced_metadata_tool and self.forced_metadata_file == file_path:
-            tool_name = METADATA_TOOLS.get(self.forced_metadata_tool, self.forced_metadata_tool)
-            self.metadata_source_label.setText(f"Метаданные выбранного элемента ({tool_name} - принудительно):")
-        else:
-            self.metadata_source_label.setText(f"Метаданные выбранного элемента ({metadata_source}):")
 
 
 
