@@ -173,6 +173,72 @@
       "g": 218,
       "b": 109,
       "removed": false
+    },
+    "EXIF EXIF LensModel": {
+      "r": 216,
+      "g": 232,
+      "b": 255,
+      "removed": false
+    },
+    "ARRI.clipBasedMetadataSets.1.metadataSetPayload.acquisitionRect.height": {
+      "r": 235,
+      "g": 220,
+      "b": 255,
+      "removed": false
+    },
+    "ARRI.clipBasedMetadataSets.1.metadataSetPayload.acquisitionRect.width": {
+      "r": 235,
+      "g": 220,
+      "b": 255,
+      "removed": false
+    },
+    "ARRI.clipBasedMetadataSets.11.metadataSetPayload.nativeIdentificationList.0.productName": {
+      "r": 216,
+      "g": 255,
+      "b": 221,
+      "removed": false
+    },
+    "ARRI.clipBasedMetadataSets.3.metadataSetPayload.sampledRect.height": {
+      "r": 235,
+      "g": 220,
+      "b": 255,
+      "removed": false
+    },
+    "ARRI.clipBasedMetadataSets.3.metadataSetPayload.sampledRect.width": {
+      "r": 235,
+      "g": 220,
+      "b": 255,
+      "removed": false
+    },
+    "ARRI.clipBasedMetadataSets.3.metadataSetPayload.displayRect.height": {
+      "r": 235,
+      "g": 220,
+      "b": 255,
+      "removed": false
+    },
+    "ARRI.clipBasedMetadataSets.3.metadataSetPayload.displayRect.width": {
+      "r": 235,
+      "g": 220,
+      "b": 255,
+      "removed": false
+    },
+    "ARRI.clipBasedMetadataSets.3.metadataSetPayload.storedSize.height": {
+      "r": 235,
+      "g": 220,
+      "b": 255,
+      "removed": false
+    },
+    "ARRI.clipBasedMetadataSets.3.metadataSetPayload.storedSize.width": {
+      "r": 235,
+      "g": 220,
+      "b": 255,
+      "removed": false
+    },
+    "ARRI.descriptiveMetadataSets.3.metadataSetPayload.clipName": {
+      "r": 255,
+      "g": 228,
+      "b": 228,
+      "removed": false
     }
   },
   "removed_metadata": {
@@ -191,9 +257,9 @@
   },
   "sequence_colors": {
     "video_single_mov": {
-      "r": 246,
+      "r": 219,
       "g": 255,
-      "b": 198
+      "b": 206
     },
     "video_single_mp4": {
       "r": 253,
@@ -207,8 +273,8 @@
     },
     "group_exr": {
       "r": 255,
-      "g": 196,
-      "b": 56
+      "g": 170,
+      "b": 34
     },
     "sequence_dng": {
       "r": 253,
@@ -222,8 +288,8 @@
     },
     "single_jpg": {
       "r": 255,
-      "g": 188,
-      "b": 188
+      "g": 213,
+      "b": 207
     },
     "sequence_jpg": {
       "r": 255,
@@ -234,6 +300,16 @@
       "r": 232,
       "g": 255,
       "b": 216
+    },
+    "group_jpg": {
+      "r": 255,
+      "g": 154,
+      "b": 71
+    },
+    "group_arw": {
+      "r": 0,
+      "g": 255,
+      "b": 255
     }
   },
   "ordered_metadata_fields": [
@@ -245,6 +321,7 @@
     "camera_id",
     "EXIF Image Tag 0xC614",
     "ARRI.descriptiveMetadataSets.0.metadataSetPayload.cameraModel",
+    "ARRI.clipBasedMetadataSets.11.metadataSetPayload.nativeIdentificationList.0.productName",
     "lensModel",
     "camera_focal",
     "camera_lens_type",
@@ -254,18 +331,28 @@
     "EXIF EXIF FocalLengthIn35mmFilm",
     "ARRI.descriptiveMetadataSets.1.metadataSetPayload.lensModel",
     "ARRI.frameBasedMetadata.frames.0.frameBasedMetadataSets.Lens State.lensFocalLength",
+    "EXIF EXIF LensModel",
     "owner",
     "clipName",
     "arriraw/slateInfo/clipName",
     "reelName",
     "resolveorigfilename",
+    "ARRI.descriptiveMetadataSets.3.metadataSetPayload.clipName",
     "dataWindow",
     "displayWindow",
-    "EXIF Image ImageLength",
     "EXIF Image ImageWidth",
+    "EXIF Image ImageLength",
+    "ARRI.clipBasedMetadataSets.1.metadataSetPayload.acquisitionRect.width",
+    "ARRI.clipBasedMetadataSets.1.metadataSetPayload.acquisitionRect.height",
+    "ARRI.clipBasedMetadataSets.3.metadataSetPayload.sampledRect.width",
+    "ARRI.clipBasedMetadataSets.3.metadataSetPayload.sampledRect.height",
+    "ARRI.clipBasedMetadataSets.3.metadataSetPayload.displayRect.width",
+    "ARRI.clipBasedMetadataSets.3.metadataSetPayload.displayRect.height",
+    "ARRI.clipBasedMetadataSets.3.metadataSetPayload.storedSize.width",
+    "ARRI.clipBasedMetadataSets.3.metadataSetPayload.storedSize.height",
     "ARRI.clipBasedMetadataSets.0.metadataSetName",
     "ARRI.clipBasedMetadataSets.0.metadataSetPayload.sensorDimensions.height",
     "ARRI.clipBasedMetadataSets.0.metadataSetPayload.sensorDimensions.width"
   ],
-  "use_art_for_mxf": false
+  "use_art_for_mxf": true
 }
