@@ -1,0 +1,73 @@
+{
+  "cameras": {
+    "ALEXA Mini LF": {
+      "metadata_names": [
+        "ARRI ALEXA Mini LF",
+        "ALEXA Mini LF",
+        "Mini LF"
+      ],
+      "resolutions": {
+        "3840x2160": "36.70mm x 25.54mm",
+        "3200x1800": "26.40mm x 14.85mm"
+      }
+    },
+    "V-RAPTOR 8K VV": {
+      "metadata_names": [
+        "V-RAPTOR 8K VV",
+        "RAPTOR"
+      ],
+      "resolutions": {
+        "4096x2160": "40.96mm x 21.60mm"
+      }
+    },
+    "DJI Zemuse X7": {
+      "metadata_names": [],
+      "resolutions": {
+        "6016x3200": "23.50mm x 12.50mm"
+      }
+    },
+    "ARRI ALEXA 35": {
+      "metadata_names": [
+        "ARRI ALEXA 35"
+      ],
+      "resolutions": {
+        "4608x3164": "28.00mm x 19.20mm",
+        "4608x2592": "28.00mm x 15.70mm",
+        "4096x2304": "24.90mm x 14.00mm",
+        "4096x2048": "24.90mm x 12.40mm",
+        "3840x2160": "23.30mm x 13.10mm",
+        "3840x1608": "23.30mm x 9.80mm",
+        "3328x2790": "20.22mm x 16.95mm",
+        "3072x3072": "18.70mm x 18.70mm",
+        "2743x3086": "16.70mm x 18.80mm",
+        "2048x1152": "12.40mm x 7.00mm",
+        "1920x1080": "11.70mm x 6.60mm"
+      }
+    },
+    "Sony Venice 1": {
+      "metadata_names": [
+        "Sony Venice 1"
+      ],
+      "resolutions": {
+        "3840x2160": "22.80mm x 12.80mm",
+        "4268x2400": "25.40mm x 14.30mm",
+        "4096x1716": "24.30mm x 10.30mm"
+      }
+    },
+    "Red KOMODO 6K": {
+      "metadata_names": [
+        "Red KOMODO 6K"
+      ],
+      "resolutions": {
+        "6144x3240": "27.03mm x 14.26mm",
+        "6144x3072": "23.07mm x 13.52mm"
+      }
+    },
+    "Blackmagic Micro Studio Camera 4K G2": {
+      "metadata_names": [],
+      "resolutions": {
+        "3840x2160": "17.78mm x 10mm"
+      }
+    }
+  }
+}

@@ -17,14 +17,14 @@ import OpenEXR
 import Imath
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, 
                              QWidget, QLineEdit, QPushButton, QListWidget, 
-                             QTextEdit, QLabel, QFileDialog, QMessageBox,
+                             QTextEdit, QLabel, QFileDialog, QMessageBox,  # QTextEdit уже здесь
                              QListWidgetItem, QColorDialog, QDialog, QDialogButtonBox,
                              QFormLayout, QComboBox, QTableWidget, QTableWidgetItem,
                              QHeaderView, QAbstractItemView, QMenu, QAction, QTabWidget,
-                             QSplitter, QTextBrowser, QScrollArea, QCheckBox)
-from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSettings
+                             QSplitter, QTextBrowser, QScrollArea, QCheckBox, QInputDialog)
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSettings, QTimer
 from PyQt5.QtGui import QTextCursor, QColor, QTextCharFormat, QFont, QBrush
-from PyQt5.QtWidgets import QTreeWidget, QTreeWidgetItem
+from PyQt5.QtWidgets import QTreeWidget, QTreeWidgetItem, QPlainTextEdit
 
 # ==================== НАСТРОЙКИ ====================
 
@@ -33,6 +33,9 @@ DEBUG = False  # Включаем логирование для отладки
 SETTINGS_FILE_HARD = "/home/hidden/Documents/DEV/exr_viewer_settings.json"
 # Путь к ARRI Reference Tool
 ARRI_REFERENCE_TOOL_PATH = "/home/hidden/Downloads/arri/art-cmd_0.4.1_rhel8_gcc85_x64/bin/art-cmd"
+
+CAMERA_SENSOR_DATA_FILE = "/home/hidden/Documents/DEV/Camera_sensor_data.json"
+
 
 DEFAULT_FONT_SIZE = 10  # Размер шрифта по умолчанию
 DEFAULT_COLUMN_WIDTHS = {  # Ширины столбцов по умолчанию
@@ -1101,6 +1104,1045 @@ class SettingsDialog(QDialog):
                 self.parent.update_sequences_colors()
 
 
+
+
+
+
+class CameraEditorDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_window = parent  # Используем parent_window вместо parent
+        self.camera_data = {}
+        self.setup_ui()
+        self.load_camera_data()
+        self.update_cameras_list()  # ДОБАВИТЬ: обновляем список после загрузки данных
+        
+    def setup_ui(self):
+        self.setWindowTitle("Редактор камер")
+        self.setGeometry(200, 200, 1000, 700)
+        
+        layout = QVBoxLayout()
+        
+        # Вкладки
+        self.tabs = QTabWidget()
+        
+        # Вкладка списка камер
+        self.cameras_tab = QWidget()
+        self.setup_cameras_tab()
+        self.tabs.addTab(self.cameras_tab, "Камеры")
+        
+        # Вкладка правил сопоставления
+        self.rules_tab = QWidget()
+        self.setup_rules_tab()
+        self.tabs.addTab(self.rules_tab, "Правила сопоставления")
+        
+        layout.addWidget(self.tabs)
+        
+        # Кнопки диалога
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        
+        layout.addWidget(button_box)
+        self.setLayout(layout)
+    
+
+    def save_current_camera(self):
+        """Сохраняет данные текущей камеры"""
+        current = self.cameras_list.currentItem()
+        if current:
+            camera_name = current.text()
+            
+            # Обновляем метаданные
+            metadata_names = [name.strip() for name in self.metadata_names_input.text().split(",") if name.strip()]
+            self.camera_data['cameras'][camera_name]['metadata_names'] = metadata_names
+            
+            # Обновляем разрешения из таблицы
+            resolutions = {}
+            for row in range(self.resolutions_table.rowCount()):
+                resolution_item = self.resolutions_table.item(row, 0)
+                sensor_item = self.resolutions_table.item(row, 1)
+                if resolution_item and sensor_item:
+                    resolutions[resolution_item.text()] = sensor_item.text()
+            
+            self.camera_data['cameras'][camera_name]['resolutions'] = resolutions
+            
+            # Сохраняем в файл
+            self.save_camera_data()
+
+
+
+    def bulk_import_cameras(self):
+        """Массовый импорт камер и данных из текста"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Массовый импорт камер")
+        dialog.setGeometry(300, 300, 700, 500)
+        
+        layout = QVBoxLayout()
+        
+        # Текстовое поле для ввода
+        layout.addWidget(QLabel("Введите данные в формате:"))
+        layout.addWidget(QLabel("camera model<tab>resolution w<tab>resolution h<tab>sensor"))
+        layout.addWidget(QLabel("alexa lf<tab>8000<tab>4000<tab>20 x 10"))
+        layout.addWidget(QLabel("Sony Venice 1<tab>3840<tab>2160<tab>22.8x12.8"))
+        
+        text_edit = QPlainTextEdit()
+        text_edit.setPlaceholderText("Вставьте данные здесь...")
+        
+        # Устанавливаем моноширинный шрифт для лучшего отображения
+        font = QFont("Courier", 9)
+        text_edit.setFont(font)
+        
+        layout.addWidget(text_edit)
+        
+        # Кнопки
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        dialog.setLayout(layout)
+        
+        if dialog.exec_() == QDialog.Accepted:
+            text = text_edit.toPlainText()
+            self.process_bulk_import(text)
+
+    def process_bulk_import(self, text):
+        """Массовый импорт с детальной отладкой"""
+        # print("=== ОТЛАДКА ФОРМАТА ДАННЫХ ===")
+        # print("Исходный текст:")
+        # print(repr(text))
+        # print("Строки:")
+        # for i, line in enumerate(text.strip().split('\n')):
+        #     print(f"{i+1}: {repr(line)}")
+        # print("=== КОНЕЦ ОТЛАДКИ ===")
+
+
+        """Массовый импорт камер и данных из текста - для данных с табуляциями"""
+        if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+            self.parent_window.debug_logger.log(f"=== НАЧАЛО МАССОВОГО ИМПОРТА ===")
+            self.parent_window.debug_logger.log(f"Исходный текст:\n{text}")
+        
+        lines = text.strip().split('\n')
+        imported_count = 0
+        
+        if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+            self.parent_window.debug_logger.log(f"Найдено строк: {len(lines)}")
+        
+        for line_num, line in enumerate(lines, 1):
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Проверяем, содержит ли строка табуляции
+            if '\t' in line:
+                parts = line.split('\t')
+                if len(parts) >= 4:
+                    camera_name = parts[0].strip()
+                    resolution_w = parts[1].strip()
+                    resolution_h = parts[2].strip()
+                    sensor_size = ' '.join(parts[3:]).strip()
+                    
+                    if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                        self.parent_window.debug_logger.log(f"Строка {line_num} (табуляции): '{line}'")
+                        self.parent_window.debug_logger.log(f"  Разобрано: camera='{camera_name}', w='{resolution_w}', h='{resolution_h}', sensor='{sensor_size}'")
+                    
+                    # Создаем камеру если не существует
+                    if camera_name not in self.camera_data['cameras']:
+                        self.camera_data['cameras'][camera_name] = {
+                            "metadata_names": [camera_name],
+                            "resolutions": {}
+                        }
+                        if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                            self.parent_window.debug_logger.log(f"  Создана новая камера: '{camera_name}'")
+                    
+                    # Нормализуем и добавляем данные
+                    resolution_str = f"{resolution_w}x{resolution_h}"
+                    normalized_resolution = self.normalize_resolution(resolution_str)
+                    normalized_sensor = self.normalize_sensor(sensor_size)
+                    
+                    if normalized_resolution and normalized_sensor:
+                        self.camera_data['cameras'][camera_name]['resolutions'][normalized_resolution] = normalized_sensor
+                        imported_count += 1
+                        if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                            self.parent_window.debug_logger.log(f"  Добавлено разрешение: {normalized_resolution} -> {normalized_sensor}")
+                else:
+                    if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                        self.parent_window.debug_logger.log(f"Строка {line_num}: недостаточно частей после разделения табуляциями: {len(parts)}")
+            else:
+                if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                    self.parent_window.debug_logger.log(f"Строка {line_num}: нет табуляций - пропускаем")
+        
+        # Сохраняем данные
+        self.save_camera_data()
+        self.update_cameras_list()
+        
+        # Перезагружаем детали если есть выбранная камера
+        current_item = self.cameras_list.currentItem()
+        if current_item:
+            self.load_camera_details(current_item.text())
+        
+        QMessageBox.information(self, "Успех", f"Данные успешно импортированы. Добавлено {imported_count} разрешений")
+        
+        if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+            self.parent_window.debug_logger.log(f"Импорт завершен. Добавлено {imported_count} разрешений")
+            self.parent_window.debug_logger.log("=== ЗАВЕРШЕНИЕ МАССОВОГО ИМПОРТА ===")
+
+
+    def add_camera_resolution(self, camera_name, resolution_w, resolution_h, sensor_size):
+        """Добавляет разрешение к камере"""
+        # Создаем камеру если не существует
+        if camera_name not in self.camera_data['cameras']:
+            self.camera_data['cameras'][camera_name] = {
+                "metadata_names": [camera_name],
+                "resolutions": {}
+            }
+            if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                self.parent_window.debug_logger.log(f"Создана новая камера: '{camera_name}'")
+        
+        # Добавляем разрешение
+        resolution_str = f"{resolution_w}x{resolution_h}"
+        normalized_resolution = self.normalize_resolution(resolution_str)
+        normalized_sensor = self.normalize_sensor(sensor_size)
+        
+        if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+            self.parent_window.debug_logger.log(f"Разрешение: '{resolution_str}' -> '{normalized_resolution}'")
+            self.parent_window.debug_logger.log(f"Сенсор: '{sensor_size}' -> '{normalized_sensor}'")
+        
+        if normalized_resolution:
+            self.camera_data['cameras'][camera_name]['resolutions'][normalized_resolution] = normalized_sensor
+            if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                self.parent_window.debug_logger.log(f"Добавлено разрешение: {normalized_resolution} -> {normalized_sensor}")
+            return True
+        
+        return False
+
+    def process_camera_buffer(self, buffer):
+        """Обрабатывает накопленные данные камеры"""
+        if len(buffer) >= 3 and hasattr(self, '_current_camera_from_buffer'):
+            resolution_w, resolution_h, sensor_size = buffer[:3]
+            self.add_camera_resolution(self._current_camera_from_buffer, resolution_w, resolution_h, sensor_size)
+
+    def setup_cameras_tab(self):
+        layout = QVBoxLayout()
+        
+        # Панель управления камерами
+        camera_control_layout = QHBoxLayout()
+
+        self.add_camera_btn = QPushButton("Добавить камеру")
+        self.edit_camera_btn = QPushButton("Редактировать камеру") 
+        self.delete_camera_btn = QPushButton("Удалить камеру")
+        self.bulk_import_btn = QPushButton("Массовое добавление камер и данных")  # Новая кнопка
+
+        self.add_camera_btn.clicked.connect(self.add_camera)
+        self.edit_camera_btn.clicked.connect(self.edit_camera)
+        self.delete_camera_btn.clicked.connect(self.delete_camera)
+        self.bulk_import_btn.clicked.connect(self.bulk_import_cameras)  # Подключаем метод
+
+        camera_control_layout.addWidget(self.add_camera_btn)
+        camera_control_layout.addWidget(self.edit_camera_btn)
+        camera_control_layout.addWidget(self.delete_camera_btn)
+        camera_control_layout.addWidget(self.bulk_import_btn)  # Добавляем в layout
+        camera_control_layout.addStretch()
+        
+        # Список камер
+        self.cameras_list = QListWidget()
+        self.cameras_list.currentItemChanged.connect(self.on_camera_selected)
+        
+        # Детали камеры
+        self.camera_details_widget = QWidget()
+        self.setup_camera_details()
+        
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(self.cameras_list)
+        splitter.addWidget(self.camera_details_widget)
+        splitter.setSizes([300, 600])
+        
+        layout.addLayout(camera_control_layout)
+        layout.addWidget(splitter)
+        
+        self.cameras_tab.setLayout(layout)
+    
+    def setup_camera_details(self):
+        layout = QVBoxLayout()
+        
+        form_layout = QFormLayout()
+        
+        self.camera_name_input = QLineEdit()
+        self.metadata_names_input = QLineEdit()
+        self.metadata_names_input.setPlaceholderText("Через запятую: ARRI ALEXA Mini LF, ALEXA Mini LF")
+        
+        form_layout.addRow("Название камеры:", self.camera_name_input)
+        form_layout.addRow("Имена в метаданных:", self.metadata_names_input)
+        
+        # Таблица разрешений
+        layout.addWidget(QLabel("Разрешения и размеры сенсоров:"))
+        
+        self.resolutions_table = QTableWidget()
+        self.resolutions_table.setColumnCount(2)
+        self.resolutions_table.setHorizontalHeaderLabels(["Разрешение", "Размер сенсора"])
+        
+        # Разрешаем редактирование ячеек и подключаем сигнал изменения
+        self.resolutions_table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed)
+        self.resolutions_table.cellChanged.connect(self.on_cell_changed)
+        
+        resolutions_control_layout = QHBoxLayout()
+        self.add_resolution_btn = QPushButton("Добавить разрешение")
+        self.edit_resolution_btn = QPushButton("Нормализовать выбранное")
+        self.delete_resolution_btn = QPushButton("Удалить разрешение")
+        
+        self.add_resolution_btn.clicked.connect(self.add_resolution)
+        self.edit_resolution_btn.clicked.connect(self.normalize_selected_resolution)
+        self.delete_resolution_btn.clicked.connect(self.delete_resolution)
+        
+        resolutions_control_layout.addWidget(self.add_resolution_btn)
+        resolutions_control_layout.addWidget(self.edit_resolution_btn)
+        resolutions_control_layout.addWidget(self.delete_resolution_btn)
+        resolutions_control_layout.addStretch()
+        
+        layout.addLayout(form_layout)
+        layout.addLayout(resolutions_control_layout)
+        layout.addWidget(self.resolutions_table)
+        
+        self.camera_details_widget.setLayout(layout)
+        self.camera_details_widget.setEnabled(False)
+
+
+    def save_camera_data_delayed(self):
+        """Сохраняет данные камер с задержкой чтобы избежать частых записей"""
+        if not hasattr(self, '_save_timer'):
+            self._save_timer = QTimer()
+            self._save_timer.setSingleShot(True)
+            self._save_timer.timeout.connect(self.save_camera_data)
+        
+        # Останавливаем предыдущий таймер и запускаем новый
+        self._save_timer.stop()
+        self._save_timer.start(2000)  # Сохраняем через 2 секунды после последнего изменения
+
+
+    def on_cell_changed(self, row, column):
+        """Автоматически нормализует значения при ручном редактировании"""
+        # Временно отключаем сигнал чтобы избежать рекурсии
+        self.resolutions_table.cellChanged.disconnect(self.on_cell_changed)
+        
+        item = self.resolutions_table.item(row, column)
+        if item:
+            current_value = item.text()
+            normalized_value = current_value
+            
+            if column == 0:  # Столбец разрешения
+                normalized_value = self.normalize_resolution(current_value)
+            elif column == 1:  # Столбец сенсора
+                normalized_value = self.normalize_sensor(current_value)
+            
+            # Если значение изменилось после нормализации, обновляем ячейку
+            if normalized_value != current_value:
+                item.setText(normalized_value)
+        
+        # Включаем сигнал обратно
+        self.resolutions_table.cellChanged.connect(self.on_cell_changed)
+        
+        # Используем отложенное сохранение вместо немедленного
+        self.save_camera_data_delayed()
+        
+
+
+    def normalize_selected_resolution(self):
+        """Нормализует выбранное разрешение и размер сенсора"""
+        current_row = self.resolutions_table.currentRow()
+        if current_row < 0:
+            QMessageBox.warning(self, "Ошибка", "Выберите разрешение для нормализации")
+            return
+        
+        # Получаем текущие значения
+        resolution_item = self.resolutions_table.item(current_row, 0)
+        sensor_item = self.resolutions_table.item(current_row, 1)
+        
+        if not resolution_item or not sensor_item:
+            QMessageBox.warning(self, "Ошибка", "Неверные данные в выбранной строке")
+            return
+        
+        current_resolution = resolution_item.text()
+        current_sensor = sensor_item.text()
+        
+        # Нормализуем значения
+        normalized_resolution = self.normalize_resolution(current_resolution)
+        normalized_sensor = self.normalize_sensor(current_sensor)
+        
+        # Обновляем таблицу
+        resolution_item.setText(normalized_resolution)
+        sensor_item.setText(normalized_sensor)
+        
+        # Сохраняем изменения
+        self.save_camera_data_delayed()
+        
+        QMessageBox.information(self, "Успех", "Разрешение и размер сенсора нормализованы")
+
+
+    def on_camera_data_changed(self):
+        """Вызывается при изменении данных камеры"""
+        # Используем таймер для отложенного сохранения, чтобы избежать частых записей
+        if hasattr(self, '_save_timer'):
+            self._save_timer.stop()
+        
+        self._save_timer = QTimer()
+        self._save_timer.setSingleShot(True)
+        self._save_timer.timeout.connect(self.save_current_camera)
+        self._save_timer.start(1000)  # Сохраняем через 1 секунду после последнего изменения
+
+
+    def delete_resolution(self):
+        """Удаляет выбранное разрешение из таблицы"""
+        current_row = self.resolutions_table.currentRow()
+        if current_row >= 0:
+            self.resolutions_table.removeRow(current_row)
+            # СОХРАНЯЕМ ИЗМЕНЕНИЯ
+            self.save_current_camera()
+
+    def normalize_resolution(self, resolution_str):
+        """Нормализует строку разрешения в формат WxH с поддержкой запятых"""
+        if not resolution_str or not resolution_str.strip():
+            return None
+        
+        if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+            self.parent_window.debug_logger.log(f"Нормализация разрешения: '{resolution_str}'")
+        
+        # ПРОВЕРКА: если строка уже в нормализованном формате WxH, возвращаем как есть
+        if re.match(r'^\d+x\d+$', resolution_str):
+            if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                self.parent_window.debug_logger.log(f"Разрешение уже нормализовано: '{resolution_str}'")
+            return resolution_str
+        
+        # Заменяем запятые на точки для десятичных чисел
+        clean_str = resolution_str.replace(',', '.')
+        
+        # Удаляем все пробелы и приводим к нижнему регистру
+        clean_str = re.sub(r'\s+', '', clean_str.lower())
+        
+        if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+            self.parent_window.debug_logger.log(f"Очищенная строка: '{clean_str}'")
+        
+        # Пробуем разные разделители
+        separators = ['x', 'х', '*', '×']  # английский x, русский х, *, символ умножения
+        
+        for sep in separators:
+            if sep in clean_str:
+                parts = clean_str.split(sep)
+                if len(parts) == 2:
+                    try:
+                        w = float(parts[0])
+                        h = float(parts[1])
+                        # Если числа целые, форматируем как целые, иначе оставляем как есть
+                        if w.is_integer() and h.is_integer():
+                            result = f"{int(w)}x{int(h)}"
+                        else:
+                            result = f"{w}x{h}"
+                        
+                        if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                            self.parent_window.debug_logger.log(f"Найден разделитель '{sep}': {parts} -> {result}")
+                        return result
+                    except ValueError as e:
+                        if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                            self.parent_window.debug_logger.log(f"Ошибка преобразования чисел для разделителя '{sep}': {e}")
+                        continue
+        
+        # Если не нашли разделитель, пробуем извлечь числа
+        numbers = re.findall(r'\d+\.?\d*', resolution_str)
+        if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+            self.parent_window.debug_logger.log(f"Извлеченные числа: {numbers}")
+        
+        if len(numbers) >= 2:
+            try:
+                w = float(numbers[0])
+                h = float(numbers[1])
+                if w.is_integer() and h.is_integer():
+                    result = f"{int(w)}x{int(h)}"
+                else:
+                    result = f"{w}x{h}"
+                
+                if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                    self.parent_window.debug_logger.log(f"Используем первые два числа: {result}")
+                return result
+            except ValueError as e:
+                if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                    self.parent_window.debug_logger.log(f"Ошибка преобразования извлеченных чисел: {e}")
+        
+        if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+            self.parent_window.debug_logger.log(f"Не удалось нормализовать разрешение: '{resolution_str}'")
+        return None
+
+    def normalize_sensor(self, sensor_str):
+        """Нормализует строку размера сенсора к формату '20.00mm x 10.00mm'"""
+        if not sensor_str.strip():
+            return sensor_str
+        
+        # ПРОВЕРКА: если строка уже в нормализованном формате, возвращаем как есть
+        if re.match(r'^\d+\.?\d*mm x \d+\.?\d*mm$', sensor_str):
+            if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                self.parent_window.debug_logger.log(f"Сенсор уже нормализован: '{sensor_str}'")
+            return sensor_str
+        
+        if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+            self.parent_window.debug_logger.log(f"Нормализация сенсора: '{sensor_str}'")
+        
+        # Убираем все лишние символы и приводим к нижнему регистру
+        clean_str = sensor_str.lower().strip()
+        
+        # Заменяем запятые на точки для десятичных чисел
+        clean_str = clean_str.replace(',', '.')
+        
+        # Удаляем все нечисловые символы, кроме точек, x и пробелов
+        clean_str = re.sub(r'[^\d\.x\s]', '', clean_str)
+        
+        # Заменяем различные варианты x на стандартный
+        clean_str = re.sub(r'[xх*×]', 'x', clean_str)
+        
+        # Убираем лишние пробелы
+        clean_str = re.sub(r'\s+', ' ', clean_str).strip()
+        
+        if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+            self.parent_window.debug_logger.log(f"Очищенная строка сенсора: '{clean_str}'")
+        
+        # Пробуем извлечь числа (теперь с точками вместо запятых)
+        numbers = re.findall(r'(\d+\.?\d*)', clean_str)
+        
+        if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+            self.parent_window.debug_logger.log(f"Извлеченные числа сенсора: {numbers}")
+        
+        if len(numbers) >= 2:
+            # Берем первые два числа
+            try:
+                width = float(numbers[0])
+                height = float(numbers[1])
+                
+                # Форматируем с двумя знаками после запятой
+                width_str = f"{width:.2f}"
+                height_str = f"{height:.2f}"
+                
+                # Убираем .00 если число целое
+                if width.is_integer():
+                    width_str = f"{int(width)}.00"
+                if height.is_integer():
+                    height_str = f"{int(height)}.00"
+                
+                result = f"{width_str}mm x {height_str}mm"
+                
+                if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                    self.parent_window.debug_logger.log(f"Нормализованный сенсор: '{result}'")
+                
+                return result
+                
+            except ValueError as e:
+                # Если не удалось преобразовать в числа, возвращаем исходную строку
+                if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                    self.parent_window.debug_logger.log(f"Ошибка преобразования чисел сенсора: {e}")
+                return sensor_str
+        
+        elif len(numbers) == 1:
+            # Если только одно число, предполагаем квадратный сенсор
+            try:
+                size = float(numbers[0])
+                size_str = f"{size:.2f}"
+                if size.is_integer():
+                    size_str = f"{int(size)}.00"
+                result = f"{size_str}mm x {size_str}mm"
+                
+                if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                    self.parent_window.debug_logger.log(f"Квадратный сенсор: '{result}'")
+                
+                return result
+            except ValueError as e:
+                if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                    self.parent_window.debug_logger.log(f"Ошибка преобразования квадратного сенсора: {e}")
+                return sensor_str
+        
+        else:
+            # Если чисел не найдено, возвращаем исходную строку
+            if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                self.parent_window.debug_logger.log(f"Числа не найдены, возвращаем исходную строку: '{sensor_str}'")
+            return sensor_str
+
+
+
+    
+    def setup_rules_tab(self):
+        layout = QVBoxLayout()
+        
+        # Правила для камер
+        layout.addWidget(QLabel("Правила определения камеры:"))
+        self.camera_rules_table = QTableWidget()
+        self.camera_rules_table.setColumnCount(3)
+        self.camera_rules_table.setHorizontalHeaderLabels(["Поле", "Значение", "Камера"])
+        
+        camera_rules_control = QHBoxLayout()
+        self.add_camera_rule_btn = QPushButton("Добавить правило")
+        self.delete_camera_rule_btn = QPushButton("Удалить правило")
+        
+        self.add_camera_rule_btn.clicked.connect(self.add_camera_rule)
+        self.delete_camera_rule_btn.clicked.connect(self.delete_camera_rule)
+        
+        camera_rules_control.addWidget(self.add_camera_rule_btn)
+        camera_rules_control.addWidget(self.delete_camera_rule_btn)
+        camera_rules_control.addStretch()
+        
+        # Правила для разрешений
+        layout.addWidget(QLabel("Правила определения разрешения:"))
+        self.resolution_rules_table = QTableWidget()
+        self.resolution_rules_table.setColumnCount(3)
+        self.resolution_rules_table.setHorizontalHeaderLabels(["Поле", "Тип", "Описание"])
+        
+        resolution_rules_control = QHBoxLayout()
+        self.add_resolution_rule_btn = QPushButton("Добавить правило")
+        self.delete_resolution_rule_btn = QPushButton("Удалить правило")
+        
+        self.add_resolution_rule_btn.clicked.connect(self.add_resolution_rule)
+        self.delete_resolution_rule_btn.clicked.connect(self.delete_resolution_rule)
+        
+        resolution_rules_control.addWidget(self.add_resolution_rule_btn)
+        resolution_rules_control.addWidget(self.delete_resolution_rule_btn)
+        resolution_rules_control.addStretch()
+        
+        # Описание типов правил
+        rules_info = QLabel(
+            "Типы правил разрешения:\n"
+            "- range: (min_x, min_y) - (max_x, max_y) → width = max_x+1, height = max_y+1\n"
+            "- single_w: только ширина\n" 
+            "- single_h: только высота\n"
+            "- combined: WxH или W x H"
+        )
+        rules_info.setWordWrap(True)
+        
+        layout.addLayout(camera_rules_control)
+        layout.addWidget(self.camera_rules_table)
+        layout.addLayout(resolution_rules_control)
+        layout.addWidget(self.resolution_rules_table)
+        layout.addWidget(rules_info)
+        
+        self.rules_tab.setLayout(layout)
+    
+
+    def load_camera_data(self):
+        """Загружает данные камер из JSON файла"""
+        try:
+            if os.path.exists(CAMERA_SENSOR_DATA_FILE):
+                with open(CAMERA_SENSOR_DATA_FILE, 'r', encoding='utf-8') as f:
+                    self.camera_data = json.load(f)
+                if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                    self.parent_window.debug_logger.log(f"Данные камер загружены из {CAMERA_SENSOR_DATA_FILE}")
+            else:
+                # Если файла нет, создаем пустую структуру
+                self.camera_data = {"cameras": {}}
+                self.save_camera_data()
+                if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                    self.parent_window.debug_logger.log(f"Создан пустой файл данных камер: {CAMERA_SENSOR_DATA_FILE}")
+            
+            # ДОБАВИТЬ: загружаем правила из настроек
+            self.load_rules_from_settings()
+            
+        except Exception as e:
+            if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                self.parent_window.debug_logger.log(f"Ошибка загрузки данных камер: {e}", "ERROR")
+            self.camera_data = {"cameras": {}}
+
+
+
+    
+
+    def save_camera_data(self):
+        """Сохраняет данные камер в JSON файл"""
+        try:
+            with open(CAMERA_SENSOR_DATA_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.camera_data, f, ensure_ascii=False, indent=2)
+            if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                self.parent_window.debug_logger.log(f"Данные камер сохранены в {CAMERA_SENSOR_DATA_FILE}")
+        except Exception as e:
+            if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                self.parent_window.debug_logger.log(f"Ошибка сохранения данных камер: {e}", "ERROR")
+
+
+
+    
+    def update_cameras_list(self):
+        """Обновляет список камер"""
+        self.cameras_list.clear()
+        if 'cameras' in self.camera_data:
+            for camera_name in sorted(self.camera_data['cameras'].keys()):
+                self.cameras_list.addItem(camera_name)
+        
+        # ДОБАВИТЬ: если есть камеры, выбираем первую
+        if self.cameras_list.count() > 0:
+            self.cameras_list.setCurrentRow(0)
+            self.load_camera_details(self.cameras_list.item(0).text())
+        else:
+            self.camera_details_widget.setEnabled(False)
+
+
+
+    
+    def load_rules_from_settings(self):
+        """Загружает правила из настроек приложения"""
+        # Загружаем правила для камер
+        camera_rules = self.parent_window.camera_detection_settings.get('camera_rules', [])
+        self.camera_rules_table.setRowCount(len(camera_rules))
+        for row, rule in enumerate(camera_rules):
+            self.camera_rules_table.setItem(row, 0, QTableWidgetItem(rule.get('field', '')))
+            self.camera_rules_table.setItem(row, 1, QTableWidgetItem(rule.get('value', '')))
+            self.camera_rules_table.setItem(row, 2, QTableWidgetItem(rule.get('camera', '')))
+        
+        # Загружаем правила для разрешений
+        resolution_rules = self.parent_window.camera_detection_settings.get('resolution_rules', [])
+        self.resolution_rules_table.setRowCount(len(resolution_rules))
+        for row, rule in enumerate(resolution_rules):
+            self.resolution_rules_table.setItem(row, 0, QTableWidgetItem(rule.get('field', '')))
+            self.resolution_rules_table.setItem(row, 1, QTableWidgetItem(rule.get('type', '')))
+
+
+
+    def save_rules_to_settings(self):
+        """Сохраняет правила в настройки приложения и СРАЗУ сохраняет настройки"""
+        # Сохраняем правила для камер
+        camera_rules = []
+        for row in range(self.camera_rules_table.rowCount()):
+            field_item = self.camera_rules_table.item(row, 0)
+            value_item = self.camera_rules_table.item(row, 1)
+            camera_item = self.camera_rules_table.item(row, 2)
+            if field_item and value_item and camera_item:
+                camera_rules.append({
+                    'field': field_item.text(),
+                    'value': value_item.text(),
+                    'camera': camera_item.text()
+                })
+        
+        # Сохраняем правила для разрешений
+        resolution_rules = []
+        for row in range(self.resolution_rules_table.rowCount()):
+            field_item = self.resolution_rules_table.item(row, 0)
+            type_item = self.resolution_rules_table.item(row, 1)
+            if field_item and type_item:
+                resolution_rules.append({
+                    'field': field_item.text(),
+                    'type': type_item.text()
+                })
+        
+        # Обновляем настройки родительского окна
+        if self.parent_window:
+            self.parent_window.camera_detection_settings = {
+                'camera_rules': camera_rules,
+                'resolution_rules': resolution_rules
+            }
+            # ДОБАВИТЬ: сразу сохраняем настройки
+            self.parent_window.save_settings()
+
+
+    def load_rules_from_settings(self):
+        """Загружает правила из настроек приложения"""
+        if not self.parent_window:
+            return
+            
+        # Загружаем правила для камер
+        camera_rules = self.parent_window.camera_detection_settings.get('camera_rules', [])
+        self.camera_rules_table.setRowCount(len(camera_rules))
+        for row, rule in enumerate(camera_rules):
+            self.camera_rules_table.setItem(row, 0, QTableWidgetItem(rule.get('field', '')))
+            self.camera_rules_table.setItem(row, 1, QTableWidgetItem(rule.get('value', '')))
+            self.camera_rules_table.setItem(row, 2, QTableWidgetItem(rule.get('camera', '')))
+        
+        # Загружаем правила для разрешений
+        resolution_rules = self.parent_window.camera_detection_settings.get('resolution_rules', [])
+        self.resolution_rules_table.setRowCount(len(resolution_rules))
+        for row, rule in enumerate(resolution_rules):
+            self.resolution_rules_table.setItem(row, 0, QTableWidgetItem(rule.get('field', '')))
+            self.resolution_rules_table.setItem(row, 1, QTableWidgetItem(rule.get('type', '')))
+
+
+
+
+    def add_camera_rule(self):
+        """Добавляет новое правило для камеры"""
+        # Диалог для ввода данных правила
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Новое правило для камеры")
+        layout = QFormLayout(dialog)
+        
+        field_input = QLineEdit()
+        value_input = QLineEdit()
+        camera_combo = QComboBox()
+        
+        # Заполняем комбобокс камерами
+        cameras = list(self.camera_data['cameras'].keys())
+        camera_combo.addItems(cameras)
+        
+        layout.addRow("Поле метаданных:", field_input)
+        layout.addRow("Значение:", value_input)
+        layout.addRow("Камера:", camera_combo)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addRow(button_box)
+        
+        if dialog.exec_() == QDialog.Accepted:
+            field = field_input.text().strip()
+            value = value_input.text().strip()
+            camera = camera_combo.currentText()
+            
+            if field and value and camera:
+                row = self.camera_rules_table.rowCount()
+                self.camera_rules_table.insertRow(row)
+                self.camera_rules_table.setItem(row, 0, QTableWidgetItem(field))
+                self.camera_rules_table.setItem(row, 1, QTableWidgetItem(value))
+                self.camera_rules_table.setItem(row, 2, QTableWidgetItem(camera))
+                
+                # ДОБАВИТЬ: сразу сохраняем настройки
+                self.save_rules_to_settings()
+        
+    def delete_camera_rule(self):
+        """Удаляет выбранное правило для камеры"""
+        current_row = self.camera_rules_table.currentRow()
+        if current_row >= 0:
+            self.camera_rules_table.removeRow(current_row)
+            # ДОБАВИТЬ: сразу сохраняем настройки
+            self.save_rules_to_settings()
+    
+
+    def add_resolution_rule(self):
+        """Добавляет новое правило для разрешения"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Новое правило для разрешения")
+        layout = QFormLayout(dialog)
+        
+        field_input = QLineEdit()
+        type_combo = QComboBox()
+        type_combo.addItems(["range", "single_w", "single_h", "combined"])
+        
+        layout.addRow("Поле метаданных:", field_input)
+        layout.addRow("Тип правила:", type_combo)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addRow(button_box)
+        
+        if dialog.exec_() == QDialog.Accepted:
+            field = field_input.text().strip()
+            rule_type = type_combo.currentText()
+            
+            if field and rule_type:
+                row = self.resolution_rules_table.rowCount()
+                self.resolution_rules_table.insertRow(row)
+                self.resolution_rules_table.setItem(row, 0, QTableWidgetItem(field))
+                self.resolution_rules_table.setItem(row, 1, QTableWidgetItem(rule_type))
+                
+                # Добавляем описание
+                descriptions = {
+                    "range": "(min_x,min_y)-(max_x,max_y) → W=min_x+1, H=min_y+1",
+                    "single_w": "только ширина", 
+                    "single_h": "только высота",
+                    "combined": "WxH или W x H"
+                }
+                self.resolution_rules_table.setItem(row, 2, QTableWidgetItem(descriptions.get(rule_type, "")))
+                
+                # ДОБАВИТЬ: сразу сохраняем настройки
+                self.save_rules_to_settings()
+
+
+
+    
+    def delete_resolution_rule(self):
+        """Удаляет выбранное правило для разрешения"""
+        current_row = self.resolution_rules_table.currentRow()
+        if current_row >= 0:
+            self.resolution_rules_table.removeRow(current_row)
+            # ДОБАВИТЬ: сразу сохраняем настройки
+            self.save_rules_to_settings()
+
+
+    
+    def accept(self):
+        """Сохраняет настройки при закрытии диалога через OK"""
+        # Останавливаем таймер отложенного сохранения
+        if hasattr(self, '_save_timer') and self._save_timer.isActive():
+            self._save_timer.stop()
+        
+        # Сохраняем изменения текущей камеры
+        current_item = self.cameras_list.currentItem()
+        if current_item:
+            self.save_current_camera()
+        
+        # Сохраняем правила в настройки
+        self.save_rules_to_settings()
+        
+        # Уведомляем родительское окно об изменениях
+        if self.parent_window:
+            self.parent_window.load_camera_data()
+            self.parent_window.save_settings()
+        
+        super().accept()
+
+
+    def reject(self):
+        """Останавливаем таймер при отмене"""
+        if hasattr(self, '_save_timer') and self._save_timer.isActive():
+            self._save_timer.stop()
+        super().reject()
+
+    
+    def on_camera_selected(self, current, previous):
+        """Обрабатывает выбор камеры в списке"""
+        if current:
+            camera_name = current.text()
+            self.load_camera_details(camera_name)
+    
+    def load_camera_details(self, camera_name):
+        """Загружает детали выбранной камеры БЕЗ нормализации"""
+        camera_info = self.camera_data['cameras'][camera_name]
+        
+        self.camera_name_input.setText(camera_name)
+        
+        # Загружаем metadata_names
+        metadata_names = camera_info.get('metadata_names', [])
+        self.metadata_names_input.setText(", ".join(metadata_names))
+        
+        # Заполняем таблицу разрешений БЕЗ нормализации
+        self.resolutions_table.setRowCount(0)
+        resolutions = camera_info.get('resolutions', {})
+        for resolution, sensor_size in resolutions.items():
+            row = self.resolutions_table.rowCount()
+            self.resolutions_table.insertRow(row)
+            self.resolutions_table.setItem(row, 0, QTableWidgetItem(resolution))
+            self.resolutions_table.setItem(row, 1, QTableWidgetItem(sensor_size))
+        
+        self.camera_details_widget.setEnabled(True)
+        
+    def add_camera(self):
+        """Добавляет новую камеру"""
+        name, ok = QInputDialog.getText(self, "Новая камера", "Введите название камеры:")
+        if ok and name:
+            if name not in self.camera_data['cameras']:
+                self.camera_data['cameras'][name] = {
+                    "metadata_names": [],
+                    "resolutions": {}
+                }
+                self.save_camera_data()
+                self.update_cameras_list()
+    
+    def edit_camera(self):
+        """Редактирует выбранную камеру"""
+        current = self.cameras_list.currentItem()
+        if current:
+            # Сохраняем изменения текущей камеры
+            camera_name = current.text()
+            new_name = self.camera_name_input.text()
+            
+            if new_name != camera_name and new_name:
+                # Переименовываем камеру
+                self.camera_data['cameras'][new_name] = self.camera_data['cameras'].pop(camera_name)
+                camera_name = new_name
+            
+            # Обновляем метаданные
+            metadata_names = [name.strip() for name in self.metadata_names_input.text().split(",") if name.strip()]
+            self.camera_data['cameras'][camera_name]['metadata_names'] = metadata_names
+            
+            # Разрешения теперь сохраняются автоматически при добавлении/удалении
+            
+            self.save_camera_data()
+            self.update_cameras_list()
+            
+            # Выбираем обновленную камеру
+            items = self.cameras_list.findItems(camera_name, Qt.MatchExactly)
+            if items:
+                self.cameras_list.setCurrentItem(items[0])
+    
+    def delete_camera(self):
+        """Удаляет выбранную камеру"""
+        current = self.cameras_list.currentItem()
+        if current:
+            camera_name = current.text()
+            reply = QMessageBox.question(self, "Удаление камеры", 
+                                       f"Удалить камеру '{camera_name}'?",
+                                       QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                del self.camera_data['cameras'][camera_name]
+                self.save_camera_data()
+                self.update_cameras_list()
+                self.camera_details_widget.setEnabled(False)
+    
+    # def add_resolution(self):
+    #     """Добавляет новое разрешение с поддержкой разных форматов ввода"""
+    #     resolution, ok1 = QInputDialog.getText(self, "Новое разрешение", 
+    #                                         "Введите разрешение (WxH, W x H, W H):")
+    #     if not ok1 or not resolution:
+    #         return
+            
+    #     # Нормализуем ввод разрешения
+    #     normalized_resolution = self.normalize_resolution(resolution)
+    #     if not normalized_resolution:
+    #         QMessageBox.warning(self, "Ошибка", "Неверный формат разрешения")
+    #         return
+
+
+    def add_resolution(self):
+        """Добавляет новое разрешение с поддержкой разных форматов ввода"""
+        # Запрос разрешения
+        resolution, ok1 = QInputDialog.getText(self, "Новое разрешение", 
+                                            "Введите разрешение (WxH, W x H, W H):")
+        if not ok1 or not resolution:
+            return
+            
+        # Нормализуем ввод разрешения
+        normalized_resolution = self.normalize_resolution(resolution)
+        if not normalized_resolution:
+            QMessageBox.warning(self, "Ошибка", "Неверный формат разрешения")
+            return
+            
+        # Запрос размера сенсора  
+        sensor_size, ok2 = QInputDialog.getText(self, "Размер сенсора", 
+                                            "Введите размер сенсора (например: 20 10, 20x10, 20mm x 10mm):")
+        if not ok2:
+            return
+            
+        # Нормализуем ввод сенсора
+        original_sensor = sensor_size
+        normalized_sensor = self.normalize_sensor(sensor_size)
+        
+        # Показываем пользователю, как был нормализован ввод
+        if original_sensor != normalized_sensor:
+            QMessageBox.information(self, "Нормализация", 
+                                f"Размер сенсора был нормализован:\n{original_sensor} → {normalized_sensor}")
+        
+        # Получаем текущую выбранную камеру
+        current_item = self.cameras_list.currentItem()
+        if not current_item:
+            QMessageBox.warning(self, "Ошибка", "Сначала выберите камеру из списка")
+            return
+            
+        camera_name = current_item.text()
+        
+        # Проверяем, нет ли уже такого разрешения для этой камеры
+        if normalized_resolution in self.camera_data['cameras'][camera_name]['resolutions']:
+            reply = QMessageBox.question(self, "Разрешение уже существует", 
+                                    f"Разрешение {normalized_resolution} уже существует для камеры {camera_name}. Перезаписать?",
+                                    QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.No:
+                return
+        
+        # Добавляем разрешение в таблицу
+        row = self.resolutions_table.rowCount()
+        self.resolutions_table.insertRow(row)
+        self.resolutions_table.setItem(row, 0, QTableWidgetItem(normalized_resolution))
+        self.resolutions_table.setItem(row, 1, QTableWidgetItem(normalized_sensor))
+        
+        # Сохраняем в структуру данных камеры
+        self.camera_data['cameras'][camera_name]['resolutions'][normalized_resolution] = normalized_sensor
+        
+        # Используем отложенное сохранение
+        self.save_camera_data_delayed()
+        
+        QMessageBox.information(self, "Успех", f"Разрешение {normalized_resolution} добавлено к камере {camera_name}")
+
+
+
+
 class EXRMetadataViewer(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1129,6 +2171,10 @@ class EXRMetadataViewer(QMainWindow):
         self.forced_metadata_tool = None  # Текущий форсированный инструмент
         self.forced_metadata_file = None  # Файл, для которого применено форсированное чтение
         
+        # Данные камер
+        self.camera_data = {}
+        self.camera_detection_settings = {}
+        self.load_camera_data()
 
 
         # Используем жесткий путь если задан, иначе локальный файл
@@ -1197,11 +2243,16 @@ class EXRMetadataViewer(QMainWindow):
         self.continue_btn.clicked.connect(self.continue_search)
         self.settings_btn.clicked.connect(self.open_settings)
         self.log_btn.clicked.connect(self.show_log)
+
+
+        self.camera_editor_btn = QPushButton("Редактор камер")
+        self.camera_editor_btn.clicked.connect(self.open_camera_editor)
         
         control_layout.addWidget(self.start_btn)
         control_layout.addWidget(self.stop_btn)
         control_layout.addWidget(self.continue_btn)
         control_layout.addWidget(self.settings_btn)
+        control_layout.addWidget(self.camera_editor_btn)
         control_layout.addWidget(self.art_checkbox)
         control_layout.addWidget(self.log_checkbox)
         control_layout.addWidget(self.log_btn)
@@ -1323,6 +2374,249 @@ class EXRMetadataViewer(QMainWindow):
 
 
 
+    def load_camera_data(self):
+        """Загружает данные камер из JSON файла"""
+        try:
+            if os.path.exists(CAMERA_SENSOR_DATA_FILE):
+                with open(CAMERA_SENSOR_DATA_FILE, 'r', encoding='utf-8') as f:
+                    self.camera_data = json.load(f)
+                self.debug_logger.log(f"Данные камер загружены из {CAMERA_SENSOR_DATA_FILE}")  # ИСПРАВЛЕНО
+            else:
+                # Если файла нет, создаем пустую структуру
+                self.camera_data = {"cameras": {}}
+                self.save_camera_data()
+                self.debug_logger.log(f"Создан пустой файл данных камер: {CAMERA_SENSOR_DATA_FILE}")  # ИСПРАВЛЕНО
+            
+            # Убираем вызовы методов, которые не существуют в этом классе
+            # self.update_cameras_list()
+            # self.load_rules_from_settings()
+            
+        except Exception as e:
+            self.debug_logger.log(f"Ошибка загрузки данных камер: {e}", "ERROR")  # ИСПРАВЛЕНО
+            self.camera_data = {"cameras": {}}
+
+
+
+
+    
+    def save_camera_data(self):
+        """Сохраняет данные камер в JSON файл"""
+        try:
+            with open(CAMERA_SENSOR_DATA_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.camera_data, f, ensure_ascii=False, indent=2)
+            self.debug_logger.log(f"Данные камер сохранены в {CAMERA_SENSOR_DATA_FILE}")  # ИСПРАВЛЕНО
+        except Exception as e:
+            self.debug_logger.log(f"Ошибка сохранения данных камер: {e}", "ERROR")  # ИСПРАВЛЕНО
+
+
+
+    
+    def detect_camera_and_sensor(self, metadata):
+        """Определяет камеру и разрешение из метаданных и возвращает размер сенсора и информацию об определении"""
+        camera, camera_detection_info = self.detect_camera(metadata)
+        resolution, resolution_detection_info = self.detect_resolution(metadata)
+        
+        detection_info = []
+        
+        # Добавляем фактическую информацию о камере и разрешении
+        if camera:
+            detection_info.append(f"Камера: {camera}")
+        if resolution:
+            detection_info.append(f"Разрешение: {resolution}")
+        
+        # Добавляем информацию о правилах
+        if camera_detection_info:
+            detection_info.extend(camera_detection_info)
+        if resolution_detection_info:
+            detection_info.extend(resolution_detection_info)
+        
+        if camera and resolution:
+            sensor_size = self.get_sensor_size(camera, resolution)
+            if sensor_size:
+                return sensor_size, detection_info
+        
+        return None, detection_info
+
+    def detect_camera(self, metadata):
+        """Определяет камеру из метаданных на основе правил"""
+        detection_info = []
+        
+        # Сначала проверяем правила из настроек
+        for rule in self.camera_detection_settings.get('camera_rules', []):
+            field = rule.get('field')
+            value = rule.get('value')
+            camera = rule.get('camera')
+            if field in metadata and str(metadata[field]) == value:
+                detection_info.append(f"Правило: {field} = {value} → {camera}")
+                return camera, detection_info
+        
+        # Затем проверяем metadata_names из базы камер
+        for camera_name, camera_info in self.camera_data.get('cameras', {}).items():
+            for metadata_name in camera_info.get('metadata_names', []):
+                if metadata_name:
+                    # Ищем точное совпадение в любом поле метаданных
+                    for field, value in metadata.items():
+                        if metadata_name == str(value):
+                            detection_info.append(f"Авто: {field} = {value} → {camera_name}")
+                            return camera_name, detection_info
+        
+        return None, detection_info
+
+    def detect_resolution(self, metadata):
+        """Определяет разрешение из метаданных на основе правил, выбирая наибольшее из найденных"""
+        resolutions = []  # Список всех найденных разрешений
+        found_rules = []  # Для хинта - какие правила сработали
+        
+        for rule in self.camera_detection_settings.get('resolution_rules', []):
+            field = rule.get('field')
+            rule_type = rule.get('type')
+            if field in metadata:
+                value = metadata[field]
+                parsed = self.parse_resolution(value, rule_type, field)
+                if parsed:
+                    found_rules.append(f"{field} ({rule_type})")
+                    
+                    if rule_type == 'single_w':
+                        # Для ширины сохраняем как (width, None)
+                        resolutions.append((parsed, None, f"single_w: {parsed}"))
+                    elif rule_type == 'single_h':
+                        # Для высоты сохраняем как (None, height)
+                        resolutions.append((None, parsed, f"single_h: {parsed}"))
+                    else:
+                        # Для range и combined возвращается кортеж (width, height)
+                        if isinstance(parsed, tuple) and len(parsed) == 2:
+                            width, height = parsed
+                            resolutions.append((width, height, f"{rule_type}: {width}x{height}"))
+        
+        # Выбираем наилучшее разрешение из всех найденных
+        best_resolution = self.select_best_resolution(resolutions)
+        
+        if best_resolution:
+            width, height, source = best_resolution
+            if width and height:
+                return f"{width}x{height}", found_rules + [f"выбрано: {source}"]
+            elif width:
+                return f"{width}x?", found_rules + [f"выбрано: {source}"]
+            elif height:
+                return f"?x{height}", found_rules + [f"выбрано: {source}"]
+        
+        return None, found_rules
+    
+
+    def select_best_resolution(self, resolutions):
+        """Выбирает наилучшее разрешение из списка найденных"""
+        if not resolutions:
+            return None
+        
+        # Фильтруем полные разрешения (и width, и height)
+        full_resolutions = [(w, h, s) for w, h, s in resolutions if w is not None and h is not None]
+        
+        if full_resolutions:
+            # Сортируем полные разрешения по площади (ширина * высота) в убывающем порядке
+            full_resolutions.sort(key=lambda x: x[0] * x[1], reverse=True)
+            return full_resolutions[0]  # Возвращаем наибольшее
+        
+        # Если полных разрешений нет, ищем частичные
+        widths = [(w, s) for w, h, s in resolutions if w is not None and h is None]
+        heights = [(h, s) for w, h, s in resolutions if w is None and h is not None]
+        
+        if widths and heights:
+            # Берем наибольшую ширину и наибольшую высоту
+            max_width = max(widths, key=lambda x: x[0])
+            max_height = max(heights, key=lambda x: x[0])
+            return max_width[0], max_height[0], f"комбинировано: {max_width[1]} + {max_height[1]}"
+        elif widths:
+            # Только ширины
+            max_width = max(widths, key=lambda x: x[0])
+            return max_width[0], None, max_width[1]
+        elif heights:
+            # Только высоты
+            max_height = max(heights, key=lambda x: x[0])
+            return None, max_height[0], max_height[1]
+        
+        return None
+
+
+
+
+
+    def parse_resolution(self, value, rule_type, field_name=""):
+        """Парсит разрешение из значения в зависимости от типа правила"""
+        try:
+            value_str = str(value)
+            
+            if rule_type == 'range':
+                # Ожидаем строку вида "(min_x, min_y) - (max_x, max_y)"
+                # Пример: "(0, 0) - (3839, 2159)" -> 3840x2160
+                match = re.match(r'\((\d+),\s*(\d+)\)\s*-\s*\((\d+),\s*(\d+)\)', value_str)
+                if match:
+                    min_x, min_y, max_x, max_y = map(int, match.groups())
+                    width = max_x - min_x + 1
+                    height = max_y - min_y + 1
+                    return width, height
+                
+                # Альтернативный формат: "0 0 3839 2159"
+                match = re.match(r'(\d+)\s+(\d+)\s+(\d+)\s+(\d+)', value_str)
+                if match:
+                    min_x, min_y, max_x, max_y = map(int, match.groups())
+                    width = max_x - min_x + 1
+                    height = max_y - min_y + 1
+                    return width, height
+            
+            elif rule_type == 'single_w':
+                # Просто число - ширина
+                return int(value_str)
+            
+            elif rule_type == 'single_h':
+                # Просто число - высота
+                return int(value_str)
+            
+            elif rule_type == 'combined':
+                # Ожидаем строку вида "WxH" или "W x H" или "W:H"
+                match = re.match(r'(\d+)\s*[xX:]\s*(\d+)', value_str)
+                if match:
+                    width, height = map(int, match.groups())
+                    return width, height
+                
+                # Альтернативный формат: "Width: 3840 Height: 2160"
+                width_match = re.search(r'[Ww]idth:\s*(\d+)', value_str)
+                height_match = re.search(r'[Hh]eight:\s*(\d+)', value_str)
+                if width_match and height_match:
+                    width = int(width_match.group(1))
+                    height = int(height_match.group(1))
+                    return width, height
+        
+        except Exception as e:
+            self.debug_logger.log(f"Ошибка парсинга разрешения для поля {field_name}: {e}", "ERROR")
+        
+        return None
+    
+    def get_sensor_size(self, camera, resolution):
+        """Возвращает размер сенсора для заданной камеры и разрешения"""
+        if camera in self.camera_data.get('cameras', {}):
+            camera_info = self.camera_data['cameras'][camera]
+            if resolution in camera_info.get('resolutions', {}):
+                return camera_info['resolutions'][resolution]
+        return None
+
+
+
+
+    def open_camera_editor(self):
+        """Открывает редактор камер"""
+        # Проверяем, есть ли камеры в базе
+        if not self.camera_data.get('cameras'):
+            reply = QMessageBox.information(self, "База камер пуста", 
+                                        "База данных камер пуста. Хотите добавить первую камеру?",
+                                        QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                dialog = CameraEditorDialog(self)  # Передаем self как родитель
+                if dialog.exec_() == QDialog.Accepted:
+                    # Перезагружаем данные камер после закрытия редактора
+                    self.load_camera_data()
+        else:
+            dialog = CameraEditorDialog(self)  # Передаем self как родитель
+            dialog.exec_()
 
 
     def filter_sequences(self):
@@ -2454,7 +3748,11 @@ class EXRMetadataViewer(QMainWindow):
                         else:
                             self.current_metadata["MediaInfo Error"] = "MediaInfo не доступен"
                             metadata_source = "MediaInfo Not Available"
+                            
             
+
+
+
             # Для всех файлов добавляем базовую информацию
             file_stats = os.stat(file_path)
             self.current_metadata["Имя файла"] = os.path.basename(file_path)
@@ -2468,7 +3766,18 @@ class EXRMetadataViewer(QMainWindow):
             # Если использовался принудительный инструмент, добавляем отметку
             if forced_tool:
                 metadata_source = f"{metadata_source} (принудительно)"
-            
+
+
+            #
+
+        
+            # ОПРЕДЕЛЯЕМ РАЗМЕР СЕНСОРА
+            sensor_size, detection_info = self.detect_camera_and_sensor(self.current_metadata)
+            self.current_sensor_info = {
+                'size': sensor_size,
+                'detection_info': detection_info
+            }
+
             # Разделяем метаданные на цветные и обычные
             colored_metadata = {}
             normal_metadata = {}
@@ -2485,7 +3794,7 @@ class EXRMetadataViewer(QMainWindow):
                 if field_name in colored_metadata:
                     sorted_colored.append((field_name, colored_metadata[field_name]))
             
-            # Добавляем оставшиеся цветные поля, которых нет в ordered_metadata_fields (на всякий случай)
+            # Добавляем оставшиеся цветные поля
             for field_name, value in colored_metadata.items():
                 if field_name not in self.ordered_metadata_fields:
                     sorted_colored.append((field_name, value))
@@ -2493,27 +3802,86 @@ class EXRMetadataViewer(QMainWindow):
             # Сортируем обычные метаданные по ключу
             sorted_normal = sorted(normal_metadata.items())
             
-            # Объединяем: сначала цветные в указанном порядке, потом обычные
-            sorted_metadata = sorted_colored + sorted_normal
+            # Объединяем: сначала Detected Sensor (всегда), потом цветные, потом обычные
+            sorted_metadata = []
+            # Всегда добавляем строку Detected Sensor
+            sensor_display_value = sensor_size if sensor_size else "не определено"
+            sorted_metadata.append(("Detected Sensor", sensor_display_value))
+
+            sorted_metadata.extend(sorted_colored)
+            sorted_metadata.extend(sorted_normal)
             
             # Заполняем таблицу
             self.metadata_table.setRowCount(len(sorted_metadata))
             
             for row, (key, value) in enumerate(sorted_metadata):
-                # Поле
                 key_item = QTableWidgetItem(key)
                 key_item.setFlags(key_item.flags() & ~Qt.ItemIsEditable)
                 
-                # Значение
                 value_item = QTableWidgetItem(str(value))
                 value_item.setFlags(value_item.flags() & ~Qt.ItemIsEditable)
+                
+                # Добавляем tooltip для строки Detected Sensor
+                if key == "Detected Sensor":
+                    if detection_info:
+                        # Формируем более информативный tooltip
+                        resolution_info = []
+                        camera_info = []
+                        actual_resolution = None
+                        actual_camera = None
+                        
+                        # Извлекаем фактические значения камеры и разрешения из detection_info
+                        for info in detection_info:
+                            if "разрешение:" in info.lower():
+                                actual_resolution = info.replace("Разрешение:", "").strip()
+                            elif "камера:" in info.lower():
+                                actual_camera = info.replace("Камера:", "").strip()
+                            elif "разрешение" in info.lower() or "width" in info.lower() or "height" in info.lower():
+                                resolution_info.append(info)
+                            else:
+                                camera_info.append(info)
+                        
+                        tooltip_parts = []
+                        
+                        # Добавляем фактическую камеру и разрешение
+                        if actual_camera:
+                            tooltip_parts.append(f"Камера: {actual_camera}")
+                        if actual_resolution:
+                            tooltip_parts.append(f"Разрешение: {actual_resolution}")
+                        
+                        if tooltip_parts:
+                            tooltip_parts.append("")  # Пустая строка как разделитель
+                        
+                        # Добавляем информацию о выборе наибольшего разрешения
+                        if any("выбрано:" in info for info in resolution_info):
+                            tooltip_parts.append("Стратегия выбора: наибольшее разрешение")
+                        
+                        if camera_info:
+                            tooltip_parts.append("Камера определена по:")
+                            tooltip_parts.extend(camera_info)
+                        if resolution_info:
+                            if tooltip_parts:
+                                tooltip_parts.append("")  # Пустая строка как разделитель
+                            tooltip_parts.append("Разрешение определено по:")
+                            tooltip_parts.extend(resolution_info)
+                        
+                        tooltip_text = "\n".join(tooltip_parts)
+                    else:
+                        tooltip_text = "Не удалось определить камеру или разрешение"
+                    
+                    key_item.setToolTip(tooltip_text)
+                    value_item.setToolTip(tooltip_text)
                 
                 self.metadata_table.setItem(row, 0, key_item)
                 self.metadata_table.setItem(row, 1, value_item)
                 
-                # Применяем цвет, если поле есть в цветном списке
+                # Применяем цвет, если поле есть в цветном списке (включая Detected Sensor)
                 self.apply_field_color(row, key)
-            
+
+
+
+
+
             # Обновляем метку с источником метаданных
             if self.forced_metadata_tool and self.forced_metadata_file == file_path:
                 tool_name = METADATA_TOOLS.get(self.forced_metadata_tool, self.forced_metadata_tool)
@@ -2927,51 +4295,200 @@ class EXRMetadataViewer(QMainWindow):
     def show_metadata_table_context_menu(self, position):
         """Контекстное меню для таблицы метаданных"""
         index = self.metadata_table.indexAt(position)
-        if not index.isValid():
-            return
-            
-        row = index.row()
-        column = index.column()
-        
-        field_name_item = self.metadata_table.item(row, 0)
-        value_item = self.metadata_table.item(row, 1)
-        
-        if not field_name_item or not value_item:
-            return
-            
-        field_name = field_name_item.text()
-        field_value = value_item.text()
+        selected_rows = self.metadata_table.selectionModel().selectedRows()
         
         menu = QMenu(self)
         
-        if column == 0:  # Клик по столбцу "Поле"
-            # Копировать имя поля
-            copy_name_action = menu.addAction("Копировать имя поля")
-            copy_name_action.triggered.connect(lambda: self.copy_field_name(field_name))
+        # Если есть выделенные строки, добавляем пункты для работы с выделением
+        if selected_rows:
+            copy_selected_values_action = menu.addAction("Копировать выделенное: значения")
+            copy_selected_both_action = menu.addAction("Копировать выделенное: поля и значения")
+            
+            copy_selected_values_action.triggered.connect(self.copy_selected_values)
+            copy_selected_both_action.triggered.connect(self.copy_selected_fields_and_values)
             
             menu.addSeparator()
+        
+        # Если кликнули на конкретную ячейку, добавляем пункты для этой ячейки
+        if index.isValid():
+            row = index.row()
+            column = index.column()
             
-            # Проверяем, есть ли поле в цветных
-            if field_name in self.color_metadata and not self.color_metadata[field_name].get('removed', False):
-                color_action = menu.addAction("Изменить цвет")
-                remove_action = menu.addAction("Удалить из списка")
+            field_name_item = self.metadata_table.item(row, 0)
+            value_item = self.metadata_table.item(row, 1)
+            
+            if field_name_item and value_item:
+                field_name = field_name_item.text()
+                field_value = value_item.text()
                 
-                color_action.triggered.connect(lambda: self.change_field_color(field_name))
-                remove_action.triggered.connect(lambda: self.remove_field_from_colors(field_name))
-            else:
-                color_action = menu.addAction("Задать цвет")
-                color_action.triggered.connect(lambda: self.add_field_with_color(field_name))
-            
-        elif column == 1:  # Клик по столбцу "Значение"
-            # Копировать значение поля
-            copy_value_action = menu.addAction("Копировать значение")
-            copy_value_action.triggered.connect(lambda: self.copy_field_value(field_value))
-            
-            # Копировать имя и значение
-            copy_both_action = menu.addAction("Копировать имя и значение")
-            copy_both_action.triggered.connect(lambda: self.copy_field_name_and_value(field_name, field_value))
+                if column == 0:  # Клик по столбцу "Поле"
+                    # Копировать имя поля
+                    copy_name_action = menu.addAction("Копировать имя поля")
+                    copy_name_action.triggered.connect(lambda: self.copy_field_name(field_name))
+                    
+                    menu.addSeparator()
+                    
+                    # Проверяем, есть ли поле в цветных
+                    if field_name in self.color_metadata and not self.color_metadata[field_name].get('removed', False):
+                        color_action = menu.addAction("Изменить цвет")
+                        remove_action = menu.addAction("Удалить из списка")
+                        
+                        color_action.triggered.connect(lambda: self.change_field_color(field_name))
+                        remove_action.triggered.connect(lambda: self.remove_field_from_colors(field_name))
+                    else:
+                        color_action = menu.addAction("Задать цвет")
+                        color_action.triggered.connect(lambda: self.add_field_with_color(field_name))
+                    
+                    menu.addSeparator()
+
+                    # Добавляем пункты для правил камеры и разрешения
+                    set_camera_action = menu.addAction("Задать камеру для этого поля")
+                    set_resolution_action = menu.addAction("Задать разрешение для этого поля")
+
+                    set_camera_action.triggered.connect(lambda: self.set_camera_rule(field_name, field_value))
+                    set_resolution_action.triggered.connect(lambda: self.set_resolution_rule(field_name, field_value))
+
+                elif column == 1:  # Клик по столбцу "Значение"
+                    # Копировать значение поля
+                    copy_value_action = menu.addAction("Копировать значение")
+                    copy_value_action.triggered.connect(lambda: self.copy_field_value(field_value))
+                    
+                    # Копировать имя и значение
+                    copy_both_action = menu.addAction("Копировать имя и значение")
+                    copy_both_action.triggered.connect(lambda: self.copy_field_name_and_value(field_name, field_value))
         
         menu.exec_(self.metadata_table.viewport().mapToGlobal(position))
+
+
+
+
+    def update_metadata_display(self):
+        """Обновляет отображение метаданных с учетом новых правил"""
+        if hasattr(self, 'current_metadata') and self.current_metadata:
+            # Сохраняем текущий выбор
+            current_items = self.sequences_tree.selectedItems()
+            if current_items:
+                item_data = current_items[0].data(0, Qt.UserRole)
+                if item_data and item_data['type'] == 'sequence':
+                    seq_info = item_data['info']
+                    if self.current_sequence_files:
+                        current_file = self.current_sequence_files[0]
+                        extension = seq_info['extension']
+                        self.display_metadata(current_file, extension)
+
+
+
+
+    def copy_selected_values(self):
+        """Копирует значения выделенных строк в буфер обмена"""
+        selected_indexes = self.metadata_table.selectionModel().selectedIndexes()
+        if not selected_indexes:
+            return
+        
+        # Собираем уникальные строки (может быть выделено несколько ячеек в разных строках)
+        rows_values = {}
+        for index in selected_indexes:
+            if index.column() == 1:  # Только столбец значений
+                value_item = self.metadata_table.item(index.row(), 1)
+                if value_item:
+                    rows_values[index.row()] = value_item.text()
+        
+        # Сортируем по номеру строки и копируем
+        if rows_values:
+            values = [rows_values[row] for row in sorted(rows_values.keys())]
+            clipboard = QApplication.clipboard()
+            clipboard.setText("\n".join(values))
+            QMessageBox.information(self, "Успех", f"Скопировано {len(values)} значений")
+
+    def copy_selected_fields_and_values(self):
+        """Копирует поля и значения выделенных строк в буфер обмена"""
+        selected_indexes = self.metadata_table.selectionModel().selectedIndexes()
+        if not selected_indexes:
+            return
+        
+        # Собираем уникальные строки
+        rows_data = {}
+        for index in selected_indexes:
+            row = index.row()
+            if row not in rows_data:
+                field_item = self.metadata_table.item(row, 0)
+                value_item = self.metadata_table.item(row, 1)
+                if field_item and value_item:
+                    rows_data[row] = f"{field_item.text()}: {value_item.text()}"
+        
+        # Сортируем по номеру строки и копируем
+        if rows_data:
+            fields_and_values = [rows_data[row] for row in sorted(rows_data.keys())]
+            clipboard = QApplication.clipboard()
+            clipboard.setText("\n".join(fields_and_values))
+            QMessageBox.information(self, "Успех", f"Скопировано {len(fields_and_values)} полей и значений")
+
+
+
+
+
+
+    def set_camera_rule(self, field, value):
+        """Добавляет правило для камеры"""
+        # Проверяем, есть ли камеры в базе
+        cameras = list(self.camera_data.get('cameras', {}).keys())
+        if not cameras:
+            QMessageBox.warning(self, "Ошибка", 
+                            "Нет доступных камер. Сначала добавьте камеры в редакторе камер.")
+            return
+        
+        # Проверяем, нет ли уже такого правила
+        existing_rules = self.camera_detection_settings.get('camera_rules', [])
+        for rule in existing_rules:
+            if rule.get('field') == field and rule.get('value') == value:
+                QMessageBox.information(self, "Информация", "Такое правило уже существует")
+                return
+        
+        camera, ok = QInputDialog.getItem(self, "Выбор камеры", "Выберите камеру:", cameras, 0, False)
+        if ok and camera:
+            # Добавляем правило
+            new_rule = {
+                'field': field,
+                'value': value,
+                'camera': camera
+            }
+            self.camera_detection_settings.setdefault('camera_rules', []).append(new_rule)
+            self.save_settings()
+            
+            QMessageBox.information(self, "Успех", f"Правило добавлено: {field} = {value} → {camera}")
+            
+            # Обновляем отображение метаданных, если есть открытый файл
+            self.update_metadata_display()
+
+
+
+    
+    def set_resolution_rule(self, field, value):
+        """Добавляет правило для разрешения"""
+        rule_types = ["range", "single_w", "single_h", "combined"]
+        rule_type, ok = QInputDialog.getItem(self, "Тип правила", "Выберите тип правила:", rule_types, 0, False)
+        if ok and rule_type:
+            # Проверяем, нет ли уже такого правила
+            existing_rules = self.camera_detection_settings.get('resolution_rules', [])
+            for rule in existing_rules:
+                if rule.get('field') == field and rule.get('type') == rule_type:
+                    QMessageBox.information(self, "Информация", "Такое правило уже существует")
+                    return
+            
+            new_rule = {
+                'field': field,
+                'type': rule_type
+            }
+            self.camera_detection_settings.setdefault('resolution_rules', []).append(new_rule)
+            self.save_settings()
+            
+            QMessageBox.information(self, "Успех", "Правило для разрешения добавлено")
+            
+            # Обновляем отображение метаданных, если есть открытый файл
+            self.update_metadata_display()
+
+
+
 
     def copy_field_name(self, field_name):
         """Копирует имя поля в буфер обмена"""
@@ -3099,7 +4616,27 @@ class EXRMetadataViewer(QMainWindow):
                     # Если ordered_metadata_fields пуст, инициализируем его из color_metadata
                     if not self.ordered_metadata_fields and self.color_metadata:
                         self.ordered_metadata_fields = list(self.color_metadata.keys())
+
+
+
+
+
+                    # Загружаем настройки для камер
+                    self.camera_detection_settings = settings.get('camera_detection', {
+                        'camera_rules': [],
+                        'resolution_rules': [
+                            {'field': 'dataWindow', 'type': 'range'},
+                            {'field': 'displayWindow', 'type': 'range'},
+                            {'field': 'width', 'type': 'single_w'},
+                            {'field': 'height', 'type': 'single_h'}
+                        ]
+                    })
                         
+
+
+
+
+
         except Exception as e:
             self.debug_logger.log(f"Ошибка загрузки настроек: {e}", "ERROR")
             self.color_metadata = {}
@@ -3107,6 +4644,15 @@ class EXRMetadataViewer(QMainWindow):
             self.sequence_colors = {}
             self.ordered_metadata_fields = []
             self.use_art_for_mxf = False
+            self.camera_detection_settings = {
+                'camera_rules': [],
+                'resolution_rules': [
+                    {'field': 'dataWindow', 'type': 'range'},
+                    {'field': 'displayWindow', 'type': 'range'},
+                    {'field': 'width', 'type': 'single_w'},
+                    {'field': 'height', 'type': 'single_h'}
+                ]
+            }
 
     def save_settings(self):
         """Сохраняет настройки в файл"""
@@ -3138,7 +4684,8 @@ class EXRMetadataViewer(QMainWindow):
                 'removed_metadata': cleaned_removed_metadata,
                 'sequence_colors': cleaned_sequence_colors,
                 'ordered_metadata_fields': self.ordered_metadata_fields,
-                'use_art_for_mxf': self.use_art_for_mxf
+                'use_art_for_mxf': self.use_art_for_mxf,
+                'camera_detection': self.camera_detection_settings  # ДОБАВЛЯЕМ
             }
             
             with open(self.settings_file, 'w', encoding='utf-8') as f:
