@@ -32,7 +32,10 @@ DEBUG = False  # Включаем логирование для отладки
 
 SETTINGS_FILE_HARD = "/studio/tools/pipeline/commandor-dev/studio/Scripts/exr_viewer_settings.json"
 # Путь к ARRI Reference Tool
-ARRI_REFERENCE_TOOL_PATH = "/studio/proj/temp/ART_cmd/art-cmd_0.4.1_rhel8_gcc85_x64/bin/art-cmd"
+ARRI_REFERENCE_TOOL_PATH = "/studio/tools/ART_cmd/bin/art-cmd"
+
+# Добавляем путь к REDline для чтения R3D файлов
+REDLINE_TOOL_PATH = "/studio/tools/REDline2/REDline"
 
 CAMERA_SENSOR_DATA_FILE = "/studio/tools/pipeline/commandor-dev/studio/Scripts/Camera_sensor_data.json"
 
@@ -195,7 +198,7 @@ class SequenceFinder(QThread):
         # Видео расширения, которые всегда считаем одиночными
         self.video_extensions = {'.mov', '.mp4', '.avi', '.mkv', '.wmv', '.flv', '.webm', 
                                '.m4v', '.mpg', '.mpeg', '.m2v', '.m4v', '.3gp', '.3g2', 
-                               '.f4v', '.ogv', '.ts', '.mts', '.m2ts', '.mxf'}
+                               '.f4v', '.ogv', '.ts', '.mts', '.m2ts', '.mxf', '.r3d'}
 
     def stop(self):
         self._is_running = False
@@ -1382,6 +1385,17 @@ class CameraEditorDialog(QDialog):
         self.resolutions_table.setColumnCount(2)
         self.resolutions_table.setHorizontalHeaderLabels(["Разрешение", "Размер сенсора"])
         
+        # Настраиваем заголовок для ручного изменения ширины столбцов
+        header = self.resolutions_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)  # Разрешаем пользователю менять ширину
+        header.setStretchLastSection(True)  # Растягиваем последний столбец на оставшееся пространство
+        
+        # Устанавливаем начальную равную ширину
+        table_width = self.resolutions_table.width()
+        column_width = table_width // self.resolutions_table.columnCount()
+        for i in range(self.resolutions_table.columnCount()):
+            self.resolutions_table.setColumnWidth(i, column_width)
+
         # Разрешаем редактирование ячеек и подключаем сигнал изменения
         self.resolutions_table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed)
         self.resolutions_table.cellChanged.connect(self.on_cell_changed)
@@ -1674,6 +1688,17 @@ class CameraEditorDialog(QDialog):
         self.camera_rules_table.setColumnCount(3)
         self.camera_rules_table.setHorizontalHeaderLabels(["Поле", "Значение", "Камера"])
         
+        # Настраиваем заголовок для ручного изменения ширины столбцов
+        camera_header = self.camera_rules_table.horizontalHeader()
+        camera_header.setSectionResizeMode(QHeaderView.Interactive)  # Разрешаем пользователю менять ширину
+        camera_header.setStretchLastSection(True)  # Растягиваем последний столбец на оставшееся пространство
+
+        # Устанавливаем начальную равную ширину
+        table_width = self.camera_rules_table.width()
+        column_width = table_width // self.camera_rules_table.columnCount()
+        for i in range(self.camera_rules_table.columnCount()):
+            self.camera_rules_table.setColumnWidth(i, column_width)
+        
         camera_rules_control = QHBoxLayout()
         self.add_camera_rule_btn = QPushButton("Добавить правило")
         self.delete_camera_rule_btn = QPushButton("Удалить правило")
@@ -1691,6 +1716,19 @@ class CameraEditorDialog(QDialog):
         self.resolution_rules_table.setColumnCount(3)
         self.resolution_rules_table.setHorizontalHeaderLabels(["Поле", "Тип", "Описание"])
         
+        # Настраиваем заголовок для ручного изменения ширины столбцов
+        resolution_header = self.resolution_rules_table.horizontalHeader()
+        resolution_header.setSectionResizeMode(QHeaderView.Interactive)  # Разрешаем пользователю менять ширину
+        resolution_header.setStretchLastSection(True)  # Растягиваем последний столбец на оставшееся пространство
+
+        # Устанавливаем начальную равную ширину
+        table_width = self.resolution_rules_table.width()
+        column_width = table_width // self.resolution_rules_table.columnCount()
+        for i in range(self.resolution_rules_table.columnCount()):
+            self.resolution_rules_table.setColumnWidth(i, column_width)
+        
+
+
         resolution_rules_control = QHBoxLayout()
         self.add_resolution_rule_btn = QPushButton("Добавить правило")
         self.delete_resolution_rule_btn = QPushButton("Удалить правило")
@@ -2217,7 +2255,7 @@ class EXRMetadataViewer(QMainWindow):
         self.settings_btn = QPushButton("Настройки цветов")
 
         # Добавляем галочку для чтения MXF через ART
-        self.art_checkbox = QCheckBox("Читать Arri")
+        self.art_checkbox = QCheckBox("Читать Arri и RED")
         self.art_checkbox.setChecked(self.use_art_for_mxf)
         self.art_checkbox.stateChanged.connect(self.toggle_art_usage)
         
@@ -2536,6 +2574,60 @@ class EXRMetadataViewer(QMainWindow):
         
         return None
 
+
+
+    def add_redline_metadata(self, file_path):
+        """Добавляет метаданные из R3D файла через REDline"""
+        try:
+            # Проверяем доступность REDline
+            if not os.path.exists(REDLINE_TOOL_PATH):
+                self.current_metadata["Ошибка REDline"] = "REDline не доступен по указанному пути"
+                self.debug_logger.log(f"REDline не доступен по пути: {REDLINE_TOOL_PATH}", "WARNING")
+                return
+            
+            # Запускаем REDline для получения метаданных
+            cmd = [
+                REDLINE_TOOL_PATH,
+                '--i', file_path,
+                '--useMeta',
+                '--printMeta', '1'
+            ]
+            
+            self.debug_logger.log(f"Запуск REDline: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0:
+                output = result.stdout
+                self.debug_logger.log(f"REDline успешно выполнен для {file_path}")
+                
+                # Парсим вывод REDline
+                lines = output.strip().split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if not line or ':' not in line:
+                        continue
+                    
+                    # Разделяем по первому двоеточию
+                    parts = line.split(':', 1)
+                    if len(parts) == 2:
+                        key = parts[0].strip()
+                        value = parts[1].strip()
+                        
+                        # Добавляем префикс RED для идентификации источника
+                        self.current_metadata[f"RED {key}"] = value
+                
+                self.debug_logger.log(f"Прочитано {len(lines)} строк метаданных RED из {file_path}")
+                
+            else:
+                self.current_metadata["Ошибка REDline"] = f"REDline вернул ошибку: {result.stderr}"
+                self.debug_logger.log(f"Ошибка REDline для {file_path}: {result.stderr}", "ERROR")
+                
+        except subprocess.TimeoutExpired:
+            self.current_metadata["Ошибка REDline"] = "Таймаут выполнения REDline"
+            self.debug_logger.log(f"Таймаут REDline для {file_path}", "ERROR")
+        except Exception as e:
+            self.current_metadata["Ошибка REDline"] = f"Не удалось прочитать REDline метаданные: {str(e)}"
+            self.debug_logger.log(f"Ошибка чтения REDline для {file_path}: {str(e)}", "ERROR")
 
 
 
@@ -3543,7 +3635,6 @@ class EXRMetadataViewer(QMainWindow):
 
 
 
-
     def display_metadata(self, file_path, extension, forced_tool=None):
         """Отображает метаданные для файла"""
         try:
@@ -3605,6 +3696,126 @@ class EXRMetadataViewer(QMainWindow):
                         self.current_metadata["Ошибка чтения EXR"] = f"Не удалось прочитать EXR метаданные: {str(e)}"
                         metadata_source = "OpenEXR Error"
                         self.debug_logger.log(f"Ошибка чтения EXR для {file_path}: {str(e)}", "ERROR")
+                
+
+
+                
+
+                # Для R3D файлов используем REDline
+                elif extension_lower == '.r3d':
+                    # Если REDline доступен, используем его
+                    if self.use_art_for_mxf and os.path.exists(REDLINE_TOOL_PATH):
+                        temp_output_path = None
+                        try:
+                            # Создаем временный файл для вывода REDline
+                            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as temp_file:
+                                temp_output_path = temp_file.name
+                            
+                            # Запускаем REDline для получения метаданных
+                            cmd = [
+                                REDLINE_TOOL_PATH,
+                                '--i', file_path,
+                                '--useMeta',
+                                '--printMeta', '1'
+                            ]
+                            
+                            self.debug_logger.log(f"Запуск REDline: {' '.join(cmd)}")
+                            self.debug_logger.log(f"Временный файл вывода: {temp_output_path}")
+                            
+                            # Запускаем процесс и захватываем stdout и stderr
+                            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+                            
+                            # Сохраняем ВСЕ выводы (stdout и stderr) в файл для отладки
+                            with open(temp_output_path, 'w') as output_file:
+                                output_file.write("=== STDOUT ===\n")
+                                output_file.write(result.stdout)
+                                output_file.write("\n=== STDERR ===\n")
+                                output_file.write(result.stderr)
+                            
+                            # Пробуем использовать stderr как основной вывод, так как REDline может выводить туда
+                            output = result.stderr if result.stderr.strip() else result.stdout
+                            
+                            if output.strip():
+                                # Парсим вывод REDline независимо от кода возврата
+                                lines = output.strip().split('\n')
+                                redline_metadata_count = 0
+                                for line in lines:
+                                    line = line.strip()
+                                    if not line or ':' not in line:
+                                        continue
+                                    
+                                    # Разделяем по первому двоеточию
+                                    parts = line.split(':', 1)
+                                    if len(parts) == 2:
+                                        key = parts[0].strip()
+                                        value = parts[1].strip()
+                                        
+                                        # Пропускаем строки с разделителями отладки
+                                        if key.startswith("==="):
+                                            continue
+                                            
+                                        # Добавляем префикс RED для идентификации источника
+                                        self.current_metadata[f"RED {key}"] = value
+                                        redline_metadata_count += 1
+                                
+                                if redline_metadata_count > 0:
+                                    metadata_source = "REDline"
+                                    self.debug_logger.log(f"Прочитано {redline_metadata_count} метаданных RED из {file_path} (код возврата: {result.returncode})")
+                                else:
+                                    # Если не нашли метаданных, считаем это ошибкой
+                                    error_msg = f"REDline не вернул метаданные (код {result.returncode})"
+                                    self.debug_logger.log(error_msg, "WARNING")
+                                    self.current_metadata["REDline Error"] = error_msg
+                                    metadata_source = "REDline No Data"
+                                    
+                                    # Используем MediaInfo как fallback
+                                    if PYMEDIAINFO_AVAILABLE:
+                                        self.debug_logger.log("Используем MediaInfo как fallback для R3D")
+                                        self.add_mediainfo_metadata(file_path)
+                                        metadata_source = "MediaInfo (REDline fallback)"
+                            else:
+                                error_msg = f"REDline не вернул данных (код {result.returncode})"
+                                self.debug_logger.log(error_msg, "WARNING")
+                                self.current_metadata["REDline Error"] = error_msg
+                                metadata_source = "REDline No Output"
+                                
+                                # Используем MediaInfo как fallback
+                                if PYMEDIAINFO_AVAILABLE:
+                                    self.debug_logger.log("Используем MediaInfo как fallback для R3D")
+                                    self.add_mediainfo_metadata(file_path)
+                                    metadata_source = "MediaInfo (REDline fallback)"
+                                    
+                        except subprocess.TimeoutExpired:
+                            self.debug_logger.log("REDline timeout", "WARNING")
+                            if PYMEDIAINFO_AVAILABLE:
+                                self.add_mediainfo_metadata(file_path)
+                                metadata_source = "MediaInfo (REDline timeout fallback)"
+                            else:
+                                self.current_metadata["REDline Error"] = "REDline timeout"
+                                metadata_source = "REDline Timeout"
+                        except Exception as e:
+                            self.debug_logger.log(f"Ошибка REDline: {str(e)}", "WARNING")
+                            if PYMEDIAINFO_AVAILABLE:
+                                self.add_mediainfo_metadata(file_path)
+                                metadata_source = "MediaInfo (REDline error fallback)"
+                            else:
+                                self.current_metadata["REDline Error"] = f"REDline error: {str(e)}"
+                                metadata_source = "REDline Error"
+                        finally:
+                            # Всегда удаляем временный файл, так как мы уже обработали вывод
+                            if temp_output_path and os.path.exists(temp_output_path):
+                                os.unlink(temp_output_path)
+                                #print (temp_output_path)
+
+                   
+                    else:
+                        # Если REDline недоступен, используем MediaInfo
+                        if PYMEDIAINFO_AVAILABLE:
+                            self.add_mediainfo_metadata(file_path)
+                            metadata_source = "MediaInfo"
+                        else:
+                            self.current_metadata["MediaInfo Error"] = "MediaInfo не доступен"
+                            metadata_source = "MediaInfo Not Available"
                 
                 # Для JPEG и RAW файлов используем exifread
                 elif extension_lower in ['.jpg', '.jpeg', '.arw', '.cr2', '.dng', '.nef', '.tif', '.tiff'] and EXIFREAD_AVAILABLE:
@@ -3750,8 +3961,6 @@ class EXRMetadataViewer(QMainWindow):
                             metadata_source = "MediaInfo Not Available"
                             
             
-
-
 
             # Для всех файлов добавляем базовую информацию
             file_stats = os.stat(file_path)
