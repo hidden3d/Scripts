@@ -30,11 +30,11 @@ from PyQt5.QtWidgets import QTreeWidget, QTreeWidgetItem, QPlainTextEdit
 
 DEBUG = False  # Включаем логирование для отладки
 
-SETTINGS_FILE_HARD = "/home/hidden/Documents/DEV/exr_viewer_settings.json"
+SETTINGS_FILE_HARD = "/studio/tools/pipeline/commandor-dev/studio/Scripts/exr_viewer_settings.json"
 # Путь к ARRI Reference Tool
-ARRI_REFERENCE_TOOL_PATH = "/home/hidden/Downloads/arri/art-cmd_0.4.1_rhel8_gcc85_x64/bin/art-cmd"
+ARRI_REFERENCE_TOOL_PATH = "/studio/proj/temp/ART_cmd/art-cmd_0.4.1_rhel8_gcc85_x64/bin/art-cmd"
 
-CAMERA_SENSOR_DATA_FILE = "/home/hidden/Documents/DEV/Camera_sensor_data.json"
+CAMERA_SENSOR_DATA_FILE = "/studio/tools/pipeline/commandor-dev/studio/Scripts/Camera_sensor_data.json"
 
 
 DEFAULT_FONT_SIZE = 10  # Размер шрифта по умолчанию
