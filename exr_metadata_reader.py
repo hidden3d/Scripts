@@ -22,7 +22,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout
                              QFormLayout, QComboBox, QTableWidget, QTableWidgetItem,
                              QHeaderView, QAbstractItemView, QMenu, QAction, QTabWidget,
                              QSplitter, QTextBrowser, QScrollArea, QCheckBox, QInputDialog)
-from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSettings, QTimer
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSettings, QTimer, QPropertyAnimation
 from PyQt5.QtGui import QTextCursor, QColor, QTextCharFormat, QFont, QBrush
 from PyQt5.QtWidgets import QTreeWidget, QTreeWidgetItem, QPlainTextEdit
 
@@ -30,14 +30,14 @@ from PyQt5.QtWidgets import QTreeWidget, QTreeWidgetItem, QPlainTextEdit
 
 DEBUG = False  # Включаем логирование для отладки
 
-SETTINGS_FILE_HARD = "/studio/tools/pipeline/commandor-dev/studio/Scripts/exr_viewer_settings.json"
+SETTINGS_FILE_HARD = "/studio/tools/pipeline/commandor-test/studio/Scripts/exr_viewer_settings.json"
 # Путь к ARRI Reference Tool
 ARRI_REFERENCE_TOOL_PATH = "/studio/tools/ART_cmd/bin/art-cmd"
 
 # Добавляем путь к REDline для чтения R3D файлов
 REDLINE_TOOL_PATH = "/studio/tools/REDline2/REDline"
 
-CAMERA_SENSOR_DATA_FILE = "/studio/tools/pipeline/commandor-dev/studio/Scripts/Camera_sensor_data.json"
+CAMERA_SENSOR_DATA_FILE = "/studio/tools/pipeline/commandor-test/studio/Scripts/Camera_sensor_data.json"
 
 
 DEFAULT_FONT_SIZE = 10  # Размер шрифта по умолчанию
@@ -80,6 +80,100 @@ except ImportError:
     PYMEDIAINFO_AVAILABLE = False
     print("Библиотека pymediainfo не установлена. Расширенные метаданные для медиафайлов не будут доступны.")
     print("Установите ее: pip install pymediainfo")
+
+
+
+class ToastMessage(QLabel):
+    """Всплывающее сообщение (Toast)"""
+    
+    def __init__(self, message, parent=None, duration=5000, opacity=0.9):
+        super().__init__(parent)
+        self.duration = duration
+        self.opacity = opacity
+        
+        # Настройка текста и выравнивания
+        self.setText(message)
+        self.setAlignment(Qt.AlignCenter)
+        self.setWordWrap(True)
+        
+        # Настройка стиля с прозрачностью
+        self.update_style()
+        
+        # Настройка флагов окна - ВАЖНО: убираем WA_TranslucentBackground
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
+        # self.setAttribute(Qt.WA_TranslucentBackground)  # УБИРАЕМ эту строку!
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        
+        # Устанавливаем непрозрачность окна
+        self.setWindowOpacity(0.5)  # Полностью непрозрачное окно
+        
+        # Анимация появления и исчезновения
+        self.animation = QPropertyAnimation(self, b"windowOpacity")
+        self.animation.setDuration(300)
+        self.animation.finished.connect(self.check_animation_finished)
+        
+        self.timer = QTimer()
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self.hide_toast)
+    
+    def update_style(self):
+        """Обновляет стиль с текущей прозрачностью"""
+        self.setStyleSheet(f"""
+            QLabel {{
+                background-color: rgba(50, 50, 50, {self.opacity});
+                color: white;
+                padding: 12px 20px;
+                border-radius: 25px;
+                font-size: 20px;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                font-weight: 500;
+            }}
+        """)
+    
+    def show_toast(self):
+        """Показывает toast сообщение по центру родителя"""
+        # Обновляем геометрию, чтобы получить актуальные размеры
+        self.adjustSize()
+        
+        # Позиционируем по центру родительского окна
+        if self.parent():
+            parent_rect = self.parent().geometry()
+            # Вычисляем центр родителя
+            x = parent_rect.left() + (parent_rect.width() - self.width()) // 2
+            y = parent_rect.top() + (parent_rect.height() - self.height()) // 2
+            self.move(x, y)
+        else:
+            # Если нет родителя, позиционируем по центру экрана
+            screen_geometry = QApplication.primaryScreen().availableGeometry()
+            x = (screen_geometry.width() - self.width()) // 2
+            y = (screen_geometry.height() - self.height()) // 2
+            self.move(x, y)
+        
+        # Анимация появления
+        self.setWindowOpacity(0.0)
+        self.show()
+        
+        self.animation.setStartValue(0.0)
+        self.animation.setEndValue(1.0)
+        self.animation.start()
+        
+        # Запускаем таймер для автоматического скрытия
+        self.timer.start(self.duration)
+    
+    def hide_toast(self):
+        """Скрывает toast с анимацией"""
+        self.animation.setStartValue(1.0)
+        self.animation.setEndValue(0.0)
+        self.animation.start()
+    
+    def check_animation_finished(self):
+        """Проверяет завершение анимации и скрывает виджет"""
+        if self.windowOpacity() == 0.0:
+            self.hide()
+            self.deleteLater()
+
+
+
 
 
 class DebugLogger:
@@ -2412,6 +2506,13 @@ class EXRMetadataViewer(QMainWindow):
 
 
 
+    def show_toast(self, message, duration=2000, opacity=0.5):
+        """Показывает toast сообщение"""
+        toast = ToastMessage(message, self, duration, opacity)
+        toast.show_toast()
+
+
+
     def load_camera_data(self):
         """Загружает данные камер из JSON файла"""
         try:
@@ -4607,7 +4708,11 @@ class EXRMetadataViewer(QMainWindow):
             values = [rows_values[row] for row in sorted(rows_values.keys())]
             clipboard = QApplication.clipboard()
             clipboard.setText("\n".join(values))
-            QMessageBox.information(self, "Успех", f"Скопировано {len(values)} значений")
+            # ЗАМЕНА: вместо QMessageBox используем toast
+            self.show_toast(f"Скопировано {len(values)} значений")
+            # УДАЛИТЬ: QMessageBox.information(self, "Успех", f"Скопировано {len(values)} значений")
+
+
 
     def copy_selected_fields_and_values(self):
         """Копирует поля и значения выделенных строк в буфер обмена"""
@@ -4630,7 +4735,9 @@ class EXRMetadataViewer(QMainWindow):
             fields_and_values = [rows_data[row] for row in sorted(rows_data.keys())]
             clipboard = QApplication.clipboard()
             clipboard.setText("\n".join(fields_and_values))
-            QMessageBox.information(self, "Успех", f"Скопировано {len(fields_and_values)} полей и значений")
+            # ЗАМЕНА: вместо QMessageBox используем toast
+            self.show_toast(f"Скопировано {len(fields_and_values)} полей и значений")
+            # УДАЛИТЬ: QMessageBox.information(self, "Успех", f"Скопировано {len(fields_and_values)} полей и значений")
 
 
 
@@ -4699,23 +4806,34 @@ class EXRMetadataViewer(QMainWindow):
 
 
 
+
     def copy_field_name(self, field_name):
         """Копирует имя поля в буфер обмена"""
         clipboard = QApplication.clipboard()
         clipboard.setText(field_name)
-        QMessageBox.information(self, "Успех", f"Поле '{field_name}' скопировано в буфер обмена")
+        # ЗАМЕНА: вместо QMessageBox используем toast
+        self.show_toast("Имя поля скопировано")
+        # УДАЛИТЬ: QMessageBox.information(self, "Успех", f"Поле '{field_name}' скопировано в буфер обмена")
 
     def copy_field_value(self, field_value):
         """Копирует значение поля в буфер обмена"""
         clipboard = QApplication.clipboard()
         clipboard.setText(field_value)
-        QMessageBox.information(self, "Успех", "Значение поля скопировано в буфер обмена")
+        # ЗАМЕНА: вместо QMessageBox используем toast
+        self.show_toast("Значение поля скопировано")
+        # УДАЛИТЬ: QMessageBox.information(self, "Успех", "Значение поля скопировано в буфер обмена")
 
     def copy_field_name_and_value(self, field_name, field_value):
         """Копирует имя и значение поля в буфер обмена"""
         clipboard = QApplication.clipboard()
         clipboard.setText(f"{field_name}: {field_value}")
-        QMessageBox.information(self, "Успех", "Имя и значение поля скопированы в буфер обмена")
+        # ЗАМЕНА: вместо QMessageBox используем toast
+        self.show_toast("Имя и значение поля скопированы")
+        # УДАЛИТЬ: QMessageBox.information(self, "Успех", "Имя и значение поля скопированы в буфер обмена")
+
+
+
+
 
     def add_field_with_color(self, field_name):
         """Добавляет поле с выбранным цветом"""

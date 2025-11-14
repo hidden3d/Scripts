@@ -239,22 +239,81 @@
       "g": 228,
       "b": 228,
       "removed": false
-    }
-  },
-  "removed_metadata": {
-    "camera_acceleration_z": {
-      "r": 22,
+    },
+    "MediaInfo General - camera_type": {
+      "r": 216,
       "g": 255,
-      "b": 6,
+      "b": 221,
       "removed": false
     },
-    "cameraCCTSetting": {
+    "MediaInfo Video - height": {
+      "r": 235,
+      "g": 220,
+      "b": 255,
+      "removed": false
+    },
+    "MediaInfo Video - width": {
+      "r": 235,
+      "g": 220,
+      "b": 255,
+      "removed": false
+    },
+    "Detected Sensor": {
+      "r": 241,
+      "g": 195,
+      "b": 114,
+      "removed": false
+    },
+    "RED Camera Model": {
+      "r": 216,
+      "g": 255,
+      "b": 221,
+      "removed": false
+    },
+    "RED Focal Length": {
+      "r": 216,
+      "g": 232,
+      "b": 255,
+      "removed": false
+    },
+    "RED AltReelID": {
       "r": 255,
-      "g": 0,
-      "b": 153,
+      "g": 228,
+      "b": 228,
+      "removed": false
+    },
+    "RED Clip Name": {
+      "r": 255,
+      "g": 228,
+      "b": 228,
+      "removed": false
+    },
+    "RED Lens Name": {
+      "r": 216,
+      "g": 232,
+      "b": 255,
+      "removed": false
+    },
+    "RED Sensor Name": {
+      "r": 216,
+      "g": 255,
+      "b": 221,
+      "removed": false
+    },
+    "RED Frame Height": {
+      "r": 235,
+      "g": 220,
+      "b": 255,
+      "removed": false
+    },
+    "RED Frame Width": {
+      "r": 235,
+      "g": 220,
+      "b": 255,
       "removed": false
     }
   },
+  "removed_metadata": {},
   "sequence_colors": {
     "video_single_mov": {
       "r": 219,
@@ -310,9 +369,24 @@
       "r": 0,
       "g": 255,
       "b": 255
+    },
+    "single_braw": {
+      "r": 243,
+      "g": 167,
+      "b": 136
+    },
+    "video_single_r3d": {
+      "r": 255,
+      "g": 242,
+      "b": 208
     }
   },
   "ordered_metadata_fields": [
+    "ARRI.clipBasedMetadataSets.0.metadataSetName",
+    "ARRI.clipBasedMetadataSets.0.metadataSetPayload.sensorDimensions.width",
+    "ARRI.clipBasedMetadataSets.0.metadataSetPayload.sensorDimensions.height",
+    "RED Camera Model",
+    "RED Sensor Name",
     "cameraModel",
     "camera_sensor",
     "arriraw/cameraDevice/cameraModel",
@@ -322,6 +396,7 @@
     "EXIF Image Tag 0xC614",
     "ARRI.descriptiveMetadataSets.0.metadataSetPayload.cameraModel",
     "ARRI.clipBasedMetadataSets.11.metadataSetPayload.nativeIdentificationList.0.productName",
+    "MediaInfo General - camera_type",
     "lensModel",
     "camera_focal",
     "camera_lens_type",
@@ -332,12 +407,16 @@
     "ARRI.descriptiveMetadataSets.1.metadataSetPayload.lensModel",
     "ARRI.frameBasedMetadata.frames.0.frameBasedMetadataSets.Lens State.lensFocalLength",
     "EXIF EXIF LensModel",
+    "RED Focal Length",
+    "RED Lens Name",
     "owner",
     "clipName",
     "arriraw/slateInfo/clipName",
     "reelName",
     "resolveorigfilename",
     "ARRI.descriptiveMetadataSets.3.metadataSetPayload.clipName",
+    "RED AltReelID",
+    "RED Clip Name",
     "dataWindow",
     "displayWindow",
     "EXIF Image ImageWidth",
@@ -350,9 +429,109 @@
     "ARRI.clipBasedMetadataSets.3.metadataSetPayload.displayRect.height",
     "ARRI.clipBasedMetadataSets.3.metadataSetPayload.storedSize.width",
     "ARRI.clipBasedMetadataSets.3.metadataSetPayload.storedSize.height",
-    "ARRI.clipBasedMetadataSets.0.metadataSetName",
-    "ARRI.clipBasedMetadataSets.0.metadataSetPayload.sensorDimensions.height",
-    "ARRI.clipBasedMetadataSets.0.metadataSetPayload.sensorDimensions.width"
+    "MediaInfo Video - width",
+    "MediaInfo Video - height",
+    "RED Frame Width",
+    "RED Frame Height",
+    "Detected Sensor"
   ],
-  "use_art_for_mxf": true
+  "use_art_for_mxf": true,
+  "camera_detection": {
+    "camera_rules": [
+      {
+        "field": "camera_type",
+        "value": "ARRI ALEXA Mini LF",
+        "camera": "ARRI ALEXA Mini LF"
+      },
+      {
+        "field": "EXIF Image Tag 0xC614",
+        "value": "DJI Zemuse X7",
+        "camera": "DJI Zemuse X7"
+      },
+      {
+        "field": "ARRI.descriptiveMetadataSets.0.metadataSetPayload.cameraModel",
+        "value": "ARRI ALEXA 35",
+        "camera": "ARRI ALEXA 35"
+      },
+      {
+        "field": "ARRI.clipBasedMetadataSets.11.metadataSetPayload.nativeIdentificationList.0.productName",
+        "value": "ALEXA 35",
+        "camera": "ARRI ALEXA 35"
+      },
+      {
+        "field": "cameraModel",
+        "value": "DJI Zemuse X7",
+        "camera": "DJI Zemuse X7"
+      },
+      {
+        "field": "cameraModel",
+        "value": "Blackmagic Micro Studio Camera 4K G2",
+        "camera": "Blackmagic Micro Studio Camera 4K G2"
+      },
+      {
+        "field": "cameraModel",
+        "value": "DSMC2 GEMINI 5K S35",
+        "camera": "RED Gemini 5K S35"
+      },
+      {
+        "field": "camera_sensor",
+        "value": "GEMINI 5K S35",
+        "camera": "RED Gemini 5K S35"
+      },
+      {
+        "field": "RED Camera Model",
+        "value": "DSMC2 GEMINI 5K S35",
+        "camera": "RED Gemini 5K S35"
+      },
+      {
+        "field": "ARRI.descriptiveMetadataSets.0.metadataSetPayload.cameraModel",
+        "value": "ARRI ALEXA Mini LF",
+        "camera": "ARRI ALEXA Mini LF"
+      },
+      {
+        "field": "RED Camera Model",
+        "value": "V-RAPTOR 8K VV",
+        "camera": "RED V-RAPTOR 8K VV"
+      },
+      {
+        "field": "RED Sensor Name",
+        "value": "V-RAPTOR VV",
+        "camera": "RED V-RAPTOR 8K VV"
+      }
+    ],
+    "resolution_rules": [
+      {
+        "field": "dataWindow",
+        "type": "range"
+      },
+      {
+        "field": "EXIF Image ImageWidth",
+        "type": "single_w"
+      },
+      {
+        "field": "EXIF Image ImageLength",
+        "type": "single_h"
+      },
+      {
+        "field": "displayWindow",
+        "type": "range"
+      },
+      {
+        "field": "ARRI.clipBasedMetadataSets.1.metadataSetPayload.acquisitionRect.width",
+        "type": "single_w"
+      },
+      {
+        "field": "ARRI.clipBasedMetadataSets.1.metadataSetPayload.acquisitionRect.height",
+        "type": "single_h"
+      },
+      {
+        "field": "RED Frame Width",
+        "type": "single_w"
+      },
+      {
+        "field": "RED Frame Height",
+        "type": "single_h"
+      }
+    ]
+  }
 }
