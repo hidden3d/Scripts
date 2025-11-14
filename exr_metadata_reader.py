@@ -23,7 +23,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout
                              QHeaderView, QAbstractItemView, QMenu, QAction, QTabWidget,
                              QSplitter, QTextBrowser, QScrollArea, QCheckBox, QInputDialog)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSettings, QTimer, QPropertyAnimation
-from PyQt5.QtGui import QTextCursor, QColor, QTextCharFormat, QFont, QBrush
+from PyQt5.QtGui import QTextCursor, QColor, QTextCharFormat, QFont, QBrush, QPainter, QColor, QPen
 from PyQt5.QtWidgets import QTreeWidget, QTreeWidgetItem, QPlainTextEdit
 
 # ==================== НАСТРОЙКИ ====================
@@ -84,30 +84,35 @@ except ImportError:
 
 
 class ToastMessage(QLabel):
-    """Всплывающее сообщение (Toast)"""
+    """Всплывающее сообщение (Toast) с ручной отрисовкой фона"""
     
-    def __init__(self, message, parent=None, duration=5000, opacity=0.9):
+    def __init__(self, message, parent=None, duration=2000, opacity=0.8):
         super().__init__(parent)
         self.duration = duration
-        self.opacity = opacity
+        self.background_opacity = int(255 * opacity)  # Конвертируем в 0-255
         
-        # Настройка текста и выравнивания
+        # Настройка текста
         self.setText(message)
         self.setAlignment(Qt.AlignCenter)
         self.setWordWrap(True)
+        self.setMargin(15)
         
-        # Настройка стиля с прозрачностью
-        self.update_style()
+        # Настройка стиля текста (без фона)
+        self.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 26px;
+                font-weight: 500;
+                background: transparent;
+            }
+        """)
         
-        # Настройка флагов окна - ВАЖНО: убираем WA_TranslucentBackground
+        # Настройка флагов окна
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
-        # self.setAttribute(Qt.WA_TranslucentBackground)  # УБИРАЕМ эту строку!
+        self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         
-        # Устанавливаем непрозрачность окна
-        self.setWindowOpacity(0.5)  # Полностью непрозрачное окно
-        
-        # Анимация появления и исчезновения
+        # Анимация
         self.animation = QPropertyAnimation(self, b"windowOpacity")
         self.animation.setDuration(300)
         self.animation.finished.connect(self.check_animation_finished)
@@ -116,34 +121,37 @@ class ToastMessage(QLabel):
         self.timer.setSingleShot(True)
         self.timer.timeout.connect(self.hide_toast)
     
-    def update_style(self):
-        """Обновляет стиль с текущей прозрачностью"""
-        self.setStyleSheet(f"""
-            QLabel {{
-                background-color: rgba(50, 50, 50, {self.opacity});
-                color: white;
-                padding: 12px 20px;
-                border-radius: 25px;
-                font-size: 20px;
-                border: 1px solid rgba(255, 255, 255, 0.2);
-                font-weight: 500;
-            }}
-        """)
+    def paintEvent(self, event):
+        """Ручная отрисовка фона с прозрачностью"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # Рисуем полупрозрачный фон с закругленными углами
+        background_color = QColor(50, 50, 50, self.background_opacity)
+        painter.setBrush(background_color)
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(self.rect(), 10, 10)
+        
+        # Рисуем границу
+        border_color = QColor(255, 255, 255, 50)
+        painter.setPen(QPen(border_color, 1))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 10, 10)
+        
+        # Вызываем стандартную отрисовку текста
+        super().paintEvent(event)
     
     def show_toast(self):
         """Показывает toast сообщение по центру родителя"""
-        # Обновляем геометрию, чтобы получить актуальные размеры
         self.adjustSize()
         
         # Позиционируем по центру родительского окна
         if self.parent():
             parent_rect = self.parent().geometry()
-            # Вычисляем центр родителя
             x = parent_rect.left() + (parent_rect.width() - self.width()) // 2
             y = parent_rect.top() + (parent_rect.height() - self.height()) // 2
             self.move(x, y)
         else:
-            # Если нет родителя, позиционируем по центру экрана
             screen_geometry = QApplication.primaryScreen().availableGeometry()
             x = (screen_geometry.width() - self.width()) // 2
             y = (screen_geometry.height() - self.height()) // 2
@@ -157,7 +165,6 @@ class ToastMessage(QLabel):
         self.animation.setEndValue(1.0)
         self.animation.start()
         
-        # Запускаем таймер для автоматического скрытия
         self.timer.start(self.duration)
     
     def hide_toast(self):
@@ -171,7 +178,6 @@ class ToastMessage(QLabel):
         if self.windowOpacity() == 0.0:
             self.hide()
             self.deleteLater()
-
 
 
 
