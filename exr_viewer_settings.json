@@ -311,9 +311,94 @@
       "g": 220,
       "b": 255,
       "removed": false
+    },
+    "ExifTool CameraModel": {
+      "r": 216,
+      "g": 255,
+      "b": 221,
+      "removed": false
+    },
+    "ExifTool Camera_Sensor": {
+      "r": 216,
+      "g": 255,
+      "b": 221,
+      "removed": false
+    },
+    "ExifTool ImageHeight": {
+      "r": 235,
+      "g": 220,
+      "b": 255,
+      "removed": false
+    },
+    "ExifTool ImageWidth": {
+      "r": 235,
+      "g": 220,
+      "b": 255,
+      "removed": false
+    },
+    "ExifTool LensModel": {
+      "r": 216,
+      "g": 232,
+      "b": 255,
+      "removed": false
+    },
+    "ExifTool Owner": {
+      "r": 255,
+      "g": 228,
+      "b": 228,
+      "removed": false
+    },
+    "ExifTool Resolveorigfilename": {
+      "r": 255,
+      "g": 228,
+      "b": 228,
+      "removed": false
+    },
+    "ExifTool ReelName": {
+      "r": 255,
+      "g": 228,
+      "b": 228,
+      "removed": false
+    },
+    "ExifTool Camera_Id": {
+      "r": 216,
+      "g": 255,
+      "b": 221,
+      "removed": false
+    },
+    "ExifTool DataWindow": {
+      "r": 235,
+      "g": 220,
+      "b": 255,
+      "removed": false
+    },
+    "ExifTool DisplayWindow": {
+      "r": 235,
+      "g": 220,
+      "b": 255,
+      "removed": false
+    },
+    "pixelAspectRatio": {
+      "r": 149,
+      "g": 206,
+      "b": 255,
+      "removed": false
     }
   },
-  "removed_metadata": {},
+  "removed_metadata": {
+    "acesImageContainerFlag": {
+      "r": 0,
+      "g": 255,
+      "b": 204,
+      "removed": false
+    },
+    "camera_file_fmt": {
+      "r": 30,
+      "g": 0,
+      "b": 255,
+      "removed": false
+    }
+  },
   "sequence_colors": {
     "video_single_mov": {
       "r": 219,
@@ -382,6 +467,8 @@
     }
   },
   "ordered_metadata_fields": [
+    "Detected Sensor",
+    "pixelAspectRatio",
     "ARRI.clipBasedMetadataSets.0.metadataSetName",
     "ARRI.clipBasedMetadataSets.0.metadataSetPayload.sensorDimensions.width",
     "ARRI.clipBasedMetadataSets.0.metadataSetPayload.sensorDimensions.height",
@@ -397,6 +484,9 @@
     "ARRI.descriptiveMetadataSets.0.metadataSetPayload.cameraModel",
     "ARRI.clipBasedMetadataSets.11.metadataSetPayload.nativeIdentificationList.0.productName",
     "MediaInfo General - camera_type",
+    "ExifTool CameraModel",
+    "ExifTool Camera_Sensor",
+    "ExifTool Camera_Id",
     "lensModel",
     "camera_focal",
     "camera_lens_type",
@@ -409,6 +499,7 @@
     "EXIF EXIF LensModel",
     "RED Focal Length",
     "RED Lens Name",
+    "ExifTool LensModel",
     "owner",
     "clipName",
     "arriraw/slateInfo/clipName",
@@ -417,6 +508,9 @@
     "ARRI.descriptiveMetadataSets.3.metadataSetPayload.clipName",
     "RED AltReelID",
     "RED Clip Name",
+    "ExifTool Owner",
+    "ExifTool Resolveorigfilename",
+    "ExifTool ReelName",
     "dataWindow",
     "displayWindow",
     "EXIF Image ImageWidth",
@@ -433,9 +527,13 @@
     "MediaInfo Video - height",
     "RED Frame Width",
     "RED Frame Height",
-    "Detected Sensor"
+    "ExifTool ImageHeight",
+    "ExifTool ImageWidth",
+    "ExifTool DataWindow",
+    "ExifTool DisplayWindow"
   ],
   "use_art_for_mxf": true,
+  "default_metadata_tool": "mediainfo",
   "camera_detection": {
     "camera_rules": [
       {
@@ -497,6 +595,21 @@
         "field": "RED Sensor Name",
         "value": "V-RAPTOR VV",
         "camera": "RED V-RAPTOR 8K VV"
+      },
+      {
+        "field": "RED Camera Model",
+        "value": "KOMODO 6K",
+        "camera": "RED KOMODO 6K"
+      },
+      {
+        "field": "EXIF Image Tag 0xC614",
+        "value": "DJI FC4280",
+        "camera": "DJI Inspire 3"
+      },
+      {
+        "field": "ExifTool CameraModel",
+        "value": "DSMC2 GEMINI 5K S35",
+        "camera": "RED Gemini 5K S35"
       }
     ],
     "resolution_rules": [

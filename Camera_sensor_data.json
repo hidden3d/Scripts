@@ -1,22 +1,5 @@
 {
   "cameras": {
-    "DJI Zemuse X7": {
-      "metadata_names": [],
-      "resolutions": {
-        "6016x3200": "23.51mm x 5.00mm",
-        "5440x2880": "21.31mm x 3.00mm",
-        "4096x2160": "23.51mm x 5.00mm",
-        "3944x2088": "15.48mm x 2.00mm",
-        "5760x3240": "22.51mm x 7.00mm",
-        "5120x2880": "2011.30mm x 2011.30mm",
-        "3840x2160": "22.51mm x 7.00mm",
-        "3712x2088": "14.58mm x 2.00mm",
-        "5280x2160": "23.51mm x 5.00mm",
-        "2048x1080": "15.48mm x 2.00mm",
-        "2704x1520": "14.58mm x 2.00mm",
-        "1920x1080": "158.40mm x 158.40mm"
-      }
-    },
     "ARRI ALEXA 35": {
       "metadata_names": [
         "ARRI ALEXA 35"
@@ -33,25 +16,6 @@
         "2743x3086": "16.70mm x 18.80mm",
         "2048x1152": "12.40mm x 7.00mm",
         "1920x1080": "11.70mm x 6.60mm"
-      }
-    },
-    "Sony Venice 1": {
-      "metadata_names": [
-        "Sony Venice 1"
-      ],
-      "resolutions": {
-        "3840x2160": "22.80mm x 12.80mm",
-        "4268x2400": "25.40mm x 14.30mm",
-        "4096x1716": "24.30mm x 10.30mm"
-      }
-    },
-    "Red KOMODO 6K": {
-      "metadata_names": [
-        "Red KOMODO 6K"
-      ],
-      "resolutions": {
-        "6144x3240": "27.03mm x 14.26mm",
-        "6144x3072": "23.07mm x 13.52mm"
       }
     },
     "Blackmagic Micro Studio Camera 4K G2": {
@@ -187,12 +151,6 @@
         "4608x1944": "23.04mm x 9.72mm"
       }
     },
-    "camera model": {
-      "metadata_names": [
-        "camera model"
-      ],
-      "resolutions": {}
-    },
     "ARRI ALEXA Mini LF": {
       "metadata_names": [
         "ARRI ALEXA Mini LF"
@@ -241,6 +199,69 @@
         "2048x1024": "10.24mm x 5.12mm",
         "2048x854": "10.24mm x 4.27mm",
         "1920x1080": "9.60mm x 5.40mm"
+      }
+    },
+    "RED KOMODO 6K": {
+      "metadata_names": [
+        "RED KOMODO 6K"
+      ],
+      "resolutions": {
+        "6144x3240": "27.03mm x 14.26mm",
+        "6144x3072": "27.03mm x 13.52mm",
+        "6144x2574": "27.03mm x 11.32mm",
+        "5760x3240": "25.34mm x 14.26mm",
+        "4320x3240": "19.01mm x 14.26mm",
+        "3888x3240": "17.11mm x 14.26mm",
+        "4860x3240": "21.38mm x 14.26mm",
+        "5120x2700": "22.53mm x 11.88mm",
+        "4096x2160": "18.02mm x 9.50mm",
+        "3840x2160": "16.90mm x 9.50mm",
+        "2048x1080": "9.01mm x 4.75mm"
+      }
+    },
+    "SONY VENICE 1": {
+      "metadata_names": [
+        "SONY VENICE 1"
+      ],
+      "resolutions": {
+        "3840x2160": "22.80mm x 12.80mm",
+        "4268x2400": "25.40mm x 14.30mm",
+        "4096x1716": "24.30mm x 10.30mm",
+        "4096x2160": "24.30mm x 12.80mm",
+        "4552x2400": "27.00mm x 14.30mm",
+        "4096x3024": "24.30mm x 18.00mm",
+        "4552x3360": "27.00mm x 20.00mm",
+        "4096x3432": "24.30mm x 20.40mm",
+        "5674x3192": "33.70mm x 19.00mm",
+        "6048x2534": "35.90mm x 15.00mm",
+        "6054x3192": "36.00mm x 19.00mm",
+        "6054x3272": "36.00mm x 19.40mm",
+        "6048x4032": "35.90mm x 24.00mm"
+      }
+    },
+    "DJI Inspire 3": {
+      "metadata_names": [],
+      "resolutions": {
+        "5248x2952": "23.06mm x 12.97mm"
+      }
+    },
+    "DJI Zemuse X7": {
+      "metadata_names": [
+        "DJI Zemuse X7"
+      ],
+      "resolutions": {
+        "6016x3200": "23.5mm x 12.5mm",
+        "5440x2880": "21.3mm x 11.3mm",
+        "4096x2160": "23.5mm x 12.5mm",
+        "3944x2088": "15.4mm x 8.2mm",
+        "5760x3240": "22.5mm x 12.7mm",
+        "5120x2880": "20mm x 11.3mm",
+        "3840x2160": "22.5mm x 12.7mm",
+        "3712x2088": "14.5mm x 8.2mm",
+        "5280x2160": "23.5mm x 12.5mm",
+        "2048x1080": "15.4mm x 8.2mm",
+        "2704x1520": "14.5mm x 8.2mm",
+        "1920x1080": "15mm x 8.4mm"
       }
     }
   }
