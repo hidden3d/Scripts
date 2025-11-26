@@ -6,6 +6,7 @@ import exifread
 import pickle
 import time
 import threading
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QLabel, QLineEdit, QTextEdit, QCheckBox, QFileDialog,
@@ -15,14 +16,14 @@ from PyQt5.QtGui import QTextCursor, QColor
 
 class PhotoOrganizerThread(QThread):
     """Поток для организации фотографий без блокировки GUI"""
-    log_signal = pyqtSignal(str, str)  # Теперь передаем и текст, и цвет
+    log_signal = pyqtSignal(str, str)
     progress_signal = pyqtSignal(int)
     finished_signal = pyqtSignal(bool, str)
-    metadata_progress_signal = pyqtSignal(int)  # Сигнал для прогресса чтения метаданных
+    metadata_progress_signal = pyqtSignal(int)
     
     def __init__(self, source_root, exported_root, output_root, 
                  use_suffix, suffix_text, check_without_suffix, 
-                 compare_metadata, compare_hash, max_workers, buffer_size_kb,
+                 compare_metadata, max_workers, buffer_size_kb,
                  max_retries, retry_delay, source_extensions):
         super().__init__()
         self.source_root = source_root
@@ -32,21 +33,21 @@ class PhotoOrganizerThread(QThread):
         self.suffix_text = suffix_text
         self.check_without_suffix = check_without_suffix
         self.compare_metadata_flag = compare_metadata
-        self.compare_hash = compare_hash
         self.max_workers = max_workers
-        self.buffer_size = buffer_size_kb * 1024  # Конвертируем КБ в байты
+        self.buffer_size = buffer_size_kb * 1024
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.source_extensions = source_extensions
         self.canceled = False
         
-        # Создаем уникальный идентификатор для исходной папки
+        # Кэш для ускорения работы
         source_root_hash = hashlib.md5(source_root.encode()).hexdigest()[:8]
         self.cache_dir = os.path.join(self.output_root, f".metadata_cache_{source_root_hash}")
         
-        # Блокировки для файлов, которые уже обрабатываются
+        # Блокировки и кэши
         self.file_locks = {}
         self.lock = threading.Lock()
+        self.exif_cache = {}  # Кэш для EXIF данных
         
     def run(self):
         try:
@@ -59,118 +60,116 @@ class PhotoOrganizerThread(QThread):
         self.canceled = True
         self.log_signal.emit("Операция отменена пользователем", "red")
     
-    def get_exif_data_optimized(self, image_path):
-        """Оптимизированное чтение EXIF-данных с повторными попытками и блокировками"""
-        # Используем блокировку для этого конкретного файла
-        with self.lock:
-            if image_path not in self.file_locks:
-                self.file_locks[image_path] = threading.Lock()
+    def extract_main_name(self, filename):
+        """Быстрое извлечение основного имени файла"""
+        # Используем более простую логику для скорости
+        for suffix in ['-1', '-2', '-3', '-4', '-5', '_1', '_2', '_3', '_4', '_5']:
+            if filename.endswith(suffix):
+                return filename[:-len(suffix)]
+        return filename
+    
+    def get_exif_data_fast(self, image_path):
+        """Быстрое чтение EXIF данных с оптимизацией"""
+        # Проверяем кэш
+        if image_path in self.exif_cache:
+            return self.exif_cache[image_path]
+            
+        retries = 0
+        delay = self.retry_delay
         
-        with self.file_locks[image_path]:
-            retries = 0
-            delay = self.retry_delay
-            
-            while retries < self.max_retries:
-                try:
-                    with open(image_path, 'rb') as f:
-                        # Для RAW файлов читаем больше данных
-                        if any(image_path.lower().endswith(ext) for ext in ['.cr2', '.nef', '.arw']):
-                            # Читаем первые 256KB для RAW файлов
-                            data = f.read(262144)
-                        else:
-                            # Читаем только первые 64KB файла (где обычно находятся EXIF-данные)
-                            data = f.read(65536)
-                        
-                        # Ищем маркер начала EXIF данных (0xFFE1)
-                        exif_start = data.find(b'\xFF\xE1')
-                        if exif_start == -1:
-                            # Если не нашли EXIF в этом файле, прекращаем попытки
-                            return {}
-                        
-                        # Позиционируемся на начало EXIF данных
-                        f.seek(exif_start + 4)  # Пропускаем 4 байта (длина сегмента)
-                        
-                        # Читаем только EXIF-данные
-                        tags = exifread.process_file(f, details=False)
-                        
-                        # Фильтруем только нужные теги
-                        required_tags = ['EXIF DateTimeOriginal', 'EXIF BrightnessValue']
-                        result = {tag: tags[tag] for tag in required_tags if tag in tags}
-                        
-                        # Если получили хоть какие-то метаданные, возвращаем их
-                        if result:
-                            return result
-                        else:
-                            # Если метаданные пустые, пробуем еще раз
-                            retries += 1
-                            if retries < self.max_retries:
-                                time.sleep(delay)
-                                delay *= 2  # Экспоненциальная задержка
-                                
-                except Exception as e:
-                    # Увеличиваем счетчик попыток и ждем перед следующей попыткой
-                    retries += 1
-                    if retries < self.max_retries:
-                        time.sleep(delay)
-                        delay *= 2  # Экспоненциальная задержка
+        while retries < self.max_retries:
+            try:
+                with open(image_path, 'rb') as f:
+                    # Читаем только начало файла где находятся EXIF данные
+                    if any(image_path.lower().endswith(ext) for ext in ['.cr2', '.nef', '.arw', '.dng']):
+                        data = f.read(262144)  # 256KB для RAW
                     else:
-                        # Добавляем полный путь к файлу в сообщение об ошибке
-                        self.log_signal.emit(f"Ошибка чтения EXIF из файла {image_path} после {self.max_retries} попыток: {str(e)}", "red")
-                        return {}
-            
-            return {}
+                        data = f.read(65536)   # 64KB для JPEG
+                    
+                    # Ищем EXIF маркер
+                    exif_start = data.find(b'\xFF\xE1')
+                    if exif_start != -1:
+                        f.seek(exif_start + 4)
+                        tags = exifread.process_file(f, details=False)
+                    else:
+                        # Если не нашли EXIF маркер, читаем с начала
+                        f.seek(0)
+                        tags = exifread.process_file(f, details=False, stop_tag='DateTimeOriginal')
+                    
+                    # Фильтруем только нужные теги
+                    required_tags = ['EXIF DateTimeOriginal', 'Image DateTime', 'DateTime']
+                    result = {}
+                    for tag in required_tags:
+                        if tag in tags:
+                            result[tag] = str(tags[tag])  # Сразу конвертируем в строку для сравнения
+                    
+                    # Кэшируем результат
+                    self.exif_cache[image_path] = result
+                    return result
+                    
+            except Exception as e:
+                retries += 1
+                if retries < self.max_retries:
+                    time.sleep(delay)
+                    delay *= 2
+                else:
+                    # Логируем только при реальных ошибках
+                    if "No EXIF header" not in str(e):
+                        self.log_signal.emit(f"Ошибка чтения EXIF из {os.path.basename(image_path)}: {str(e)}", "red")
+                    return {}
+        
+        return {}
     
     def read_metadata_parallel(self, file_list):
-        """Многопоточное чтение метаданных с ограничением количества одновременных операций"""
+        """Оптимизированное многопоточное чтение метаданных"""
         metadata_cache = {}
         
         def read_single_metadata(file_info):
-            path, name = file_info
-            return path, self.get_exif_data_optimized(path)
+            path, name, rel_path = file_info
+            return path, self.get_exif_data_fast(path)
         
-        # Ограничиваем количество одновременных операций чтения метаданных
-        # чтобы избежать конфликтов при доступе к файлам
-        metadata_workers = min(self.max_workers, 4)  # Не более 4 потоков для чтения метаданных
+        # Ограничиваем потоки для метаданных
+        metadata_workers = min(self.max_workers, 2)  # Уменьшаем до 2 потоков
         
-        self.log_signal.emit(f"Чтение метаданных из {len(file_list)} файлов с использованием {metadata_workers} потоков...", "blue")
+        processed = 0
+        total_files = len(file_list)
         
-        with ThreadPoolExecutor(max_workers=metadata_workers) as executor:
-            futures = {executor.submit(read_single_metadata, file_info): file_info for file_info in file_list}
-            
-            processed = 0
-            for future in as_completed(futures):
-                if self.canceled:
-                    return {}
+        # Используем chunks для уменьшения накладных расходов
+        chunk_size = 50
+        chunks = [file_list[i:i + chunk_size] for i in range(0, len(file_list), chunk_size)]
+        
+        for chunk in chunks:
+            if self.canceled:
+                return {}
                 
-                path, metadata = future.result()
-                if metadata:
-                    metadata_cache[path] = metadata
+            with ThreadPoolExecutor(max_workers=metadata_workers) as executor:
+                futures = {executor.submit(read_single_metadata, file_info): file_info for file_info in chunk}
                 
-                # Обновляем прогресс
-                processed += 1
-                if processed % 10 == 0:  # Обновляем каждые 10 файлов
-                    progress = int(processed / len(file_list) * 100)
-                    self.metadata_progress_signal.emit(progress)
-                    self.log_signal.emit(f"Обработано {processed} из {len(file_list)} файлов метаданных ({progress}%)", "blue")
+                for future in as_completed(futures):
+                    path, metadata = future.result()
+                    if metadata:
+                        metadata_cache[path] = metadata
+                    
+                    processed += 1
+                    if processed % 100 == 0:  # Реже обновляем прогресс
+                        progress = int(processed / total_files * 100)
+                        self.metadata_progress_signal.emit(progress)
+                        self.log_signal.emit(f"Обработано {processed} из {total_files} файлов метаданных", "blue")
         
-        self.log_signal.emit(f"Метаданные успешно прочитаны для {len(metadata_cache)} файлов", "green")
         return metadata_cache
     
     def create_metadata_index(self, source_files):
-        """Создание индекса метаданных для быстрого поиска"""
-        # Создаем директорию для кэша
+        """Оптимизированное создание индекса метаданных"""
         os.makedirs(self.cache_dir, exist_ok=True)
         
-        # Создаем уникальное имя для индекса на основе исходной папки
         source_root_hash = hashlib.md5(self.source_root.encode()).hexdigest()[:16]
         index_path = os.path.join(self.cache_dir, f"metadata_index_{source_root_hash}.pkl")
         
-        # Если индекс существует и актуален
+        # Проверяем кэш
         if os.path.exists(index_path):
             try:
-                # Получаем время изменения самого нового исходного файла
                 source_mtime = 0
-                for src_path, _ in source_files:
+                for src_path, _, _ in source_files:
                     if os.path.exists(src_path):
                         file_mtime = os.path.getmtime(src_path)
                         if file_mtime > source_mtime:
@@ -178,356 +177,210 @@ class PhotoOrganizerThread(QThread):
                 
                 index_mtime = os.path.getmtime(index_path)
                 
-                # Если индекс новее всех исходных файлов, используем его
                 if index_mtime > source_mtime:
-                    self.log_signal.emit("Используется существующий кэш метаданных...", "blue")
+                    self.log_signal.emit("Используется кэш метаданных...", "blue")
                     with open(index_path, 'rb') as f:
                         return pickle.load(f)
-            except Exception as e:
-                self.log_signal.emit(f"Ошибка загрузки кэша метаданных: {str(e)}", "red")
-                # Если индекс поврежден, создаем заново
+            except Exception:
+                pass  # Игнорируем ошибки кэша, создаем заново
         
         # Создаем новый индекс
-        self.log_signal.emit("Создание нового индекса метаданных...", "blue")
+        self.log_signal.emit("Создание индекса метаданных...", "blue")
         metadata_index = self.read_metadata_parallel(source_files)
         
         # Сохраняем индекс
         try:
             with open(index_path, 'wb') as f:
                 pickle.dump(metadata_index, f)
-            self.log_signal.emit(f"Индекс метаданных сохранен в кэш: {index_path}", "green")
-        except Exception as e:
-            self.log_signal.emit(f"Ошибка сохранения кэша метаданных: {str(e)}", "red")
-            # Если не удалось сохранить индекс, продолжаем без него
+        except Exception:
+            pass  # Если не удалось сохранить, продолжаем
         
         return metadata_index
     
-    def format_exif_value(self, tag_name, tag_value):
-        """Форматирование значения EXIF для читаемого вывода"""
-        try:
-            # Для некоторых тегов можно сделать специальное форматирование
-            if 'DateTime' in tag_name:
-                return str(tag_value)
-            elif 'Brightness' in tag_name:
-                return f"{tag_value.values[0]}/{tag_value.values[1]} (EV)"
-            else:
-                return str(tag_value)
-        except:
-            return str(tag_value)
-    
-    def compare_metadata_values(self, exp_exif, src_exif, exp_name, src_name, exp_path, src_path):
-        """Сравнение определенных метаданных для подтверждения соответствия"""
-        log_messages = []
+    def compare_metadata_values(self, exp_exif, src_exif, exp_name, src_name):
+        """Упрощенное сравнение метаданных"""
+        # Сравниваем только DateTimeOriginal
+        tag = 'EXIF DateTimeOriginal'
         
-        # Список тегов для сравнения
-        tags_to_compare = [
-            'EXIF DateTimeOriginal',  # Дата и время съемки
-            'EXIF BrightnessValue',   # Значение яркости
-        ]
+        if tag in exp_exif and tag in src_exif:
+            return exp_exif[tag] == src_exif[tag]
         
-        log_messages.append((f"--- Сравнение метаданных для файлов: {exp_name} -> {src_name} ---", "black"))
-        log_messages.append((f"  Экспортированный файл: {exp_path}", "black"))
-        log_messages.append((f"  Исходный файл: {src_path}", "black"))
-        
-        all_tags_present = True
-        all_tags_match = True
-        
-        for tag in tags_to_compare:
-            if tag in exp_exif and tag in src_exif:
-                exp_value = self.format_exif_value(tag, exp_exif[tag])
-                src_value = self.format_exif_value(tag, src_exif[tag])
-                
-                log_messages.append((f"  {tag}:", "black"))
-                log_messages.append((f"    Экспорт: {exp_value}", "black"))
-                log_messages.append((f"    Исходный: {src_value}", "black"))
-                
-                if str(exp_exif[tag]) == str(src_exif[tag]):
-                    log_messages.append((f"    ✓ Совпадение", "green"))
-                else:
-                    log_messages.append((f"    ✗ Различие", "red"))
-                    all_tags_match = False
-            else:
-                # Логируем отсутствующие теги
-                if tag not in exp_exif:
-                    log_messages.append((f"  {tag}: отсутствует в экспортированном файле {exp_path}", "red"))
-                if tag not in src_exif:
-                    log_messages.append((f"  {tag}: отсутствует в исходном файла {src_path}", "red"))
-                all_tags_present = False
-                all_tags_match = False
-        
-        # Оба теги должны присутствовать и совпадать
-        result = all_tags_present and all_tags_match
-        
-        if result:
-            log_messages.append((f"--- Результат: все теги присутствуют и совпадают ---", "green"))
-        else:
-            if not all_tags_present:
-                log_messages.append((f"--- Результат: не все теги присутствуют ---", "red"))
-            else:
-                log_messages.append((f"--- Результат: не все теги совпадают ---", "red"))
-        
-        return result, log_messages
-    
-    def calculate_file_hash(self, file_path, hash_algo='md5'):
-        """Вычисление хеша файла с настраиваемым буфером"""
-        hasher = hashlib.new(hash_algo)
-        try:
-            with open(file_path, 'rb') as f:
-                while True:
-                    data = f.read(self.buffer_size)
-                    if not data:
-                        break
-                    hasher.update(data)
-                    if self.canceled:
-                        return None
-            return hasher.hexdigest()
-        except Exception as e:
-            self.log_signal.emit(f"Ошибка чтения файла {file_path}: {str(e)}", "red")
-            return None
+        return False
     
     def create_source_index(self, source_files):
-        """Создание индекса исходных файлов для быстрого поиска"""
+        """Быстрое создание индекса исходных файлов"""
         source_index = {}
-        for src_path, src_name in source_files:
+        for src_path, src_name, rel_path in source_files:
             src_base = os.path.splitext(src_name)[0]
             if src_base not in source_index:
                 source_index[src_base] = []
-            source_index[src_base].append((src_path, src_name))
+            source_index[src_base].append((src_path, src_name, rel_path))
         return source_index
     
     def find_matching_source_files(self, exp_base_name, source_index):
-        """Быстрый поиск исходных файлов через индекс"""
+        """Оптимизированный поиск исходных файлов"""
         matching_sources = []
         
-        # Базовое имя без суффикса (если применимо)
-        base_name_without_suffix = exp_base_name
-        if self.use_suffix and self.suffix_text and exp_base_name.endswith(self.suffix_text):
-            base_name_without_suffix = exp_base_name[:-len(self.suffix_text)]
-        
-        # Поиск по точному совпадению через индекс
+        # 1. Точное совпадение (самый быстрый)
         if exp_base_name in source_index:
             matching_sources.extend(source_index[exp_base_name])
         
-        if base_name_without_suffix in source_index and base_name_without_suffix != exp_base_name:
-            matching_sources.extend(source_index[base_name_without_suffix])
+        # 2. Без суффикса (если включено)
+        if self.check_without_suffix and self.use_suffix and self.suffix_text:
+            base_name_without_suffix = exp_base_name
+            if exp_base_name.endswith(self.suffix_text):
+                base_name_without_suffix = exp_base_name[:-len(self.suffix_text)]
+                if base_name_without_suffix in source_index:
+                    matching_sources.extend(source_index[base_name_without_suffix])
         
-        # Поиск по началу имени (только если включено сравнение метаданных)
-        if self.compare_metadata_flag:
-            for src_base in source_index:
-                if src_base.startswith(exp_base_name) or exp_base_name.startswith(src_base):
-                    matching_sources.extend(source_index[src_base])
-                
-                if self.use_suffix and self.suffix_text:
-                    if src_base.startswith(base_name_without_suffix) or base_name_without_suffix.startswith(src_base):
-                        matching_sources.extend(source_index[src_base])
+        # 3. Основное имя (только если нужно)
+        if not matching_sources and self.compare_metadata_flag:
+            main_name = self.extract_main_name(exp_base_name)
+            if main_name in source_index and main_name != exp_base_name:
+                matching_sources.extend(source_index[main_name])
         
-        # Удаляем дубликаты
-        return list(set(matching_sources))
+        return matching_sources
     
-    def process_single_file(self, exp_file, source_index, source_metadata_cache, hash_cache):
-        """Обработка одного файла в отдельном потоке"""
+    def process_single_file(self, exp_file, source_index, source_metadata_cache):
+        """Оптимизированная обработка одного файла"""
         exp_path, exp_name = exp_file
         
         if self.canceled:
             return None, None, None, []
             
-        # Базовое имя экспортированного файла (без расширения)
         exp_base_name = os.path.splitext(exp_name)[0]
         
-        # Быстрый поиск соответствующих исходных файлов через индекс
+        # Быстрый поиск
         matching_sources = self.find_matching_source_files(exp_base_name, source_index)
         
-        # Поиск наилучшего соответствия
         matched_source = None
         matched_source_name = None
         log_messages = []
         
-        for src_path, src_name in matching_sources:
-            # Дополнительные проверки, если включены
-            if self.compare_metadata_flag or self.compare_hash:
-                match_found = True
+        for src_path, src_name, rel_path in matching_sources:
+            match_found = True
+            
+            # Проверка метаданных (если включено)
+            if self.compare_metadata_flag and match_found:
+                exp_exif = self.get_exif_data_fast(exp_path)
+                src_exif = source_metadata_cache.get(src_path, {})
                 
-                # Проверка метаданных (используем кэш)
-                if self.compare_metadata_flag and match_found:
-                    exp_exif = self.get_exif_data_optimized(exp_path)
-                    src_exif = source_metadata_cache.get(src_path, {})
-                    
-                    if exp_exif and src_exif:
-                        match_found, compare_logs = self.compare_metadata_values(
-                            exp_exif, src_exif, exp_name, src_name, exp_path, src_path
-                        )
-                        if not match_found:
-                            log_messages.extend(compare_logs)
-                    else:
-                        # Если не удалось прочитать метаданные, но включена проверка хешей, продолжаем
-                        if not exp_exif:
-                            log_messages.append((f"Не удалось прочитать метаданные из экспортированного файла {exp_path}", "yellow"))
-                        if not src_exif:
-                            log_messages.append((f"Не удалось прочитать метаданные из исходного файла {src_path}", "yellow"))
-                        
-                        # Если проверка хешей отключена, считаем это ошибкой
-                        if not self.compare_hash:
-                            match_found = False
-                
-                # Проверка хеша (используем кэш)
-                if self.compare_hash and match_found:
-                    if exp_path not in hash_cache:
-                        hash_cache[exp_path] = self.calculate_file_hash(exp_path)
-                    if src_path not in hash_cache:
-                        hash_cache[src_path] = self.calculate_file_hash(src_path)
-                    
-                    exp_hash = hash_cache[exp_path]
-                    src_hash = hash_cache[src_path]
-                    
-                    if exp_hash and src_hash and exp_hash != src_hash:
+                if exp_exif and src_exif:
+                    if not self.compare_metadata_values(exp_exif, src_exif, exp_name, src_name):
                         match_found = False
-                        log_messages.append((f"Хеши не совпадают для файлов {exp_path} и {src_path}", "red"))
-                    elif not exp_hash or not src_hash:
-                        match_found = False
-                        log_messages.append((f"Не удалось вычислить хеш для файлов {exp_path} или {src_path}", "red"))
-                
-                # Если проверки пройдены, используем это соответствие
-                if match_found:
-                    if matched_source is None:
-                        matched_source = src_path
-                        matched_source_name = src_name
-                        log_messages.append((f"Найдено соответствие: {exp_name} -> {src_name}", "green"))
-                        log_messages.append((f"  Экспортированный файл: {exp_path}", "black"))
-                        log_messages.append((f"  Исходный файл: {src_path}", "black"))
-                    else:
-                        log_messages.append((f"Найдено несколько совпадений для {exp_name}, используется первое", "blue"))
-                        break
-            else:
-                # Если проверки отключены, считаем файлы соответствующими
-                if matched_source is None:
-                    matched_source = src_path
-                    matched_source_name = src_name
-                    log_messages.append((f"Найдено соответствие: {exp_name} -> {src_name}", "green"))
-                    log_messages.append((f"  Экспортированный файл: {exp_path}", "black"))
-                    log_messages.append((f"  Исходный файл: {src_path}", "black"))
                 else:
-                    log_messages.append((f"Найдено несколько совпадений для {exp_name}, используется первое", "blue"))
-                    break
+                    match_found = False
+            
+            # Нашли соответствие
+            if match_found:
+                matched_source = src_path
+                matched_source_name = src_name
+                log_messages.append((f"Сопоставлено: {exp_name} -> {src_name}", "green"))
+                break
         
-        if not matched_source:
-            log_messages.append((f"Не найдено соответствие для: {exp_name}", "red"))
-            log_messages.append((f"  Путь к файлу: {exp_path}", "black"))
+        if not matched_source and matching_sources:
+            log_messages.append((f"Не найдено точное соответствие для: {exp_name}", "yellow"))
         
         return exp_path, matched_source, exp_name, log_messages
     
     def organize_photos(self):
-        """Основная функция организации фотографий с многопоточной оптимизацией"""
-        # Создание выходной директории
+        """Оптимизированная основная функция"""
         os.makedirs(self.output_root, exist_ok=True)
         
-        # Поиск всех файлов в исходной директории (только выбранные расширения)
+        # Быстрый поиск исходных файлов
         source_files = []
         for root, dirs, files in os.walk(self.source_root):
             for file in files:
-                # Проверяем расширение файла
                 file_ext = os.path.splitext(file.lower())[1]
                 if file_ext in self.source_extensions:
                     src_path = os.path.join(root, file)
-                    source_files.append((src_path, file))
-            
+                    rel_path = os.path.relpath(src_path, self.source_root)
+                    source_files.append((src_path, file, rel_path))
             if self.canceled:
                 return
         
-        # Создаем индекс для быстрого поиска
-        source_index = self.create_source_index(source_files)
-        
-        # Создаем или загружаем индекс метаданных
-        self.log_signal.emit("Чтение метаданных исходных файлов...", "blue")
-        source_metadata_cache = self.create_metadata_index(source_files)
-        
-        # Поиск всех файлов в экспортированной директории
+        # Быстрый поиск экспортированных файлов
         exported_files = []
         for root, dirs, files in os.walk(self.exported_root):
             for file in files:
                 if file.lower().endswith(('.jpg', '.jpeg', '.png', '.tiff', '.dng')):
                     exported_files.append((os.path.join(root, file), file))
-            
             if self.canceled:
                 return
         
-        self.log_signal.emit(f"Найдено {len(source_files)} исходных файлов", "black")
-        self.log_signal.emit(f"Найдено {len(exported_files)} экспортированных файлов", "black")
+        self.log_signal.emit(f"Найдено {len(source_files)} исходных и {len(exported_files)} экспортированных файлов", "black")
         
-        # Сопоставление файлов с использованием многопоточности
+        # Создаем индексы
+        source_index = self.create_source_index(source_files)
+        
+        # Читаем метаданные только если включена проверка
+        source_metadata_cache = {}
+        if self.compare_metadata_flag:
+            source_metadata_cache = self.create_metadata_index(source_files)
+        
+        # Сопоставление файлов
         matches = {}
-        hash_cache = {}
-        all_log_messages = []
         
-        # Используем ThreadPoolExecutor для параллельной обработки
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # Создаем futures для всех файлов
-            futures = {
-                executor.submit(
-                    self.process_single_file, 
-                    exp_file, 
-                    source_index, 
-                    source_metadata_cache, 
-                    hash_cache
-                ): exp_file for exp_file in exported_files
-            }
-            
-            # Обрабатываем результаты по мере их поступления
-            processed = 0
-            for future in as_completed(futures):
-                if self.canceled:
-                    # Отменяем все задачи
-                    for f in futures:
-                        f.cancel()
-                    return
+        # Используем chunks для лучшего контроля прогресса
+        chunk_size = 100
+        chunks = [exported_files[i:i + chunk_size] for i in range(0, len(exported_files), chunk_size)]
+        
+        total_processed = 0
+        for chunk in chunks:
+            if self.canceled:
+                return
                 
-                try:
-                    exp_path, matched_source, exp_name, log_messages = future.result()
-                    
-                    if matched_source:
-                        matches[exp_path] = (matched_source, exp_name)
-                    
-                    # Добавляем все сообщения в общий список
-                    all_log_messages.extend(log_messages)
-                    
-                    # Обновляем прогресс
-                    processed += 1
-                    progress = int(processed / len(exported_files) * 100)
-                    self.progress_signal.emit(progress)
-                    
-                except Exception as e:
-                    self.log_signal.emit(f"Ошибка при обработке файла: {str(e)}", "red")
+            chunk_matches = {}
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = {
+                    executor.submit(
+                        self.process_single_file, 
+                        exp_file, 
+                        source_index, 
+                        source_metadata_cache
+                    ): exp_file for exp_file in chunk
+                }
+                
+                for future in as_completed(futures):
+                    try:
+                        exp_path, matched_source, exp_name, log_messages = future.result()
+                        
+                        if matched_source:
+                            chunk_matches[exp_path] = (matched_source, exp_name)
+                        
+                        # Логируем только важные сообщения
+                        for message, color in log_messages:
+                            if "Сопоставлено" in message or "Не найдено" in message:
+                                self.log_signal.emit(message, color)
+                                
+                    except Exception as e:
+                        self.log_signal.emit(f"Ошибка обработки файла: {str(e)}", "red")
+            
+            matches.update(chunk_matches)
+            total_processed += len(chunk)
+            progress = int(total_processed / len(exported_files) * 100)
+            self.progress_signal.emit(progress)
+            self.log_signal.emit(f"Обработано {total_processed}/{len(exported_files)} файлов ({progress}%)", "blue")
         
-        # Выводим все сообщения лога в правильном порядке
-        for message, color in all_log_messages:
-            self.log_signal.emit(message, color)
-        
-        self.log_signal.emit(f"Найдено {len(matches)} соответствий", "black")
-        
-        # Перемещение файлов с сохранением структуры
+        # Перемещение файлов
         moved_count = 0
         for exp_path, (src_path, exp_name) in matches.items():
             if self.canceled:
                 return
                 
-            # Получение относительного пути исходного файла
             relative_path = os.path.relpath(src_path, self.source_root)
-            # Получаем только путь к папке (без имени файла)
             relative_dir = os.path.dirname(relative_path)
-            # Создание целевого пути с оригинальным именем экспортированного файла
             target_path = os.path.join(self.output_root, relative_dir, exp_name)
-            # Создание директорий для целевого пути
+            
             os.makedirs(os.path.dirname(target_path), exist_ok=True)
             
-            # Перемещение файла
             try:
                 shutil.move(exp_path, target_path)
                 moved_count += 1
-                self.log_signal.emit(f"Перемещено: {os.path.basename(exp_path)} -> {target_path}", "green")
             except Exception as e:
-                self.log_signal.emit(f"Ошибка перемещения файла {exp_path}: {str(e)}", "red")
+                self.log_signal.emit(f"Ошибка перемещения {exp_name}: {str(e)}", "red")
         
-        self.log_signal.emit(f"Перемещено {moved_count} файлов", "black")
-        self.log_signal.emit(f"Результат сохранен в: {self.output_root}", "black")
+        self.log_signal.emit(f"Готово! Перемещено {moved_count} файлов в {self.output_root}", "green")
 
 class PhotoOrganizerApp(QMainWindow):
     def __init__(self):
@@ -537,7 +390,7 @@ class PhotoOrganizerApp(QMainWindow):
         
     def init_ui(self):
         self.setWindowTitle("Организатор фотографий")
-        self.setGeometry(100, 100, 800, 700)  # Увеличиваем высоту окна
+        self.setGeometry(100, 100, 800, 700)
         
         # Центральный виджет
         central_widget = QWidget()
@@ -590,7 +443,7 @@ class PhotoOrganizerApp(QMainWindow):
         # Суффикс
         suffix_layout = QHBoxLayout()
         self.suffix_check = QCheckBox("Учитывать суффикс:")
-        self.suffix_check.setChecked(False)  # По умолчанию снята галочка
+        self.suffix_check.setChecked(False)
         self.suffix_check.stateChanged.connect(self.on_suffix_check_changed)
         suffix_layout.addWidget(self.suffix_check)
         self.suffix_input = QLineEdit()
@@ -605,15 +458,15 @@ class PhotoOrganizerApp(QMainWindow):
         settings_layout.addWidget(self.check_without_suffix_check)
         
         # Дополнительные проверки
-        self.metadata_check = QCheckBox("Сравнивать метаданные EXIF (DateTimeOriginal, BrightnessValue)")
-        self.metadata_check.setChecked(True)  # По умолчанию включено
+        self.metadata_check = QCheckBox("Сравнивать метаданные EXIF (DateTimeOriginal)")
+        self.metadata_check.setChecked(True)
         settings_layout.addWidget(self.metadata_check)
-        self.hash_check = QCheckBox("Сравнивать хеш-суммы файлов")
-        settings_layout.addWidget(self.hash_check)
+        
+        # Убрана опция сравнения хеш-сумм
         
         # Новая группа: Расширения исходных файлов
         extensions_group = QGroupBox("Расширения исходных файлов")
-        extensions_layout = QHBoxLayout()  # Изменено на горизонтальный layout
+        extensions_layout = QHBoxLayout()
         
         # Создаем чекбоксы для расширений в нужном порядке
         extensions_order = ['.arw', '.cr2', '.dng', '.nef', '.jpg', '.jpeg', '.png', '.tiff']
@@ -621,7 +474,6 @@ class PhotoOrganizerApp(QMainWindow):
         
         for ext in extensions_order:
             check = QCheckBox(ext)
-            # Устанавливаем галочки только для .arw и .cr2
             if ext in ['.arw', '.cr2']:
                 check.setChecked(True)
             else:
@@ -646,7 +498,7 @@ class PhotoOrganizerApp(QMainWindow):
         threads_layout.addStretch()
         performance_layout.addLayout(threads_layout)
         
-        # Размер буфера
+        # Размер буфера (теперь не используется для хешей, но оставим для возможного будущего использования)
         buffer_layout = QHBoxLayout()
         buffer_layout.addWidget(QLabel("Размер буфера (KB):"))
         self.buffer_size_spinbox = QSpinBox()
@@ -742,15 +594,11 @@ class PhotoOrganizerApp(QMainWindow):
         cursor = self.log_output.textCursor()
         cursor.movePosition(QTextCursor.End)
         
-        # Создаем формат с нужным цветом
         format = cursor.charFormat()
         format.setForeground(QColor(color))
         cursor.setCharFormat(format)
         
-        # Добавляем текст
         cursor.insertText(message + "\n")
-        
-        # Прокручиваем к концу
         self.log_output.setTextCursor(cursor)
         self.log_output.ensureCursorVisible()
     
@@ -777,11 +625,10 @@ class PhotoOrganizerApp(QMainWindow):
         suffix_text = self.suffix_input.text()
         check_without_suffix = self.check_without_suffix_check.isChecked()
         compare_metadata = self.metadata_check.isChecked()
-        compare_hash = self.hash_check.isChecked()
         max_workers = self.threads_spinbox.value()
         buffer_size_kb = self.buffer_size_spinbox.value()
         max_retries = self.retry_spinbox.value()
-        retry_delay = self.retry_delay_spinbox.value() / 1000  # Конвертируем мс в секунды
+        retry_delay = self.retry_delay_spinbox.value() / 1000
         
         # Получаем выбранные расширения исходных файлов
         source_extensions = []
@@ -793,7 +640,6 @@ class PhotoOrganizerApp(QMainWindow):
             QMessageBox.warning(self, "Ошибка", "Выберите хотя бы одно расширение для исходных файлов")
             return
         
-        # Если указан суффикс, но поле пустое
         if use_suffix and not suffix_text:
             QMessageBox.warning(self, "Ошибка", "Укажите суффикс или снимите галочку")
             return
@@ -809,7 +655,7 @@ class PhotoOrganizerApp(QMainWindow):
         self.organizer_thread = PhotoOrganizerThread(
             source_dir, export_dir, output_dir,
             use_suffix, suffix_text, check_without_suffix, 
-            compare_metadata, compare_hash, max_workers, buffer_size_kb,
+            compare_metadata, max_workers, buffer_size_kb,
             max_retries, retry_delay, source_extensions
         )
         
@@ -847,9 +693,9 @@ class PhotoOrganizerApp(QMainWindow):
         self.suffix_input.setEnabled(enabled)
         self.check_without_suffix_check.setEnabled(enabled)
         self.metadata_check.setEnabled(enabled)
-        self.hash_check.setEnabled(enabled)
         
-        # Включаем/выключаем чекбоксы расширений
+        # Убрана настройка hash_check
+        
         for checkbox in self.extension_checks.values():
             checkbox.setEnabled(enabled)
             

@@ -530,110 +530,118 @@ class SequenceFinder(QThread):
 
 
     def extract_sequence_info(self, filename):
-        """Извлекает базовое имя и номер кадра из имени файла"""
-        # Убираем расширение
-        name_without_ext = os.path.splitext(filename)[0]
-        
-        self.debug_logger.log(f"extract_sequence_info: Обрабатываем файл '{filename}' -> '{name_without_ext}'")
-        
-        # УЛУЧШЕННЫЙ список паттернов для лучшего распознавания сложных форматов
-        patterns = [
-            # 1. ПАТТЕРНЫ ДЛЯ СЛОЖНЫХ EXR С НОМЕРАМИ В КОНЦЕ
-            # A_0160C003_240903_041957_a1CGM.mxf00380118.exr -> 00380118
-            r'^(.+?\.\w+?)(\d{6,8})$',
+            """
+            Максимально универсальный алгоритм.
+            Обрабатывает:
+            - aces2065 (игнорирует цифры внутри слов)
+            - 01260802 (распознает длинные счетчики с нулями)
+            - Стандартные кадры 1001
+            - Даты и версии
+            """
+            name_without_ext = os.path.splitext(filename)[0]
             
-            # 2. ПАТТЕРНЫ ДЛЯ СТАНДАРТНЫХ EXR С НОМЕРАМИ КАДРОВ В КОНЦЕ
-            # A_0104C003_240510_141409_a1DPL.00000001.exr -> 00000001
-            r'^(.+?\.)(\d{6,8})$',
-            
-            # 3. ПАТТЕРНЫ ДЛЯ ФОРМАТА С ПРЕФИКСОМ И НОМЕРОМ КАДРА
-            # A_0051C010_240406_182948_a1DPL01693065.exr -> 01693065
-            r'^(.+?[A-Z])(\d{6,8})$',
-            
-            # 4. ПАТТЕРНЫ ДЛЯ ФОРМАТА С ПОДЧЕРКИВАНИЕМ И НОМЕРОМ КАДРА
-            # V006C0030_240318_8J4U_000247.DNG -> 000247
-            r'^(.+?_)(\d{3,6})$',
-            
-            # 5. ПАТТЕРНЫ ДЛЯ ФОРМАТА DNG С ПРЕФИКСОМ
-            # D003C0015_250121_8H3408.DNG -> 0015
-            r'^(.+?[A-Z])(\d{3,5})_.*$',
-            
-            # 6. СТАНДАРТНЫЕ ПАТТЕРНЫ ДЛЯ ЧИСЕЛ В КОНЦЕ
-            r'^(.+?)(\d{1,8})$',
-            r'^(.+?)[._ -](\d{1,8})$',
-        ]
-        
-        # Сначала пробуем все паттерны по порядку
-        for i, pattern in enumerate(patterns):
-            match = re.match(pattern, name_without_ext)
-            if match:
-                base_name = match.group(1)
-                frame_num_str = match.group(2)
+            matches = []
+            for match in re.finditer(r'\d+', name_without_ext):
+                matches.append((match.start(), match.end(), match.group()))
                 
+            if not matches:
+                return name_without_ext, None
+
+            best_match = None
+            # Ставим очень низкий начальный порог, чтобы даже плохой кандидат прошел,
+            # если он единственный.
+            best_score = -10000 
+
+            for i, (start, end, num_str) in enumerate(matches):
                 try:
-                    frame_num = int(frame_num_str)
-                    self.debug_logger.log(f"extract_sequence_info: '{filename}' -> pattern {i+1} '{pattern}': base_name='{base_name}', frame_num={frame_num}")
-                    return base_name, frame_num
+                    num_val = int(num_str)
                 except ValueError:
                     continue
-        
-        # РЕЗЕРВНЫЕ ПАТТЕРНЫ - ищем последнюю группу цифр подходящей длины
-        all_numbers = re.findall(r'\d+', name_without_ext)
-        if all_numbers:
-            # Сначала ищем числа с 6-8 цифрами (типичные для EXR)
-            frame_candidates = []
-            for number in all_numbers:
-                if 6 <= len(number) <= 8:
-                    frame_candidates.append(number)
-            
-            # Берем ПОСЛЕДНЕЕ подходящее число (самое правое)
-            if frame_candidates:
-                frame_num_str = frame_candidates[-1]
-                frame_pos = name_without_ext.rfind(frame_num_str)
-                if frame_pos > 0:
-                    base_name = name_without_ext[:frame_pos]
-                    try:
-                        frame_num = int(frame_num_str)
-                        self.debug_logger.log(f"extract_sequence_info: '{filename}' -> fallback EXR numbers (last): base_name='{base_name}', frame_num={frame_num}")
-                        return base_name, frame_num
-                    except ValueError:
-                        pass
-            
-            # Если не нашли EXR номера, ищем любые числа с 4-6 цифрами
-            frame_candidates = []
-            for number in all_numbers:
-                if 4 <= len(number) <= 6:
-                    frame_candidates.append(number)
-            
-            if frame_candidates:
-                # Берем ПОСЛЕДНЕЕ число (самое правое)
-                frame_num_str = frame_candidates[-1]
-                frame_pos = name_without_ext.rfind(frame_num_str)
-                if frame_pos > 0:
-                    base_name = name_without_ext[:frame_pos]
-                    try:
-                        frame_num = int(frame_num_str)
-                        self.debug_logger.log(f"extract_sequence_info: '{filename}' -> fallback filtered numbers (last): base_name='{base_name}', frame_num={frame_num}")
-                        return base_name, frame_num
-                    except ValueError:
-                        pass
-            
-            # Если не нашли подходящих по длине, берем последнее число
-            last_number = all_numbers[-1]
-            last_number_pos = name_without_ext.rfind(last_number)
-            if last_number_pos > 0:
-                base_name = name_without_ext[:last_number_pos]
+
+                score = 0
+                length = len(num_str)
+                
+                # --- 1. Анализ Префиксов (Контекст) - САМОЕ ВАЖНОЕ ---
+                is_glued_to_text = False
+                if start > 0:
+                    prev_char = name_without_ext[start-1]
+                    
+                    # Если перед цифрой буква (aces2065, ShotA001) -> это часть имени, а не кадр
+                    if prev_char.isalpha():
+                        # Если это 'v' (v001), штраф средний (вдруг это единственный номер)
+                        if prev_char.lower() == 'v':
+                            score -= 40
+                        else:
+                            # aces2065 -> штраф огромный, это тех. данные
+                            score -= 50
+                            is_glued_to_text = True
+                    
+                    # Бонус за разделители (._-)
+                    elif prev_char in ['.', '_', '-']:
+                        score += 10
+                        if prev_char == '.': score += 5 # Точка - самый частый разделитель кадров
+
+                # Если число стоит в самом начале имени (069_...), это редко бывает счетчиком
+                if start == 0:
+                    score -= 5
+
+                # --- 2. Оценка длины и значения ---
+                
+                # Длина 4-6 (Золотой стандарт: 0001, 1001, 123456)
+                if 4 <= length <= 6:
+                    score += 40
+                    # Доп. проверка для коллизий (как в прошлом примере с 856545)
+                    if length == 6 and num_val > 320000:
+                        score += 10
+
+                # Длина 8 (Опасная зона: даты vs длинные кадры)
+                elif length == 8:
+                    # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ ДЛЯ ВАШЕГО ФАЙЛА
+                    if num_str.startswith('0'):
+                        # 01260802 -> Начинается с 0, значит это НЕ год (2025...) и НЕ дата.
+                        # Это однозначно длинный счетчик.
+                        score += 50 
+                    elif num_str.startswith('19') or num_str.startswith('20'):
+                        # Похоже на год/дату -> даем мало баллов
+                        score += 5
+                    else:
+                        # Просто длинное число -> даем средний балл
+                        score += 20
+                
+                # Длина 3 или 7 (допустимо)
+                elif length == 3 or length == 7:
+                    score += 20
+                
+                # Короткие (1-2)
+                elif length < 3:
+                    score += 0 # Нейтрально, если нет конкурентов
+                
+                # --- 3. Позиция ---
+                # Последнее число в имени всегда имеет приоритет
+                if i == len(matches) - 1:
+                    score += 15
+
+                self.debug_logger.log(f"  Кандидат '{num_str}': len={length}, glued={is_glued_to_text}, score={score}")
+
+                if score >= best_score:
+                    best_score = score
+                    best_match = (start, end, num_str)
+
+            # Проверка на валидность победителя
+            if best_match:
+                start, end, num_str = best_match
+                # Если победитель имеет отрицательный счет (например, только v15),
+                # мы все равно можем его взять, если больше ничего нет, 
+                # но для группировки лучше иметь положительный счет.
+                
                 try:
-                    frame_num = int(last_number)
-                    self.debug_logger.log(f"extract_sequence_info: '{filename}' -> fallback last number: base_name='{base_name}', frame_num={frame_num}")
-                    return base_name, frame_num
+                    frame_num = int(num_str)
+                    base_name_template = name_without_ext[:start] + "@@@" + name_without_ext[end:]
+                    return base_name_template, frame_num
                 except ValueError:
                     pass
-        
-        # Если не нашли номер кадра, возвращаем полное имя как базовое
-        result = (name_without_ext, None)
-        self.debug_logger.log(f"extract_sequence_info: '{filename}' -> fallback: base_name='{name_without_ext}', frame_num=None")
-        return result
+
+            return name_without_ext, None
 
 
     def is_sequence(self, frame_numbers):
