@@ -383,22 +383,33 @@
       "g": 206,
       "b": 255,
       "removed": false
-    }
-  },
-  "removed_metadata": {
-    "acesImageContainerFlag": {
-      "r": 0,
-      "g": 255,
-      "b": 204,
+    },
+    "ExifTool PixelAspectRatio": {
+      "r": 149,
+      "g": 206,
+      "b": 255,
       "removed": false
     },
-    "camera_file_fmt": {
-      "r": 30,
-      "g": 0,
+    "RED Pixel Aspect Ratio": {
+      "r": 149,
+      "g": 206,
+      "b": 255,
+      "removed": false
+    },
+    "ARRI.clipBasedMetadataSets.11.metadataSetPayload.nativeIdentificationList.1.productName": {
+      "r": 216,
+      "g": 255,
+      "b": 221,
+      "removed": false
+    },
+    "ARRI.descriptiveMetadataSets.1.metadataSetPayload.lensSqueezeFactor": {
+      "r": 149,
+      "g": 206,
       "b": 255,
       "removed": false
     }
   },
+  "removed_metadata": {},
   "sequence_colors": {
     "video_single_mov": {
       "r": 219,
@@ -469,6 +480,9 @@
   "ordered_metadata_fields": [
     "Detected Sensor",
     "pixelAspectRatio",
+    "ExifTool PixelAspectRatio",
+    "RED Pixel Aspect Ratio",
+    "ARRI.descriptiveMetadataSets.1.metadataSetPayload.lensSqueezeFactor",
     "ARRI.clipBasedMetadataSets.0.metadataSetName",
     "ARRI.clipBasedMetadataSets.0.metadataSetPayload.sensorDimensions.width",
     "ARRI.clipBasedMetadataSets.0.metadataSetPayload.sensorDimensions.height",
@@ -483,6 +497,7 @@
     "EXIF Image Tag 0xC614",
     "ARRI.descriptiveMetadataSets.0.metadataSetPayload.cameraModel",
     "ARRI.clipBasedMetadataSets.11.metadataSetPayload.nativeIdentificationList.0.productName",
+    "ARRI.clipBasedMetadataSets.11.metadataSetPayload.nativeIdentificationList.1.productName",
     "MediaInfo General - camera_type",
     "ExifTool CameraModel",
     "ExifTool Camera_Sensor",

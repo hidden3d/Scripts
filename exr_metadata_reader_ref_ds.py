@@ -5623,12 +5623,6 @@ class EXRMetadataViewer(QMainWindow):
         toast.show_toast()
 
 
-
-
-
-
-
-
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     
