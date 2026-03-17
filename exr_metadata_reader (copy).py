@@ -1,3 +1,5 @@
+# v2.001
+
 
 import os
 import sys
@@ -93,6 +95,332 @@ except ImportError:
     print("Библиотека PyExifTool не установлена. Метаданные через ExifTool не будут доступны.")
     print("Установите ее: pip install pyexiftool")
 
+
+
+class ResolutionAnalyzerWorker(QObject):
+    """Рабочий объект для анализа разрешений в отдельном потоке"""
+    result_ready = pyqtSignal(str, str, str, int)  # resolution, reformat, aspect, total_count
+    progress = pyqtSignal(int, int)  # current, total
+    finished = pyqtSignal()
+    error = pyqtSignal(str)
+
+    def __init__(self, sequences, camera_rules, resolution_rules, cameras_data):
+        super().__init__()
+        self.sequences = sequences
+        self.camera_rules = camera_rules
+        self.resolution_rules = resolution_rules
+        self.cameras_data = cameras_data
+        self._is_running = True
+
+    def stop(self):
+        self._is_running = False
+
+    def run(self):
+        """Основная функция, вызываемая из потока"""
+        resolution_counts = {}
+        total = len(self.sequences)
+        for idx, seq in enumerate(self.sequences):
+            if not self._is_running:
+                break
+            # Прогресс
+            self.progress.emit(idx + 1, total)
+
+            file_path = seq['files'][0]
+            extension = seq['extension']
+
+            # Читаем метаданные первого файла
+            metadata = self._read_metadata(file_path, extension)
+            if metadata:
+                # Определяем разрешение
+                resolution_str = self._detect_resolution(metadata)
+                if resolution_str:
+                    # Увеличиваем счётчик
+                    resolution_counts[resolution_str] = resolution_counts.get(resolution_str, 0) + 1
+                    # Вычисляем реформат и аспект
+                    reformat, aspect = self._compute_reformat_and_aspect(resolution_str)
+                    # Отправляем сигнал с текущим счётчиком для этого разрешения
+                    self.result_ready.emit(resolution_str, reformat, aspect, resolution_counts[resolution_str])
+
+        self.finished.emit()
+
+    def _read_metadata(self, file_path, extension):
+        """Читает метаданные файла (упрощённая копия методов из MetadataManager)"""
+        metadata = {}
+        ext_lower = extension.lower()
+        try:
+            if ext_lower == '.exr':
+                # Используем OpenEXR
+                exr_file = OpenEXR.InputFile(file_path)
+                header = exr_file.header()
+                for key, value in header.items():
+                    metadata[key] = str(value)  # упрощённо
+            elif ext_lower == '.r3d':
+                # Если доступна REDline, можно использовать, иначе MediaInfo
+                if os.path.exists(REDLINE_TOOL_PATH):
+                    # Запускаем REDline (аналогично read_redline_metadata)
+                    try:
+                        result = subprocess.run(
+                            [REDLINE_TOOL_PATH, '--i', file_path, '--useMeta', '--printMeta', '1'],
+                            capture_output=True, text=True, timeout=30
+                        )
+                        output = result.stderr if result.stderr.strip() else result.stdout
+                        for line in output.splitlines():
+                            if ':' in line:
+                                key, val = line.split(':', 1)
+                                metadata[key.strip()] = val.strip()
+                    except Exception:
+                        pass
+                # fallback на MediaInfo
+                if not metadata and PYMEDIAINFO_AVAILABLE:
+                    media_info = MediaInfo.parse(file_path)
+                    for track in media_info.tracks:
+                        for attr in dir(track):
+                            if not attr.startswith('_') and attr not in ['to_data', 'to_json']:
+                                val = getattr(track, attr)
+                                if val:
+                                    metadata[f"{track.track_type}.{attr}"] = str(val)
+            elif ext_lower in ['.mxf', '.arr', '.arx']:
+                if os.path.exists(ARRI_REFERENCE_TOOL_PATH):
+                    # Запускаем ARRI Tool
+                    with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as tmp:
+                        tmp_path = tmp.name
+                    try:
+                        subprocess.run(
+                            [ARRI_REFERENCE_TOOL_PATH, 'export', '--duration', '1', '--input', file_path, '--output', tmp_path],
+                            timeout=30
+                        )
+                        if os.path.exists(tmp_path):
+                            with open(tmp_path, 'r') as f:
+                                arri_data = json.load(f)
+                            # Упрощённая развёртка
+                            def flatten(d, parent=''):
+                                items = {}
+                                if isinstance(d, dict):
+                                    for k, v in d.items():
+                                        new_key = f"{parent}.{k}" if parent else k
+                                        if isinstance(v, (dict, list)):
+                                            items.update(flatten(v, new_key))
+                                        else:
+                                            items[new_key] = str(v)
+                                elif isinstance(d, list):
+                                    for i, v in enumerate(d):
+                                        new_key = f"{parent}.{i}"
+                                        if isinstance(v, (dict, list)):
+                                            items.update(flatten(v, new_key))
+                                        else:
+                                            items[new_key] = str(v)
+                                return items
+                            metadata.update(flatten(arri_data))
+                    finally:
+                        if os.path.exists(tmp_path):
+                            os.unlink(tmp_path)
+                if not metadata and PYMEDIAINFO_AVAILABLE:
+                    media_info = MediaInfo.parse(file_path)
+                    for track in media_info.tracks:
+                        for attr in dir(track):
+                            if not attr.startswith('_') and attr not in ['to_data', 'to_json']:
+                                val = getattr(track, attr)
+                                if val:
+                                    metadata[f"{track.track_type}.{attr}"] = str(val)
+            else:
+                # Пытаемся через MediaInfo как fallback
+                if PYMEDIAINFO_AVAILABLE:
+                    media_info = MediaInfo.parse(file_path)
+                    for track in media_info.tracks:
+                        for attr in dir(track):
+                            if not attr.startswith('_') and attr not in ['to_data', 'to_json']:
+                                val = getattr(track, attr)
+                                if val:
+                                    metadata[f"{track.track_type}.{attr}"] = str(val)
+        except Exception as e:
+            # Игнорируем ошибки чтения отдельного файла
+            pass
+        return metadata
+
+    def _detect_resolution(self, metadata):
+        """Определяет разрешение из метаданных, используя переданные правила"""
+        resolutions = []
+        for rule in self.resolution_rules:
+            field = rule.get('field')
+            rule_type = rule.get('type')
+            # Поиск совпадения в ключах метаданных
+            for key in metadata:
+                if field.lower() in key.lower():
+                    value = metadata[key]
+                    parsed = self._parse_resolution(value, rule_type)
+                    if parsed:
+                        if rule_type == 'single_w':
+                            resolutions.append((parsed, None))
+                        elif rule_type == 'single_h':
+                            resolutions.append((None, parsed))
+                        else:
+                            if isinstance(parsed, tuple) and len(parsed) == 2:
+                                resolutions.append(parsed)
+        # Выбираем наибольшее
+        best = self._select_best_resolution(resolutions)
+        if best:
+            w, h = best
+            if w and h:
+                return f"{w}x{h}"
+            elif w:
+                return f"{w}x?"
+            elif h:
+                return f"?x{h}"
+        return None
+
+    def _parse_resolution(self, value_str, rule_type):
+        """Парсит разрешение из строки по правилу"""
+        value_str = str(value_str)
+        try:
+            if rule_type == 'range':
+                # (min_x, min_y) - (max_x, max_y)
+                match = re.match(r'\((\d+),\s*(\d+)\)\s*-\s*\((\d+),\s*(\d+)\)', value_str)
+                if match:
+                    min_x, min_y, max_x, max_y = map(int, match.groups())
+                    return max_x - min_x + 1, max_y - min_y + 1
+                # 4 числа через пробел
+                match = re.match(r'(\d+)\s+(\d+)\s+(\d+)\s+(\d+)', value_str)
+                if match:
+                    min_x, min_y, max_x, max_y = map(int, match.groups())
+                    return max_x - min_x + 1, max_y - min_y + 1
+            elif rule_type == 'single_w':
+                nums = re.findall(r'\d+', value_str)
+                if nums:
+                    return int(nums[0])
+            elif rule_type == 'single_h':
+                nums = re.findall(r'\d+', value_str)
+                if nums:
+                    return int(nums[0])
+            elif rule_type == 'combined':
+                match = re.match(r'\(?\s*(\d+)\s*[xX×:]\s*(\d+)\s*\)?', value_str)
+                if match:
+                    return int(match.group(1)), int(match.group(2))
+        except Exception:
+            pass
+        return None
+
+    def _select_best_resolution(self, resolutions):
+        """Выбирает наибольшее разрешение"""
+        full = [(w, h) for w, h in resolutions if w and h]
+        if full:
+            full.sort(key=lambda x: x[0] * x[1], reverse=True)
+            return full[0]
+        # Если нет полных, берём максимальную ширину или высоту
+        widths = [w for w, h in resolutions if w and not h]
+        heights = [h for w, h in resolutions if not w and h]
+        if widths and heights:
+            return max(widths), max(heights)
+        elif widths:
+            return max(widths), None
+        elif heights:
+            return None, max(heights)
+        return None
+
+    def _compute_reformat_and_aspect(self, resolution_str):
+        """Вычисляет реформат (2048 по ширине) и аспект"""
+        try:
+            if 'x' in resolution_str:
+                w_str, h_str = resolution_str.split('x')
+                w = int(w_str)
+                h = int(h_str)
+                aspect = w / h
+                aspect_str = f"{aspect:.3f}"
+                new_w = 2048
+                new_h = int(round(new_w / aspect))
+                reformat = f"{new_w}x{new_h}"
+            else:
+                reformat = "?"
+                aspect_str = "?"
+        except:
+            reformat = "?"
+            aspect_str = "?"
+        return reformat, aspect_str
+
+
+class ResolutionAnalysisDialog(QDialog):
+    """Диалог отображения результатов анализа разрешений с возможностью копирования"""
+    def __init__(self, resolutions_data, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Анализ разрешений")
+        self.setGeometry(200, 200, 800, 400)
+        self.resolutions_data = resolutions_data  # сохраним для копирования
+        
+        layout = QVBoxLayout()
+        
+        self.table = QTableWidget()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["Разрешение", "Реформат (2048)", "Аспект", "Количество файлов"])
+        self.table.setSortingEnabled(True)
+        self.table.setAlternatingRowColors(True)
+        
+        self.table.setRowCount(len(resolutions_data))
+        for row, (res, reformat, aspect, count) in enumerate(resolutions_data):
+            self.table.setItem(row, 0, QTableWidgetItem(res))
+            self.table.setItem(row, 1, QTableWidgetItem(reformat))
+            self.table.setItem(row, 2, QTableWidgetItem(aspect))
+            self.table.setItem(row, 3, QTableWidgetItem(str(count)))
+        
+        self.table.resizeColumnsToContents()
+        layout.addWidget(self.table)
+        
+        # Кнопки
+        button_layout = QHBoxLayout()
+        copy_btn = QPushButton("Копировать таблицу в буфер")
+        copy_btn.clicked.connect(self.copy_to_clipboard)
+        button_layout.addWidget(copy_btn)
+        
+        save_btn = QPushButton("Сохранить в CSV")
+        save_btn.clicked.connect(self.save_to_csv)
+        button_layout.addWidget(save_btn)
+        
+        button_layout.addStretch()
+        
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(self.accept)
+        button_layout.addWidget(ok_btn)
+        
+        layout.addLayout(button_layout)
+        self.setLayout(layout)
+    
+    def copy_to_clipboard(self):
+        """Копирует таблицу в буфер обмена в формате TSV (табуляция)"""
+        headers = ["Разрешение", "Реформат (2048)", "Аспект", "Количество файлов"]
+        rows = []
+        # Заголовки
+        rows.append("\t".join(headers))
+        # Данные
+        for res, reformat, aspect, count in self.resolutions_data:
+            row = f"{res}\t{reformat}\t{aspect}\t{count}"
+            rows.append(row)
+        text = "\n".join(rows)
+        
+        clipboard = QApplication.clipboard()
+        clipboard.setText(text)
+        
+        # Показать всплывающее сообщение (используем существующий ToastMessage, если он доступен)
+        if self.parent() and hasattr(self.parent(), 'show_toast'):
+            self.parent().show_toast("Таблица скопирована в буфер обмена", duration=1500)
+        else:
+            # Заглушка
+            QMessageBox.information(self, "Готово", "Таблица скопирована в буфер обмена")
+    
+    def save_to_csv(self):
+        """Сохраняет таблицу в CSV файл"""
+        filename, _ = QFileDialog.getSaveFileName(self, "Сохранить таблицу", "", "CSV files (*.csv);;All files (*.*)")
+        if filename:
+            try:
+                with open(filename, 'w', encoding='utf-8') as f:
+                    # Заголовки
+                    f.write("Разрешение,Реформат (2048),Аспект,Количество файлов\n")
+                    for res, reformat, aspect, count in self.resolutions_data:
+                        # Экранируем запятые (если есть)
+                        res = res.replace(',', ';')
+                        reformat = reformat.replace(',', ';')
+                        aspect = aspect.replace(',', ';')
+                        f.write(f"{res},{reformat},{aspect},{count}\n")
+                QMessageBox.information(self, "Успех", f"Таблица сохранена в {filename}")
+            except Exception as e:
+                QMessageBox.warning(self, "Ошибка", f"Не удалось сохранить: {str(e)}")
 
 
 
@@ -2877,7 +3205,7 @@ class CameraManager:
             self.debug_logger.log(f"Ошибка сохранения данных камер: {e}", "ERROR")
 
     def detect_camera_and_sensor(self, metadata):
-        """Определяет камеру и разрешение из метаданных и возвращает размер сенсора и информацию об определении"""
+        """Определяет камеру и разрешение из метаданных и возвращает размер сенсора, информацию об определении и разрешение"""
         camera, camera_detection_info = self.detect_camera(metadata)
         resolution, resolution_detection_info = self.detect_resolution(metadata)
         
@@ -2895,10 +3223,9 @@ class CameraManager:
         
         if camera and resolution:
             sensor_size = self.get_sensor_size(camera, resolution)
-            if sensor_size:
-                return sensor_size, detection_info
+            return sensor_size, detection_info, resolution
         
-        return None, detection_info
+        return None, detection_info, resolution
 
     def detect_camera(self, metadata):
         """Определяет камеру из метаданных на основе правил"""
@@ -2929,23 +3256,24 @@ class CameraManager:
         resolutions = []
         found_rules = []
         
+        self.debug_logger.log(f"=== НАЧАЛО ОПРЕДЕЛЕНИЯ РАЗРЕШЕНИЯ ===")
+        
         for rule in self.settings_manager.camera_detection_settings.get('resolution_rules', []):
             field = rule.get('field')
             rule_type = rule.get('type')
             
-            # Ищем поле в метаданных (точное совпадение или частичное)
+            # Ищем поле в метаданных (точное или частичное совпадение)
             matching_keys = []
             for metadata_key in metadata.keys():
-                # Точное совпадение (без учета регистра)
                 if metadata_key.lower() == field.lower():
                     matching_keys.append(metadata_key)
-                # Частичное совпадение (поле содержит ключевое слово)
                 elif field.lower() in metadata_key.lower():
                     matching_keys.append(metadata_key)
                     self.debug_logger.log(f"Частичное совпадение: '{metadata_key}' содержит '{field}'")
             
             for actual_field in matching_keys:
                 value = metadata[actual_field]
+                self.debug_logger.log(f"Проверка поля '{actual_field}' с правилом '{rule_type}'...")
                 parsed = self.parse_resolution(value, rule_type, actual_field)
                 if parsed:
                     found_rules.append(f"{actual_field} ({rule_type})")
@@ -2958,47 +3286,70 @@ class CameraManager:
                         if isinstance(parsed, tuple) and len(parsed) == 2:
                             width, height = parsed
                             resolutions.append((width, height, f"{rule_type}: {width}x{height}"))
+                else:
+                    self.debug_logger.log(f"  Правило '{rule_type}' для поля '{actual_field}' не дало результатов")
         
         best_resolution = self.select_best_resolution(resolutions)
         
         if best_resolution:
             width, height, source = best_resolution
             if width and height:
-                return f"{width}x{height}", found_rules + [f"выбрано: {source}"]
+                resolution_str = f"{width}x{height}"
+                self.debug_logger.log(f"=== ИТОГ: Выбрано разрешение {resolution_str} (из {source}) ===")
+                return resolution_str, found_rules + [f"выбрано: {source}"]
             elif width:
-                return f"{width}x?", found_rules + [f"выбрано: {source}"]
+                resolution_str = f"{width}x?"
+                self.debug_logger.log(f"=== ИТОГ: Выбрано разрешение {resolution_str} (из {source}) ===")
+                return resolution_str, found_rules + [f"выбрано: {source}"]
             elif height:
-                return f"?x{height}", found_rules + [f"выбрано: {source}"]
+                resolution_str = f"?x{height}"
+                self.debug_logger.log(f"=== ИТОГ: Выбрано разрешение {resolution_str} (из {source}) ===")
+                return resolution_str, found_rules + [f"выбрано: {source}"]
         
+        self.debug_logger.log(f"=== ИТОГ: Разрешение не определено. Найдено {len(resolutions)} вариантов ===")
         return None, found_rules
 
     def select_best_resolution(self, resolutions):
         """Выбирает наилучшее разрешение из списка найденных"""
         if not resolutions:
+            self.debug_logger.log("Нет разрешений для выбора")
             return None
+        
+        self.debug_logger.log(f"Доступные разрешения для выбора: {resolutions}")
         
         # Полные разрешения (ширина и высота)
         full_resolutions = [(w, h, s) for w, h, s in resolutions if w is not None and h is not None]
         
         if full_resolutions:
+            # Сортируем по площади (ширина * высота), выбираем наибольшее
             full_resolutions.sort(key=lambda x: x[0] * x[1], reverse=True)
-            return full_resolutions[0]
+            best = full_resolutions[0]
+            self.debug_logger.log(f"Выбрано полное разрешение {best[0]}x{best[1]} (площадь: {best[0] * best[1]})")
+            return best
         
-        # Только ширины
+        # Если нет полных, пытаемся скомбинировать ширины и высоты
         widths = [(w, s) for w, h, s in resolutions if w is not None and h is None]
         heights = [(h, s) for w, h, s in resolutions if w is None and h is not None]
         
         if widths and heights:
+            # Берем максимальную ширину и максимальную высоту
             max_width = max(widths, key=lambda x: x[0])
             max_height = max(heights, key=lambda x: x[0])
-            return max_width[0], max_height[0], f"комбинировано: {max_width[1]} + {max_height[1]}"
+            combined_resolution = (max_width[0], max_height[0], f"комбинировано: {max_width[1]} + {max_height[1]}")
+            self.debug_logger.log(f"Скомбинировано разрешение {max_width[0]}x{max_height[0]}")
+            return combined_resolution
         elif widths:
             max_width = max(widths, key=lambda x: x[0])
-            return max_width[0], None, max_width[1]
+            result = (max_width[0], None, max_width[1])
+            self.debug_logger.log(f"Только ширина: {max_width[0]}")
+            return result
         elif heights:
             max_height = max(heights, key=lambda x: x[0])
-            return None, max_height[0], max_height[1]
+            result = (None, max_height[0], max_height[1])
+            self.debug_logger.log(f"Только высота: {max_height[0]}")
+            return result
         
+        self.debug_logger.log("Не удалось выбрать разрешение")
         return None
 
     def parse_resolution(self, value, rule_type, field_name=""):
@@ -3009,61 +3360,74 @@ class CameraManager:
             self.debug_logger.log(f"Парсинг разрешения: поле='{field_name}', тип='{rule_type}', значение='{value_str}'")
             
             if rule_type == 'range':
-                # Формат: (min_x, min_y) - (max_x, max_y)
+                # Ищем формат (min_x, min_y) - (max_x, max_y)
                 match = re.match(r'\((\d+),\s*(\d+)\)\s*-\s*\((\d+),\s*(\d+)\)', value_str)
                 if match:
                     min_x, min_y, max_x, max_y = map(int, match.groups())
                     width = max_x - min_x + 1
                     height = max_y - min_y + 1
+                    self.debug_logger.log(f"  [УСПЕХ] Распознан range формат: {width}x{height} (из {min_x},{min_y}-{max_x},{max_y})")
                     return width, height
                 
-                # Альтернативный формат: min_x min_y max_x max_y
+                # Ищем формат четыре числа через пробелы
                 match = re.match(r'(\d+)\s+(\d+)\s+(\d+)\s+(\d+)', value_str)
                 if match:
                     min_x, min_y, max_x, max_y = map(int, match.groups())
                     width = max_x - min_x + 1
                     height = max_y - min_y + 1
+                    self.debug_logger.log(f"  [УСПЕХ] Распознан range формат (4 числа): {width}x{height} (из {min_x} {min_y} {max_x} {max_y})")
                     return width, height
                 
-                # НОВЫЙ ФОРМАТ: DataWindow: 0 0 5119 2699
-                # Ищем паттерн с префиксом (может быть любым текстом перед числами)
+                # Ищем формат DataWindow: x1 y1 x2 y2
                 match = re.match(r'^(?:\w+\s*:\s*)?(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$', value_str.strip())
                 if match:
                     min_x, min_y, max_x, max_y = map(int, match.groups())
                     width = max_x - min_x + 1
                     height = max_y - min_y + 1
-                    self.debug_logger.log(f"Распознан формат DataWindow: {min_x} {min_y} {max_x} {max_y} -> {width}x{height}")
-                    return width, height
-            
-            elif rule_type == 'single_w':
-                # Пытаемся извлечь число из строки
-                numbers = re.findall(r'\d+', value_str)
-                if numbers:
-                    return int(numbers[0])
-            
-            elif rule_type == 'single_h':
-                # Пытаемся извлечь число из строки
-                numbers = re.findall(r'\d+', value_str)
-                if numbers:
-                    return int(numbers[0])
-            
-            elif rule_type == 'combined':
-                # Формат: WxH или W x H
-                match = re.match(r'(\d+)\s*[xX:]\s*(\d+)', value_str)
-                if match:
-                    width, height = map(int, match.groups())
+                    self.debug_logger.log(f"  [УСПЕХ] Распознан DataWindow формат: {width}x{height}")
                     return width, height
                 
-                # Поиск ширины и высоты отдельно
+                self.debug_logger.log(f"  [НЕУДАЧА] Не удалось распознать range формат")
+                
+            elif rule_type == 'single_w':
+                # Ищем только ширину
+                numbers = re.findall(r'\d+', value_str)
+                if numbers:
+                    width = int(numbers[0])
+                    self.debug_logger.log(f"  [УСПЕХ] Распознана ширина: {width}")
+                    return width
+                self.debug_logger.log(f"  [НЕУДАЧА] Не удалось распознать ширину")
+                
+            elif rule_type == 'single_h':
+                # Ищем только высоту
+                numbers = re.findall(r'\d+', value_str)
+                if numbers:
+                    height = int(numbers[0])
+                    self.debug_logger.log(f"  [УСПЕХ] Распознана высота: {height}")
+                    return height
+                self.debug_logger.log(f"  [НЕУДАЧА] Не удалось распознать высоту")
+                
+            elif rule_type == 'combined':
+                # Ищем формат WxH или W x H, включая символ × и скобки
+                match = re.match(r'\(?\s*(\d+)\s*[xX×:]\s*(\d+)\s*\)?', value_str)
+                if match:
+                    width, height = map(int, match.groups())
+                    self.debug_logger.log(f"  [УСПЕХ] Распознан combined формат: {width}x{height}")
+                    return width, height
+                
+                # Ищем отдельно ширину и высоту в тексте
                 width_match = re.search(r'[Ww]idth:\s*(\d+)', value_str)
                 height_match = re.search(r'[Hh]eight:\s*(\d+)', value_str)
                 if width_match and height_match:
                     width = int(width_match.group(1))
                     height = int(height_match.group(1))
+                    self.debug_logger.log(f"  [УСПЕХ] Распознан combined (width/height): {width}x{height}")
                     return width, height
+                
+                self.debug_logger.log(f"  [НЕУДАЧА] Не удалось распознать combined формат")
         
         except Exception as e:
-            self.debug_logger.log(f"Ошибка парсинга разрешения для поля {field_name}: {e}", "ERROR")
+            self.debug_logger.log(f"  [ОШИБКА] Ошибка парсинга разрешения для поля {field_name}: {e}", "ERROR")
         
         return None
 
@@ -3612,12 +3976,13 @@ class MetadataManager:
             self.add_file_info(file_path)
             
             # Определяем камеру и сенсор
-            sensor_size, detection_info = self.camera_manager.detect_camera_and_sensor(self.current_metadata)
+            sensor_size, detection_info, resolution_str = self.camera_manager.detect_camera_and_sensor(self.current_metadata)
             self.current_sensor_info = {
                 'size': sensor_size,
                 'detection_info': detection_info
             }
-            
+            self.current_resolution_str = resolution_str   # сохраняем разрешение
+
             # Форматируем и отображаем метаданные
             self.format_and_display_metadata(metadata_source, forced_tool)
             
@@ -4100,8 +4465,101 @@ class MetadataManager:
             # Применяем цвет
             self.apply_field_color(row, key)
 
-        # Обновляем метку источника
-        # ИСПРАВЛЕНИЕ: Используем sequence_manager вместо прямого обращения к current_sequence_files
+
+        source_res = self.current_resolution_str if self.current_resolution_str else "не определено"
+
+        # Вычисляем реформат и аспект
+        reformat_res = "не определено"
+        aspect_str = "?"
+        if self.current_resolution_str and 'x' in self.current_resolution_str:
+            try:
+                w_str, h_str = self.current_resolution_str.split('x')
+                w = int(w_str)
+                h = int(h_str)
+                aspect = w / h
+                new_w = 2048
+                new_h = int(round(new_w / aspect))
+                reformat_res = f"{new_w}x{new_h}"
+                aspect_str = f"{aspect:.2f}"
+            except Exception:
+                pass
+
+
+
+        detection_info = self.current_sensor_info.get('detection_info', [])
+            
+
+        if detection_info:
+            # Форматируем информацию так же, как и в tooltip
+            resolution_info = []
+            camera_info = []
+            actual_resolution = None
+            actual_camera = None
+            
+            for info in detection_info:
+                if "разрешение:" in info.lower():
+                    actual_resolution = info.replace("Разрешение:", "").strip()
+                elif "камера:" in info.lower():
+                    actual_camera = info.replace("Камера:", "").strip()
+                elif "разрешение" in info.lower() or "width" in info.lower() or "height" in info.lower():
+                    resolution_info.append(info)
+                else:
+                    camera_info.append(info)
+            
+            detection_text = ""
+            
+            if actual_camera:
+                detection_text += f"Камера: {actual_camera}\n"
+            if actual_resolution:
+                detection_text += f"Разрешение: {actual_resolution}\n"
+            
+            if camera_info:
+                detection_text += "\nКамера определена по:\n"
+                detection_text += "\n".join(camera_info) + "\n"
+            
+            if resolution_info:
+                detection_text += "\nРазрешение определено по:\n"
+                detection_text += "\n".join(resolution_info)
+            
+            if "выбрано:" in detection_text.lower():
+                detection_text += "\nСтратегия выбора: наибольшее разрешение"
+            
+            self.main_window.detection_info_text.setPlainText(detection_text)
+        else:
+            self.main_window.detection_info_text.setPlainText("Не удалось определить камеру или разрешение")
+        
+    # Обновляем правое нижнее поле (итоговые значения) с новым форматом
+        sensor_size = self.current_sensor_info.get('size', 'не определено')
+        camera_name = None
+        for info in detection_info:
+            if info.startswith("Камера:"):
+                camera_name = info.replace("Камера:", "").strip()
+                break
+        
+    # Получаем информацию о количестве кадров из текущей последовательности
+        frame_count = "N/A"
+        if hasattr(self.main_window, 'sequence_manager') and self.main_window.sequence_manager.current_sequence_files:
+            frame_count = len(self.main_window.sequence_manager.current_sequence_files)
+        elif self.current_metadata.get("Имя файла"):
+            # Для одиночного файла
+            frame_count = 1
+
+        # Новый формат текста
+        result_text = f"FOCAL LENGTH:\n"
+        result_text += "\n"
+        result_text += f"FILMBACK: {camera_name if camera_name else 'не определена'}\n"
+        result_text += "\n"
+        result_text += f"DETECTED SENSOR {sensor_size}\n"
+        result_text += "\n"
+        result_text += f"SOURCE FRAMES: {frame_count}\n"
+        result_text += "\n"  # пустая строка перед блоком разрешений
+        result_text += f"Source Resolution: {source_res}\n"
+        result_text += f"Reformat Resolution: {reformat_res}\n"
+        result_text += f"Aspect: {aspect_str}"
+        
+        self.main_window.sensor_camera_text.setPlainText(result_text)
+        
+        # Обновляем источник метаданных
         current_files = self.main_window.sequence_manager.get_current_sequence_files()
         if self.forced_metadata_tool and self.forced_metadata_file == (current_files[0] if current_files else None):
             tool_name = METADATA_TOOLS.get(self.forced_metadata_tool, self.forced_metadata_tool)
@@ -4109,7 +4567,6 @@ class MetadataManager:
         else:
             self.metadata_source_label.setText(f"Метаданные выбранного элемента ({metadata_source}):")
         
-        # Очищаем поиск
         self.clear_search()
 
     def apply_field_color(self, row, field_name):
@@ -4532,6 +4989,27 @@ class MetadataManager:
         return items
     
 
+    def get_metadata_dict(self, file_path, extension):
+        """Читает метаданные файла и возвращает словарь, не затрагивая текущее состояние интерфейса"""
+        # Сохраняем текущее состояние
+        old_metadata = self.current_metadata
+        old_source = getattr(self, 'last_metadata_source', None)
+        
+        # Создаём временный словарь
+        self.current_metadata = {}
+        
+        # Читаем метаданные (метод read_metadata заполнит self.current_metadata)
+        self.read_metadata(file_path, extension, metadata_tool=None)
+        
+        # Копируем результат
+        result_metadata = self.current_metadata.copy()
+        
+        # Восстанавливаем состояние
+        self.current_metadata = old_metadata
+        self.last_metadata_source = old_source
+        
+        return result_metadata
+
 
 
 
@@ -4807,10 +5285,28 @@ class UIManager:
         self.setup_progress_label(layout)
         
         central_widget.setLayout(layout)
+
+         # Устанавливаем шрифт для меток
+        app_font = QApplication.font()
+    
+        # Устанавливаем шрифт для всех QLabel в центральном виджете
+        self.set_font_recursive(central_widget, app_font)
+
         
         # Настраиваем начальное состояние кнопок
         self.stop_btn.setEnabled(False)
         self.continue_btn.setEnabled(False)
+
+    def set_font_recursive(self, widget, font):
+        """Рекурсивно устанавливает шрифт для всех виджетов"""
+        if isinstance(widget, QLabel):
+            widget.setFont(font)
+        
+        if hasattr(widget, 'children'):
+            for child in widget.children():
+                if isinstance(child, QWidget):
+                    self.set_font_recursive(child, font)
+
 
     def setup_folder_controls(self, layout):
         """Настраивает элементы управления папкой"""
@@ -4851,6 +5347,9 @@ class UIManager:
         
         # Кнопка редактора камер
         self.camera_editor_btn = QPushButton("Редактор камер")
+
+        self.analyze_res_btn = QPushButton("Анализ разрешений")
+        
         
         # Добавляем элементы в layout
         control_layout.addWidget(self.start_btn)
@@ -4858,6 +5357,7 @@ class UIManager:
         control_layout.addWidget(self.continue_btn)
         control_layout.addWidget(self.settings_btn)
         control_layout.addWidget(self.camera_editor_btn)
+        control_layout.addWidget(self.analyze_res_btn)
         control_layout.addWidget(self.art_checkbox)
         control_layout.addWidget(self.log_checkbox)
         control_layout.addWidget(self.log_btn)
@@ -4927,24 +5427,25 @@ class UIManager:
         return sequences_widget
 
     def setup_metadata_widget(self):
-        """Настраивает виджет метаданных"""
+        """Настраивает виджет метаданных с дополнительными полями справа"""
         metadata_widget = QWidget()
-        metadata_layout = QVBoxLayout()
+        main_layout = QHBoxLayout()  # Основной горизонтальный layout
         
-        # Метка источника метаданных
+        # Левая часть - таблица метаданных
+        left_widget = QWidget()
+        left_layout = QVBoxLayout()
+        
         metadata_source_label = QLabel("Метаданные выбранного элемента:")
-        metadata_layout.addWidget(metadata_source_label)
+        left_layout.addWidget(metadata_source_label)
         
-        # Таблица метаданных
         metadata_table = QTableWidget()
         metadata_table.setColumnCount(2)
         metadata_table.setHorizontalHeaderLabels(["Поле", "Значение"])
         
-        # Настройка размеров столбцов
+        # Настройка размеров колонок
         for i, width in enumerate(DEFAULT_COLUMN_WIDTHS['metadata']):
             metadata_table.setColumnWidth(i, width)
         
-        # Настройка поведения заголовков
         metadata_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)
         metadata_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         metadata_table.setColumnWidth(0, DEFAULT_COLUMN_WIDTHS['metadata'][0])
@@ -4952,7 +5453,7 @@ class UIManager:
         metadata_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         metadata_table.setContextMenuPolicy(Qt.CustomContextMenu)
         
-        metadata_layout.addWidget(metadata_table)
+        left_layout.addWidget(metadata_table)
         
         # Поиск по метаданным
         search_layout = QHBoxLayout()
@@ -4966,14 +5467,68 @@ class UIManager:
         search_layout.addWidget(search_input)
         search_layout.addWidget(clear_search_btn)
         
-        metadata_layout.addLayout(search_layout)
-        metadata_widget.setLayout(metadata_layout)
+        left_layout.addLayout(search_layout)
+        left_widget.setLayout(left_layout)
         
-        # Сохраняем ссылки на элементы в главном окне
+        # Правая часть - дополнительная информация о камере и сенсоре
+        right_widget = QWidget()
+        right_layout = QVBoxLayout()
+        
+        # Верхнее поле - информация об определении
+        detection_info_label = QLabel("Информация об определении:")
+        self.detection_info_text = QTextEdit()
+        self.detection_info_text.setReadOnly(True)
+#        self.detection_info_text.setMaximumHeight(250)
+        self.detection_info_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #f0f0f0;
+                border: 1px solid #cccccc;
+            }
+        """)
+
+        # Нижнее поле - результаты определения
+        sensor_camera_label = QLabel("Результаты определения:")
+        self.sensor_camera_text = QTextEdit()
+        self.sensor_camera_text.setReadOnly(False)
+#        self.sensor_camera_text.setMaximumHeight(200)
+        self.sensor_camera_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #f8f8f8;
+                border: 1px solid #cccccc;
+            }
+        """)
+
+        # Устанавливаем шрифт после CSS
+        text_font = QFont()
+        text_font.setPointSize(DEFAULT_FONT_SIZE)
+        self.detection_info_text.setFont(text_font)
+
+        bold_font = QFont()
+        bold_font.setPointSize(DEFAULT_FONT_SIZE)
+        bold_font.setWeight(QFont.Bold)
+        self.sensor_camera_text.setFont(bold_font)
+        
+        right_layout.addWidget(detection_info_label)
+        right_layout.addWidget(self.detection_info_text, 1)
+        right_layout.addWidget(sensor_camera_label)
+        right_layout.addWidget(self.sensor_camera_text, 1)
+        right_layout.addStretch()
+        
+        right_widget.setLayout(right_layout)
+        
+        # Добавляем обе части в основной layout с соотношением 70/30
+        main_layout.addWidget(left_widget, 70)  # 70% ширины для таблицы
+        main_layout.addWidget(right_widget, 30)  # 30% ширины для дополнительной информации
+        
+        metadata_widget.setLayout(main_layout)
+        
+        # Сохраняем ссылки на элементы
         self.main_window.metadata_table = metadata_table
         self.main_window.metadata_source_label = metadata_source_label
         self.main_window.search_input = search_input
         self.main_window.clear_search_btn = clear_search_btn
+        self.main_window.detection_info_text = self.detection_info_text
+        self.main_window.sensor_camera_text = self.sensor_camera_text
         
         return metadata_widget
 
@@ -5036,6 +5591,7 @@ class UIManager:
         self.settings_btn.clicked.connect(self.main_window.open_settings)
         self.log_btn.clicked.connect(self.main_window.show_log)
         self.camera_editor_btn.clicked.connect(self.main_window.open_camera_editor)
+        self.analyze_res_btn.clicked.connect(self.main_window.analyze_resolutions)
         self.metadata_tool_combo.currentIndexChanged.connect(self.main_window.change_metadata_tool)
         
         # Сигналы поиска
@@ -5115,6 +5671,8 @@ class EXRMetadataViewer(QMainWindow):
         self.metadata_manager = MetadataManager(self, self.camera_manager, self.tool_manager)
         self.ui_manager = UIManager(self)
         
+        self.detection_info_text = None
+        self.sensor_camera_text = None
         # Инициализация UI
         self.setup_ui()
         
@@ -5147,6 +5705,9 @@ class EXRMetadataViewer(QMainWindow):
         
         # Настройка UI через UIManager
         self.ui_manager.setup_ui(central_widget)
+
+        # Дополнительно: устанавливаем тот же шрифт для всех виджетов
+        self.setFont(app_font)
 
     def setup_managers(self):
         """Настраивает менеджеры, требующие UI элементы"""
@@ -5232,7 +5793,7 @@ class EXRMetadataViewer(QMainWindow):
             return
             
         if item_data['type'] == 'sequence':
-            # Обрабатываем выбор последовательности
+            # Обработка последовательности
             seq_info = item_data['info']
             self.sequence_manager.set_current_sequence_files(seq_info['files'])
             extension = seq_info['extension']
@@ -5240,24 +5801,30 @@ class EXRMetadataViewer(QMainWindow):
             if self.sequence_manager.current_sequence_files:
                 current_file = self.sequence_manager.current_sequence_files[0]
                 
-                # Сбрасываем принудительные настройки, если файл изменился
+                # Сбрасываем принудительный инструмент, если файл изменился
                 if self.metadata_manager.forced_metadata_file != current_file:
                     self.metadata_manager.forced_metadata_tool = None
                     self.metadata_manager.forced_metadata_file = None
                 
-                # Отображаем метаданные
+                # Читаем метаданные
                 if self.metadata_manager.forced_metadata_tool and self.metadata_manager.forced_metadata_file == current_file:
                     self.metadata_manager.display_metadata(current_file, extension, forced_tool=self.metadata_manager.forced_metadata_tool)
                 else:
                     self.metadata_manager.display_metadata(current_file, extension)
         else:
-            # Обрабатываем выбор папки - очищаем метаданные
+            # Очищаем все поля при выборе папки
             self.metadata_table.setRowCount(0)
             self.sequence_manager.set_current_sequence_files([])
             self.metadata_manager.current_metadata = {}
             self.metadata_manager.forced_metadata_tool = None
             self.metadata_manager.forced_metadata_file = None
             self.metadata_source_label.setText("Метаданные выбранного элемента:")
+            
+            # Очищаем дополнительные поля
+            if hasattr(self, 'detection_info_text'):
+                self.detection_info_text.clear()
+            if hasattr(self, 'sensor_camera_text'):
+                self.sensor_camera_text.clear()
 
     def show_tree_context_menu(self, position):
         """Показывает контекстное меню для дерева"""
@@ -5621,6 +6188,82 @@ class EXRMetadataViewer(QMainWindow):
         """Показывает toast сообщение"""
         toast = ToastMessage(message, self, duration, opacity)
         toast.show_toast()
+
+
+    def analyze_resolutions(self):
+        """Анализирует разрешения всех найденных последовательностей"""
+        sequences = self.sequence_manager.get_all_sequences()
+        if not sequences:
+            QMessageBox.information(self, "Информация", "Нет последовательностей для анализа.")
+            return
+        
+        # Фильтруем только настоящие последовательности (не одиночные видео и не группы)
+        filtered_seqs = []
+        for seq in sequences.values():
+            # Тип должен содержать 'sequence' и количество кадров > 1
+            if seq.get('frame_count', 1) > 1 and 'sequence' in seq.get('type', ''):
+                filtered_seqs.append(seq)
+        
+        if not filtered_seqs:
+            QMessageBox.information(self, "Информация", "Нет подходящих последовательностей (с несколькими кадрами).")
+            return
+        
+        # Словарь для подсчёта уникальных разрешений: разрешение -> количество
+        resolution_counts = {}
+        
+        # Обрабатываем каждую последовательность
+        for seq in filtered_seqs:
+            file_path = seq['files'][0]
+            extension = seq['extension']
+            
+            # Читаем метаданные первого файла
+            metadata = self.metadata_manager.get_metadata_dict(file_path, extension)
+            if metadata:
+                # Определяем разрешение
+                resolution_str, _ = self.camera_manager.detect_resolution(metadata)
+                if resolution_str:
+                    resolution_counts[resolution_str] = resolution_counts.get(resolution_str, 0) + 1
+        
+        if not resolution_counts:
+            QMessageBox.information(self, "Информация", "Не удалось определить разрешения для файлов.")
+            return
+        
+        # Формируем данные для таблицы
+        resolutions_data = []
+        for res, count in resolution_counts.items():
+            try:
+                if 'x' in res:
+                    w_str, h_str = res.split('x')
+                    w = int(w_str)
+                    h = int(h_str)
+                    aspect = w / h
+                    aspect_str = f"{aspect:.3f}"
+                    # Реформат в 2048 по ширине
+                    new_w = 2048
+                    new_h = int(round(new_w / aspect))
+                    reformat = f"{new_w}x{new_h}"
+                else:
+                    reformat = "?"
+                    aspect_str = "?"
+            except Exception:
+                reformat = "?"
+                aspect_str = "?"
+            
+            resolutions_data.append((res, reformat, aspect_str, count))
+        
+        # Сортируем по ширине и высоте
+        resolutions_data.sort(key=lambda x: (int(x[0].split('x')[0]) if 'x' in x[0] else 0,
+                                            int(x[0].split('x')[1]) if 'x' in x[0] else 0))
+        
+        # Открываем диалог с результатами
+        dialog = ResolutionAnalysisDialog(resolutions_data, self)
+        dialog.exec_()
+
+
+
+
+
+
 
 
 if __name__ == "__main__":

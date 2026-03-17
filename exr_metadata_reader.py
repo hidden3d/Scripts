@@ -1,3 +1,5 @@
+# v2.001
+
 
 import os
 import sys
@@ -21,8 +23,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout
                              QListWidgetItem, QColorDialog, QDialog, QDialogButtonBox,
                              QFormLayout, QComboBox, QTableWidget, QTableWidgetItem,
                              QHeaderView, QAbstractItemView, QMenu, QAction, QTabWidget,
-                             QSplitter, QTextBrowser, QScrollArea, QCheckBox, QInputDialog)
-from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSettings, QTimer, QPropertyAnimation
+                             QSplitter, QTextBrowser, QScrollArea, QCheckBox, QInputDialog, QProgressBar)
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSettings, QTimer, QPropertyAnimation, QObject
 from PyQt5.QtGui import QTextCursor, QColor, QTextCharFormat, QFont, QBrush, QPainter, QColor, QPen
 from PyQt5.QtWidgets import QTreeWidget, QTreeWidgetItem, QPlainTextEdit
 
@@ -92,6 +94,390 @@ except ImportError:
     EXIFTOOL_AVAILABLE = False
     print("Библиотека PyExifTool не установлена. Метаданные через ExifTool не будут доступны.")
     print("Установите ее: pip install pyexiftool")
+
+
+
+class ResolutionAnalyzerWorker(QObject):
+    """Рабочий объект для анализа разрешений в отдельном потоке"""
+    result_ready = pyqtSignal(str, str, str, int)  # resolution, reformat, aspect, total_count
+    progress = pyqtSignal(int, int)  # current, total
+    finished = pyqtSignal()
+    error = pyqtSignal(str)
+
+    def __init__(self, sequences, camera_rules, resolution_rules, cameras_data):
+        super().__init__()
+        self.sequences = sequences
+        self.camera_rules = camera_rules
+        self.resolution_rules = resolution_rules
+        self.cameras_data = cameras_data
+        self._is_running = True
+
+    def stop(self):
+        self._is_running = False
+
+    def run(self):
+        """Основная функция, вызываемая из потока"""
+        resolution_counts = {}
+        total = len(self.sequences)
+        for idx, seq in enumerate(self.sequences):
+            if not self._is_running:
+                break
+            # Прогресс
+            self.progress.emit(idx + 1, total)
+
+            file_path = seq['files'][0]
+            extension = seq['extension']
+
+            # Читаем метаданные первого файла
+            metadata = self._read_metadata(file_path, extension)
+            if metadata:
+                # Определяем разрешение
+                resolution_str = self._detect_resolution(metadata)
+                if resolution_str:
+                    # Увеличиваем счётчик
+                    resolution_counts[resolution_str] = resolution_counts.get(resolution_str, 0) + 1
+                    # Вычисляем реформат и аспект
+                    reformat, aspect = self._compute_reformat_and_aspect(resolution_str)
+                    # Отправляем сигнал с текущим счётчиком для этого разрешения
+                    self.result_ready.emit(resolution_str, reformat, aspect, resolution_counts[resolution_str])
+
+        self.finished.emit()
+
+    def _read_metadata(self, file_path, extension):
+        """Читает метаданные файла (упрощённая копия методов из MetadataManager)"""
+        metadata = {}
+        ext_lower = extension.lower()
+        try:
+            if ext_lower == '.exr':
+                # Используем OpenEXR
+                exr_file = OpenEXR.InputFile(file_path)
+                header = exr_file.header()
+                for key, value in header.items():
+                    metadata[key] = str(value)  # упрощённо
+            elif ext_lower == '.r3d':
+                # Если доступна REDline, можно использовать, иначе MediaInfo
+                if os.path.exists(REDLINE_TOOL_PATH):
+                    # Запускаем REDline (аналогично read_redline_metadata)
+                    try:
+                        result = subprocess.run(
+                            [REDLINE_TOOL_PATH, '--i', file_path, '--useMeta', '--printMeta', '1'],
+                            capture_output=True, text=True, timeout=30
+                        )
+                        output = result.stderr if result.stderr.strip() else result.stdout
+                        for line in output.splitlines():
+                            if ':' in line:
+                                key, val = line.split(':', 1)
+                                metadata[key.strip()] = val.strip()
+                    except Exception:
+                        pass
+                # fallback на MediaInfo
+                if not metadata and PYMEDIAINFO_AVAILABLE:
+                    media_info = MediaInfo.parse(file_path)
+                    for track in media_info.tracks:
+                        for attr in dir(track):
+                            if not attr.startswith('_') and attr not in ['to_data', 'to_json']:
+                                val = getattr(track, attr)
+                                if val:
+                                    metadata[f"{track.track_type}.{attr}"] = str(val)
+            elif ext_lower in ['.mxf', '.arr', '.arx']:
+                if os.path.exists(ARRI_REFERENCE_TOOL_PATH):
+                    # Запускаем ARRI Tool
+                    with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as tmp:
+                        tmp_path = tmp.name
+                    try:
+                        subprocess.run(
+                            [ARRI_REFERENCE_TOOL_PATH, 'export', '--duration', '1', '--input', file_path, '--output', tmp_path],
+                            timeout=30
+                        )
+                        if os.path.exists(tmp_path):
+                            with open(tmp_path, 'r') as f:
+                                arri_data = json.load(f)
+                            # Упрощённая развёртка
+                            def flatten(d, parent=''):
+                                items = {}
+                                if isinstance(d, dict):
+                                    for k, v in d.items():
+                                        new_key = f"{parent}.{k}" if parent else k
+                                        if isinstance(v, (dict, list)):
+                                            items.update(flatten(v, new_key))
+                                        else:
+                                            items[new_key] = str(v)
+                                elif isinstance(d, list):
+                                    for i, v in enumerate(d):
+                                        new_key = f"{parent}.{i}"
+                                        if isinstance(v, (dict, list)):
+                                            items.update(flatten(v, new_key))
+                                        else:
+                                            items[new_key] = str(v)
+                                return items
+                            metadata.update(flatten(arri_data))
+                    finally:
+                        if os.path.exists(tmp_path):
+                            os.unlink(tmp_path)
+                if not metadata and PYMEDIAINFO_AVAILABLE:
+                    media_info = MediaInfo.parse(file_path)
+                    for track in media_info.tracks:
+                        for attr in dir(track):
+                            if not attr.startswith('_') and attr not in ['to_data', 'to_json']:
+                                val = getattr(track, attr)
+                                if val:
+                                    metadata[f"{track.track_type}.{attr}"] = str(val)
+            else:
+                # Пытаемся через MediaInfo как fallback
+                if PYMEDIAINFO_AVAILABLE:
+                    media_info = MediaInfo.parse(file_path)
+                    for track in media_info.tracks:
+                        for attr in dir(track):
+                            if not attr.startswith('_') and attr not in ['to_data', 'to_json']:
+                                val = getattr(track, attr)
+                                if val:
+                                    metadata[f"{track.track_type}.{attr}"] = str(val)
+        except Exception as e:
+            # Игнорируем ошибки чтения отдельного файла
+            pass
+        return metadata
+
+    def _detect_resolution(self, metadata):
+        """Определяет разрешение из метаданных, используя переданные правила"""
+        resolutions = []
+        for rule in self.resolution_rules:
+            field = rule.get('field')
+            rule_type = rule.get('type')
+            # Поиск совпадения в ключах метаданных
+            for key in metadata:
+                if field.lower() in key.lower():
+                    value = metadata[key]
+                    parsed = self._parse_resolution(value, rule_type)
+                    if parsed:
+                        if rule_type == 'single_w':
+                            resolutions.append((parsed, None))
+                        elif rule_type == 'single_h':
+                            resolutions.append((None, parsed))
+                        else:
+                            if isinstance(parsed, tuple) and len(parsed) == 2:
+                                resolutions.append(parsed)
+        # Выбираем наибольшее
+        best = self._select_best_resolution(resolutions)
+        if best:
+            w, h = best
+            if w and h:
+                return f"{w}x{h}"
+            elif w:
+                return f"{w}x?"
+            elif h:
+                return f"?x{h}"
+        return None
+
+    def _parse_resolution(self, value_str, rule_type):
+        """Парсит разрешение из строки по правилу"""
+        value_str = str(value_str)
+        try:
+            if rule_type == 'range':
+                # (min_x, min_y) - (max_x, max_y)
+                match = re.match(r'\((\d+),\s*(\d+)\)\s*-\s*\((\d+),\s*(\d+)\)', value_str)
+                if match:
+                    min_x, min_y, max_x, max_y = map(int, match.groups())
+                    return max_x - min_x + 1, max_y - min_y + 1
+                # 4 числа через пробел
+                match = re.match(r'(\d+)\s+(\d+)\s+(\d+)\s+(\d+)', value_str)
+                if match:
+                    min_x, min_y, max_x, max_y = map(int, match.groups())
+                    return max_x - min_x + 1, max_y - min_y + 1
+            elif rule_type == 'single_w':
+                nums = re.findall(r'\d+', value_str)
+                if nums:
+                    return int(nums[0])
+            elif rule_type == 'single_h':
+                nums = re.findall(r'\d+', value_str)
+                if nums:
+                    return int(nums[0])
+            elif rule_type == 'combined':
+                match = re.match(r'\(?\s*(\d+)\s*[xX×:]\s*(\d+)\s*\)?', value_str)
+                if match:
+                    return int(match.group(1)), int(match.group(2))
+        except Exception:
+            pass
+        return None
+
+    def _select_best_resolution(self, resolutions):
+        """Выбирает наибольшее разрешение"""
+        full = [(w, h) for w, h in resolutions if w and h]
+        if full:
+            full.sort(key=lambda x: x[0] * x[1], reverse=True)
+            return full[0]
+        # Если нет полных, берём максимальную ширину или высоту
+        widths = [w for w, h in resolutions if w and not h]
+        heights = [h for w, h in resolutions if not w and h]
+        if widths and heights:
+            return max(widths), max(heights)
+        elif widths:
+            return max(widths), None
+        elif heights:
+            return None, max(heights)
+        return None
+
+    def _compute_reformat_and_aspect(self, resolution_str):
+        """Вычисляет реформат (2048 по ширине) и аспект"""
+        try:
+            if 'x' in resolution_str:
+                w_str, h_str = resolution_str.split('x')
+                w = int(w_str)
+                h = int(h_str)
+                aspect = w / h
+                aspect_str = f"{aspect:.3f}"
+                new_w = 2048
+                new_h = int(round(new_w / aspect))
+                reformat = f"{new_w}x{new_h}"
+            else:
+                reformat = "?"
+                aspect_str = "?"
+        except:
+            reformat = "?"
+            aspect_str = "?"
+        return reformat, aspect_str
+
+
+class ResolutionAnalysisDialog(QDialog):
+    """Диалог отображения результатов анализа разрешений (динамическое обновление)"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Анализ разрешений")
+        self.setGeometry(200, 200, 800, 500)
+        layout = QVBoxLayout()
+
+        # Таблица
+        self.table = QTableWidget()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["Разрешение", "Реформат (2048)", "Аспект", "Количество файлов"])
+        self.table.setSortingEnabled(True)
+        self.table.setAlternatingRowColors(True)
+        # Сохраняем соответствие разрешение -> строка для быстрого обновления
+        self.row_map = {}  # resolution -> row index
+
+        # Прогресс-бар
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+
+        # Кнопки
+        button_layout = QHBoxLayout()
+        self.stop_btn = QPushButton("Остановить")
+        self.stop_btn.clicked.connect(self.stop_analysis)
+        self.copy_btn = QPushButton("Копировать таблицу в буфер")
+        self.copy_btn.clicked.connect(self.copy_to_clipboard)
+        self.save_btn = QPushButton("Сохранить в CSV")
+        self.save_btn.clicked.connect(self.save_to_csv)
+        self.close_btn = QPushButton("Закрыть")
+        self.close_btn.clicked.connect(self.accept)
+
+        button_layout.addWidget(self.stop_btn)
+        button_layout.addStretch()
+        button_layout.addWidget(self.copy_btn)
+        button_layout.addWidget(self.save_btn)
+        button_layout.addWidget(self.close_btn)
+
+        layout.addWidget(self.table)
+        layout.addWidget(self.progress_bar)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+        # Ссылка на рабочий поток (будет установлена извне)
+        self.worker = None
+        self.thread = None
+
+    def add_or_update_resolution(self, resolution, reformat, aspect, count):
+        """Добавляет новую строку или обновляет существующую"""
+        if resolution in self.row_map:
+            # Обновляем существующую строку
+            row = self.row_map[resolution]
+            self.table.item(row, 3).setText(str(count))
+        else:
+            # Добавляем новую строку
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(resolution))
+            self.table.setItem(row, 1, QTableWidgetItem(reformat))
+            self.table.setItem(row, 2, QTableWidgetItem(aspect))
+            self.table.setItem(row, 3, QTableWidgetItem(str(count)))
+            self.row_map[resolution] = row
+        # Прокручиваем до новой строки
+        self.table.scrollToBottom()
+
+    def set_progress(self, current, total):
+        """Обновляет прогресс-бар"""
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setMaximum(total)
+        self.progress_bar.setValue(current)
+
+    def stop_analysis(self):
+        """Останавливает анализ"""
+        if self.worker:
+            self.worker.stop()
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.setText("Остановлен")
+
+    def copy_to_clipboard(self):
+        """Копирует таблицу в буфер обмена (табуляция)"""
+        rows = self.table.rowCount()
+        cols = self.table.columnCount()
+        if rows == 0:
+            QMessageBox.information(self, "Информация", "Нет данных для копирования.")
+            return
+
+        # Заголовки
+        headers = [self.table.horizontalHeaderItem(i).text() for i in range(cols)]
+        lines = ["\t".join(headers)]
+
+        for r in range(rows):
+            row_data = []
+            for c in range(cols):
+                item = self.table.item(r, c)
+                row_data.append(item.text() if item else "")
+            lines.append("\t".join(row_data))
+
+        clipboard = QApplication.clipboard()
+        clipboard.setText("\n".join(lines))
+        QMessageBox.information(self, "Успех", "Таблица скопирована в буфер обмена (разделитель табуляция).")
+
+    def save_to_csv(self):
+        """Сохраняет таблицу в CSV-файл"""
+        rows = self.table.rowCount()
+        cols = self.table.columnCount()
+        if rows == 0:
+            QMessageBox.information(self, "Информация", "Нет данных для сохранения.")
+            return
+
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить CSV", "resolution_analysis.csv", "CSV Files (*.csv)"
+        )
+        if not filename:
+            return
+
+        with open(filename, 'w', encoding='utf-8-sig') as f:
+            # Заголовки
+            headers = [self.table.horizontalHeaderItem(i).text() for i in range(cols)]
+            f.write(",".join(headers) + "\n")
+            for r in range(rows):
+                row_data = []
+                for c in range(cols):
+                    item = self.table.item(r, c)
+                    # Экранируем запятые (заменяем на точку с запятой для Excel)
+                    text = item.text() if item else ""
+                    text = text.replace(',', ';')
+                    row_data.append(text)
+                f.write(",".join(row_data) + "\n")
+
+        QMessageBox.information(self, "Успех", f"Данные сохранены в {filename}")
+
+    def closeEvent(self, event):
+        """При закрытии диалога останавливаем поток, если он ещё работает"""
+        if self.worker and hasattr(self.worker, '_is_running') and self.worker._is_running:
+            self.worker.stop()
+            if self.thread and self.thread.isRunning():
+                self.thread.quit()
+                self.thread.wait(2000)
+        event.accept()
+
 
 
 
@@ -195,27 +581,52 @@ class ToastMessage(QLabel):
 
 
 
-class DebugLogger:
-    """Класс для сбора отладочной информации"""
+class DebugLogger(QObject):
+    """Класс для сбора отладочной информации с поддержкой реального времени"""
     
-    def __init__(self, debug_enabled=DEBUG):
+    # Сигнал для отправки новых сообщений лога
+    new_log_message = pyqtSignal(str)
+    
+    def __init__(self, debug_enabled=DEBUG, parent=None):
+        super().__init__(parent)
         self.debug_enabled = debug_enabled
         self.log_messages = []
-        self.max_log_size = 10000  # Максимальное количество сообщений в логе
+        self.max_log_size = 5000000  # Уменьшим максимальный размер лога
+        self._emit_timer = QTimer()
+        self._emit_timer.setSingleShot(True)
+        self._emit_timer.timeout.connect(self._emit_buffered_messages)
+        self._message_buffer = []
+        self._buffer_size = 20
+        self._buffer_delay = 50  # Увеличим задержку
         
     def log(self, message, level="INFO"):
-        """Добавляет сообщение в лог"""
+        """Добавляет сообщение в лог с буферизацией"""
         if not self.debug_enabled:
             return
             
         timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
         log_entry = f"[{timestamp}] [{level}] {message}"
         self.log_messages.append(log_entry)
+        self._message_buffer.append(log_entry)
         
         # Ограничиваем размер лога
         if len(self.log_messages) > self.max_log_size:
             self.log_messages = self.log_messages[-self.max_log_size:]
         
+        # Отправляем сигнал с задержкой и буферизацией
+        if len(self._message_buffer) >= self._buffer_size:
+            self._emit_buffered_messages()
+        elif not self._emit_timer.isActive():
+            self._emit_timer.start(self._buffer_delay)
+    
+    def _emit_buffered_messages(self):
+        """Отправляет буферизованные сообщения одним сигналом"""
+        if self._message_buffer:
+            # Объединяем сообщения в одну строку
+            combined_message = "\n".join(self._message_buffer)
+            self.new_log_message.emit(combined_message)
+            self._message_buffer.clear()
+    
     def get_log_text(self):
         """Возвращает весь лог как текст"""
         return "\n".join(self.log_messages)
@@ -223,77 +634,243 @@ class DebugLogger:
     def clear_log(self):
         """Очищает лог"""
         self.log_messages = []
+        self._message_buffer.clear()
+        self._emit_timer.stop()
+        self.new_log_message.emit("=== Лог очищен ===")
     
     def set_debug_enabled(self, enabled):
         """Включает/выключает логирование"""
         self.debug_enabled = enabled
 
 
+
 class LogViewerDialog(QDialog):
-    """Диалог для просмотра логов"""
+    """Диалог для просмотра логов в реальном времени с улучшенной производительностью"""
     
     def __init__(self, debug_logger, parent=None):
         super().__init__(parent)
         self.debug_logger = debug_logger
         self.setup_ui()
         
+        # Улучшенная буферизация
+        self.log_buffer = []
+        self.buffer_size = 30  # Уменьшим размер буфера
+        self.buffer_timer = QTimer()
+        self.buffer_timer.setSingleShot(True)
+        self.buffer_timer.timeout.connect(self.flush_buffer)
+        self.buffer_delay = 150  # Увеличим задержку
+        
+        # Статистика
+        self.message_count = 0
+        self.last_update_time = datetime.datetime.now()
+        self.update_interval = 2000  # Обновляем статистику реже
+        
+        # Подключаем сигнал для обновления лога в реальном времени
+        self.debug_logger.new_log_message.connect(self.add_log_message_buffered)
+        
+        # Загружаем существующие сообщения
+        self.load_existing_logs()
+        
+        # Таймер для периодического обновления статистики
+        self.stats_timer = QTimer()
+        self.stats_timer.timeout.connect(self.update_stats)
+        self.stats_timer.start(self.update_interval)
+        
+        # Оптимизация производительности
+        self._processing = False
+        
     def setup_ui(self):
         self.setWindowTitle("Лог приложения")
-        self.setGeometry(300, 300, 800, 600)
+        self.setGeometry(300, 300, 900, 600)  # Уменьшим размер
         
         layout = QVBoxLayout()
         
-        # Панель управления
+        # Упрощенная панель управления
         control_layout = QHBoxLayout()
-        self.refresh_btn = QPushButton("Обновить")
-        self.clear_btn = QPushButton("Очистить лог")
-        self.save_btn = QPushButton("Сохранить в файл")
+        self.clear_btn = QPushButton("Очистить")
+        self.save_btn = QPushButton("Сохранить")
+        self.autoscroll_checkbox = QCheckBox("Автопрокрутка")
+        self.autoscroll_checkbox.setChecked(True)
         
-        self.refresh_btn.clicked.connect(self.refresh_log)
+        self.pause_checkbox = QCheckBox("Пауза")
+        
         self.clear_btn.clicked.connect(self.clear_log)
         self.save_btn.clicked.connect(self.save_log)
         
-        control_layout.addWidget(self.refresh_btn)
         control_layout.addWidget(self.clear_btn)
         control_layout.addWidget(self.save_btn)
+        control_layout.addWidget(self.autoscroll_checkbox)
+        control_layout.addWidget(self.pause_checkbox)
         control_layout.addStretch()
         
-        # Текстовое поле для лога
-        self.log_text = QTextBrowser()
-        self.log_text.setFont(QFont("Courier", 9))
-        self.log_text.setLineWrapMode(QTextEdit.NoWrap)
+        # Упрощенная статистика
+        self.stats_label = QLabel("Сообщений: 0")
         
+        # Используем QPlainTextEdit вместо QTextBrowser - он более эффективен
+        self.log_text = QPlainTextEdit()
+        self.log_text.setFont(QFont("Courier", 8))  # Уменьшим шрифт
+        self.log_text.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.log_text.setReadOnly(True)
+        self.log_text.setMaximumBlockCount(5000)  # Ограничим количество строк
+        
+        layout.addWidget(self.stats_label)
         layout.addLayout(control_layout)
         layout.addWidget(self.log_text)
         
         self.setLayout(layout)
-        self.refresh_log()
+        
+    def load_existing_logs(self):
+        """Загружает существующие сообщения лога"""
+        try:
+            existing_logs = self.debug_logger.get_log_text()
+            if existing_logs:
+                self.log_text.setPlainText(existing_logs)
+                self.message_count = len(self.debug_logger.log_messages)
+                self.scroll_to_bottom()
+                self.update_stats()
+        except Exception as e:
+            print(f"Error loading existing logs: {e}")
+        
+    def add_log_message_buffered(self, message):
+        """Добавляет сообщение в буфер для группировки"""
+        if self.pause_checkbox.isChecked() or self._processing:
+            return
+            
+        # Если сообщение содержит несколько строк, разбиваем их
+        if '\n' in message:
+            lines = message.split('\n')
+            self.log_buffer.extend(lines)
+            self.message_count += len(lines)
+        else:
+            self.log_buffer.append(message)
+            self.message_count += 1
+        
+        # Если буфер достиг максимального размера, сбрасываем немедленно
+        if len(self.log_buffer) >= self.buffer_size:
+            self.flush_buffer()
+        elif not self.buffer_timer.isActive():
+            # Запускаем таймер для сброса буфера через указанное время
+            self.buffer_timer.start(self.buffer_delay)
+    
+    def flush_buffer(self):
+        """Выводит все сообщения из буфера в текстовое поле"""
+        if not self.log_buffer or self.pause_checkbox.isChecked() or self._processing:
+            return
+            
+        self._processing = True
+        
+        try:
+            # Останавливаем таймер, если он активен
+            self.buffer_timer.stop()
+            
+            # Используем QPlainTextEdit для лучшей производительности
+            cursor = self.log_text.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            
+            # Добавляем перенос строки если это не первое сообщение
+            if not self.log_text.document().isEmpty():
+                cursor.insertText("\n")
+            
+            # Вставляем все сообщения из буфера
+            cursor.insertText("\n".join(self.log_buffer))
+            
+            # Автопрокрутка вниз
+            if self.autoscroll_checkbox.isChecked():
+                self.scroll_to_bottom()
+            
+            # Очищаем буфер
+            self.log_buffer.clear()
+            
+            # Обновляем статистику
+            self.update_stats()
+            
+        except Exception as e:
+            print(f"Error flushing buffer: {e}")
+        finally:
+            self._processing = False
+    
+    def scroll_to_bottom(self):
+        """Прокручивает лог вниз"""
+        try:
+            scrollbar = self.log_text.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+        except Exception as e:
+            print(f"Error scrolling to bottom: {e}")
         
     def refresh_log(self):
-        """Обновляет содержимое лога"""
-        self.log_text.setPlainText(self.debug_logger.get_log_text())
-        # Прокручиваем вниз
-        cursor = self.log_text.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        self.log_text.setTextCursor(cursor)
+        """Полностью обновляет содержимое лога"""
+        try:
+            # Сначала сбрасываем буфер
+            if self.log_buffer:
+                self.flush_buffer()
+                
+            # Затем загружаем полный лог
+            self.log_text.setPlainText(self.debug_logger.get_log_text())
+            if self.autoscroll_checkbox.isChecked():
+                self.scroll_to_bottom()
+        except Exception as e:
+            print(f"Error refreshing log: {e}")
         
     def clear_log(self):
         """Очищает лог"""
-        self.debug_logger.clear_log()
-        self.refresh_log()
+        try:
+            # Сбрасываем буфер
+            self.log_buffer.clear()
+            self.buffer_timer.stop()
+            
+            # Очищаем логгер и текстовое поле
+            self.debug_logger.clear_log()
+            self.message_count = 0
+            self.update_stats()
+        except Exception as e:
+            print(f"Error clearing log: {e}")
         
     def save_log(self):
         """Сохраняет лог в файл"""
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "Сохранить лог", "exr_viewer_log.txt", "Text Files (*.txt)"
-        )
-        if filename:
-            try:
+        try:
+            filename, _ = QFileDialog.getSaveFileName(
+                self, "Сохранить лог", f"exr_viewer_log_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt", 
+                "Text Files (*.txt)"
+            )
+            if filename:
+                # Сначала сбрасываем буфер, чтобы сохранить все сообщения
+                if self.log_buffer:
+                    self.flush_buffer()
+                    
                 with open(filename, 'w', encoding='utf-8') as f:
                     f.write(self.debug_logger.get_log_text())
-                QMessageBox.information(self, "Успех", "Лог сохранен в файл")
-            except Exception as e:
-                QMessageBox.warning(self, "Ошибка", f"Не удалось сохранить лог: {str(e)}")
+                QMessageBox.information(self, "Успех", f"Лог сохранен в файл:\n{filename}")
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось сохранить лог: {str(e)}")
+    
+    def update_stats(self):
+        """Обновляет статистику"""
+        try:
+            self.stats_label.setText(f"Сообщений: {self.message_count} | Буфер: {len(self.log_buffer)}")
+        except Exception as e:
+            print(f"Error updating stats: {e}")
+    
+    def closeEvent(self, event):
+        """Обрабатывает закрытие окна"""
+        try:
+            # Сбрасываем буфер перед закрытием
+            if self.log_buffer:
+                self.flush_buffer()
+                
+            # Останавливаем таймеры
+            self.buffer_timer.stop()
+            self.stats_timer.stop()
+            
+            # Отключаем сигнал при закрытии окна
+            try:
+                self.debug_logger.new_log_message.disconnect(self.add_log_message_buffered)
+            except:
+                pass
+                
+        except Exception as e:
+            print(f"Error in close event: {e}")
+            
+        event.accept()
 
 
 class SequenceFinder(QThread):
@@ -336,14 +913,12 @@ class SequenceFinder(QThread):
                 
             file_path = os.path.join(directory, file)
             if os.path.isfile(file_path):
-                # Получаем расширение файла
                 _, ext = os.path.splitext(file)
                 ext = ext.lower()
                 
-                # Обрабатываем все файлы, независимо от расширения
+                # ОТПРАВКА СООБЩЕНИЯ О ПРОГРЕССЕ - обработка файла
                 self.progress_update.emit(f"Обработка: {file}")
                 
-                # Для ВСЕХ файлов извлекаем базовое имя и номер кадра
                 base_name, frame_num = self.extract_sequence_info(file)
                 self.debug_logger.log(f"  Файл: {file} -> base_name: {base_name}, frame_num: {frame_num}")
                 
@@ -359,19 +934,18 @@ class SequenceFinder(QThread):
         """Рекурсивно ищет последовательности файлов во всех подпапках"""
         all_sequences = {}
         
-        # Сначала ищем в текущей директории
+        # Обработка текущей директории
         files_by_extension = self.find_sequences_in_directory(directory)
         
-        # Формируем последовательности для текущей папки
+        # Формирование последовательностей
         sequences = self.form_sequences(files_by_extension, directory)
         all_sequences.update(sequences)
         
-        # Эмитируем найденные последовательности сразу
+        # Отправка найденных последовательностей
         for seq_name, seq_info in sequences.items():
             if not self._is_running:
                 break
             
-            # Формируем данные для таблицы
             sequence_data = {
                 'path': seq_info['path'],
                 'name': seq_info['display_name'],
@@ -387,7 +961,7 @@ class SequenceFinder(QThread):
         if not self._is_running:
             return all_sequences
             
-        # Затем рекурсивно в подпапках
+        # Рекурсивный поиск в подпапках
         try:
             for item in os.listdir(directory):
                 if not self._is_running:
@@ -395,6 +969,7 @@ class SequenceFinder(QThread):
                     
                 item_path = os.path.join(directory, item)
                 if os.path.isdir(item_path):
+                    # ОТПРАВКА СООБЩЕНИЯ О ПРОГРЕССЕ - обработка папки
                     self.progress_update.emit(f"Поиск в папке: {item}")
                     sub_sequences = self.find_sequences_recursive(item_path)
                     all_sequences.update(sub_sequences)
@@ -402,6 +977,58 @@ class SequenceFinder(QThread):
             pass
             
         return all_sequences
+    
+    def find_sequences_optimized(self, directory):
+        """Оптимизированный гибридный подход"""
+        all_sequences = {}
+        
+        try:
+            # Используем os.walk для основного обхода
+            for root, dirs, files in os.walk(directory):
+                if not self._is_running:
+                    break
+                    
+                self.progress_update.emit(f"Обработка: {os.path.basename(root)}")
+                
+                # Группируем файлы по расширениям
+                files_by_extension = defaultdict(list)
+                
+                for file in files:
+                    if not self._is_running:
+                        break
+                        
+                    file_path = os.path.join(root, file)
+                    _, ext = os.path.splitext(file)
+                    ext = ext.lower()
+                    
+                    base_name, frame_num = self.extract_sequence_info(file)
+                    files_by_extension[ext].append((base_name, frame_num, file_path, file))
+                
+                # Формируем последовательности для текущей папки
+                sequences = self.form_sequences(files_by_extension, root)
+                all_sequences.update(sequences)
+                
+                # Отправляем найденные последовательности
+                for seq_name, seq_info in sequences.items():
+                    if not self._is_running:
+                        break
+                    
+                    sequence_data = {
+                        'path': seq_info['path'],
+                        'name': seq_info['display_name'],
+                        'frame_range': seq_info['frame_range'],
+                        'frame_count': len(seq_info['files']),
+                        'files': seq_info['files'],
+                        'extension': seq_info['extension'],
+                        'type': seq_info['type']
+                    }
+                    self.sequence_found.emit(sequence_data)
+                    
+        except Exception as e:
+            self.debug_logger.log(f"Ошибка в оптимизированном поиске: {e}", "ERROR")
+        
+        return all_sequences
+
 
     def form_sequences(self, files_by_extension, directory):
         """Формирует последовательности из найденных файлов"""
@@ -786,7 +1413,8 @@ class SequenceFinder(QThread):
 
     def run(self):
         try:
-            self.find_sequences_recursive(self.directory)
+        #    self.find_sequences_recursive(self.directory)
+            self.find_sequences_optimized(self.directory)
         except Exception as e:
             self.debug_logger.log(f"Ошибка в потоке поиска: {e}", "ERROR")
         finally:
@@ -957,11 +1585,10 @@ class SettingsDialog(QDialog):
 
     def load_current_settings(self):
         """Загружает текущие настройки из родительского окна"""
-        # Загружаем активные поля метаданных в правильном порядке
         self.active_list.clear()
-        for field_name in self.parent.ordered_metadata_fields:
-            if field_name in self.parent.color_metadata:
-                color_data = self.parent.color_metadata[field_name]
+        for field_name in self.parent.settings_manager.ordered_metadata_fields:
+            if field_name in self.parent.settings_manager.color_metadata:
+                color_data = self.parent.settings_manager.color_metadata[field_name]
                 if isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
                     if not color_data.get('removed', False):
                         color = QColor(color_data['r'], color_data['g'], color_data['b'])
@@ -969,18 +1596,16 @@ class SettingsDialog(QDialog):
                         item.setBackground(color)
                         self.active_list.addItem(item)
         
-        # Загружаем корзину метаданных
         self.trash_list.clear()
-        for field_name, color_data in self.parent.removed_metadata.items():
+        for field_name, color_data in self.parent.settings_manager.removed_metadata.items():
             if isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
                 color = QColor(color_data['r'], color_data['g'], color_data['b'])
                 item = QListWidgetItem(field_name)
                 item.setBackground(color)
                 self.trash_list.addItem(item)
         
-        # Загружаем цвета последовательностей
         self.sequences_list.clear()
-        for seq_type, color_data in self.parent.sequence_colors.items():
+        for seq_type, color_data in self.parent.settings_manager.sequence_colors.items():
             if isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
                 color = QColor(color_data['r'], color_data['g'], color_data['b'])
                 item = QListWidgetItem(seq_type)
@@ -992,46 +1617,38 @@ class SettingsDialog(QDialog):
         if not field_name:
             QMessageBox.warning(self, "Ошибка", "Введите название поля")
             return
-        
-        # Проверяем, нет ли уже такого поля в активных
         for i in range(self.active_list.count()):
             if self.active_list.item(i).text() == field_name:
                 QMessageBox.warning(self, "Ошибка", "Это поле уже добавлено")
                 return
-        
-        # Проверяем, нет ли в корзине
+
         for i in range(self.trash_list.count()):
             if self.trash_list.item(i).text() == field_name:
                 reply = QMessageBox.question(self, "Восстановить поле", 
-                                           f"Поле '{field_name}' находится в корзине. Восстановить его?",
-                                           QMessageBox.Yes | QMessageBox.No)
+                                        f"Поле '{field_name}' находится в корзине. Восстановить его?",
+                                        QMessageBox.Yes | QMessageBox.No)
                 if reply == QMessageBox.Yes:
                     self.restore_field_from_trash(field_name)
                 return
         
-        # Выбираем цвет
         color = QColorDialog.getColor(QColor(200, 200, 255), self, "Выберите цвет для поля")
         if color.isValid():
-            # Добавляем поле в активные
-            self.parent.color_metadata[field_name] = {
+            self.parent.settings_manager.color_metadata[field_name] = {
                 'r': color.red(),
                 'g': color.green(), 
                 'b': color.blue(),
                 'removed': False
             }
             
-            # Добавляем поле в конец списка порядка
-            if field_name not in self.parent.ordered_metadata_fields:
-                self.parent.ordered_metadata_fields.append(field_name)
+            if field_name not in self.parent.settings_manager.ordered_metadata_fields:
+                self.parent.settings_manager.ordered_metadata_fields.append(field_name)
             
-            # Сохраняем настройки
-            self.parent.save_settings()
+            self.parent.settings_manager.save_settings()
             
-            # Обновляем интерфейс
             self.load_current_settings()
             
-            # Обновляем отображение метаданных
-            self.parent.update_metadata_colors()
+            if hasattr(self.parent, 'metadata_manager'):
+                self.parent.metadata_manager.update_metadata_colors()
             
             self.field_input.clear()
 
@@ -1041,30 +1658,25 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "Ошибка", "Введите тип последовательности")
             return
         
-        # Проверяем, нет ли уже такого типа
         for i in range(self.sequences_list.count()):
             if self.sequences_list.item(i).text() == seq_type:
                 QMessageBox.warning(self, "Ошибка", "Этот тип уже добавлен")
                 return
-        
-        # Выбираем цвет
+
         color = QColorDialog.getColor(QColor(200, 200, 255), self, "Выберите цвет для типа последовательности")
         if color.isValid():
-            # Добавляем тип в активные
-            self.parent.sequence_colors[seq_type] = {
+            self.parent.settings_manager.sequence_colors[seq_type] = {
                 'r': color.red(),
                 'g': color.green(), 
                 'b': color.blue()
             }
             
-            # Сохраняем настройки
-            self.parent.save_settings()
+            self.parent.settings_manager.save_settings()
             
-            # Обновляем интерфейс
             self.load_current_settings()
             
-            # Обновляем отображение последовательностей
-            self.parent.update_sequences_colors()
+            if hasattr(self.parent, 'tree_manager'):
+                self.parent.tree_manager.update_sequences_colors()
             
             self.sequence_type_input.clear()
 
@@ -1082,40 +1694,36 @@ class SettingsDialog(QDialog):
 
     def move_field_to_trash(self, field_name):
         """Перемещает поле в корзину"""
-        if field_name in self.parent.color_metadata:
-            # Сохраняем цвет в корзине
-            color_data = self.parent.color_metadata[field_name]
-            self.parent.removed_metadata[field_name] = color_data
+        if field_name in self.parent.settings_manager.color_metadata:
             
-            # Удаляем из активных
-            del self.parent.color_metadata[field_name]
+            color_data = self.parent.settings_manager.color_metadata[field_name]
+            self.parent.settings_manager.removed_metadata[field_name] = color_data
             
-            # Удаляем из списка порядка
-            if field_name in self.parent.ordered_metadata_fields:
-                self.parent.ordered_metadata_fields.remove(field_name)
             
-            # Сохраняем настройки
-            self.parent.save_settings()
+            del self.parent.settings_manager.color_metadata[field_name]
             
-            # Обновляем интерфейс
+            
+            if field_name in self.parent.settings_manager.ordered_metadata_fields:
+                self.parent.settings_manager.ordered_metadata_fields.remove(field_name)
+            
+            self.parent.settings_manager.save_settings()
+            
             self.load_current_settings()
             
-            # Обновляем отображение метаданных
-            self.parent.update_metadata_colors()
+            if hasattr(self.parent, 'metadata_manager'):
+                self.parent.metadata_manager.update_metadata_colors()
 
     def delete_sequence_type(self, seq_type):
         """Удаляет тип последовательности"""
-        if seq_type in self.parent.sequence_colors:
-            del self.parent.sequence_colors[seq_type]
+        if seq_type in self.parent.settings_manager.sequence_colors:
+            del self.parent.settings_manager.sequence_colors[seq_type]
             
-            # Сохраняем настройки
-            self.parent.save_settings()
+            self.parent.settings_manager.save_settings()
             
-            # Обновляем интерфейс
             self.load_current_settings()
             
-            # Обновляем отображение последовательностей
-            self.parent.update_sequences_colors()
+            if hasattr(self.parent, 'tree_manager'):
+                self.parent.tree_manager.update_sequences_colors()
 
     def restore_selected(self):
         current_row = self.trash_list.currentRow()
@@ -1125,26 +1733,21 @@ class SettingsDialog(QDialog):
 
     def restore_field_from_trash(self, field_name):
         """Восстанавливает поле из корзины"""
-        if field_name in self.parent.removed_metadata:
-            # Возвращаем в активные
-            color_data = self.parent.removed_metadata[field_name]
-            self.parent.color_metadata[field_name] = color_data
+        if field_name in self.parent.settings_manager.removed_metadata:
+            color_data = self.parent.settings_manager.removed_metadata[field_name]
+            self.parent.settings_manager.color_metadata[field_name] = color_data
             
-            # Добавляем в конец списка порядка, если его там нет
-            if field_name not in self.parent.ordered_metadata_fields:
-                self.parent.ordered_metadata_fields.append(field_name)
+            if field_name not in self.parent.settings_manager.ordered_metadata_fields:
+                self.parent.settings_manager.ordered_metadata_fields.append(field_name)
             
-            # Удаляем из корзины
-            del self.parent.removed_metadata[field_name]
+            del self.parent.settings_manager.removed_metadata[field_name]
             
-            # Сохраняем настройки
-            self.parent.save_settings()
-            
-            # Обновляем интерфейс
+            self.parent.settings_manager.save_settings()
             self.load_current_settings()
-            
-            # Обновляем отображение метаданных
-            self.parent.update_metadata_colors()
+
+            if hasattr(self.parent, 'metadata_manager'):
+                # ИСПОЛЬЗОВАТЬ update_metadata_colors вместо перечитывания
+                self.parent.metadata_manager.update_metadata_colors()
 
     def delete_permanently_selected(self):
         current_row = self.trash_list.currentRow()
@@ -1154,27 +1757,26 @@ class SettingsDialog(QDialog):
 
     def delete_field_permanently(self, field_name):
         """Окончательно удаляет поле"""
-        if field_name in self.parent.removed_metadata:
-            del self.parent.removed_metadata[field_name]
+        if field_name in self.parent.settings_manager.removed_metadata:
+            del self.parent.settings_manager.removed_metadata[field_name]
             
-            # Сохраняем настройки
-            self.parent.save_settings()
+            self.parent.settings_manager.save_settings()
             
-            # Обновляем интерфейс
             self.load_current_settings()
 
     def empty_trash(self):
         """Очищает корзину"""
         reply = QMessageBox.question(self, "Очистить корзину", 
-                                   "Вы уверены, что хотите окончательно удалить все поля из корзины?",
-                                   QMessageBox.Yes | QMessageBox.No)
+                                "Вы уверены, что хотите окончательно удалить все поля из корзины?",
+                                QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
-            self.parent.removed_metadata.clear()
+            # ИСПРАВЛЕНИЕ: Используем settings_manager
+            self.parent.settings_manager.removed_metadata.clear()
             
-            # Сохраняем настройки
-            self.parent.save_settings()
             
-            # Обновляем интерфейс
+            self.parent.settings_manager.save_settings()
+            
+            
             self.load_current_settings()
 
     def move_field_up(self):
@@ -1182,12 +1784,13 @@ class SettingsDialog(QDialog):
         current_row = self.active_list.currentRow()
         if current_row > 0:
             field_name = self.active_list.item(current_row).text()
-            # Обновляем порядок в родительском классе
-            index = self.parent.ordered_metadata_fields.index(field_name)
+            
+            # ИСПРАВЛЕНИЕ: Используем settings_manager
+            index = self.parent.settings_manager.ordered_metadata_fields.index(field_name)
             if index > 0:
-                self.parent.ordered_metadata_fields[index], self.parent.ordered_metadata_fields[index-1] = \
-                    self.parent.ordered_metadata_fields[index-1], self.parent.ordered_metadata_fields[index]
-                self.parent.save_settings()
+                self.parent.settings_manager.ordered_metadata_fields[index], self.parent.settings_manager.ordered_metadata_fields[index-1] = \
+                    self.parent.settings_manager.ordered_metadata_fields[index-1], self.parent.settings_manager.ordered_metadata_fields[index]
+                self.parent.settings_manager.save_settings()
                 self.load_current_settings()
                 self.active_list.setCurrentRow(current_row - 1)
 
@@ -1196,12 +1799,13 @@ class SettingsDialog(QDialog):
         current_row = self.active_list.currentRow()
         if current_row >= 0 and current_row < self.active_list.count() - 1:
             field_name = self.active_list.item(current_row).text()
-            # Обновляем порядок в родительском классе
-            index = self.parent.ordered_metadata_fields.index(field_name)
-            if index < len(self.parent.ordered_metadata_fields) - 1:
-                self.parent.ordered_metadata_fields[index], self.parent.ordered_metadata_fields[index+1] = \
-                    self.parent.ordered_metadata_fields[index+1], self.parent.ordered_metadata_fields[index]
-                self.parent.save_settings()
+            
+            # ИСПРАВЛЕНИЕ: Используем settings_manager
+            index = self.parent.settings_manager.ordered_metadata_fields.index(field_name)
+            if index < len(self.parent.settings_manager.ordered_metadata_fields) - 1:
+                self.parent.settings_manager.ordered_metadata_fields[index], self.parent.settings_manager.ordered_metadata_fields[index+1] = \
+                    self.parent.settings_manager.ordered_metadata_fields[index+1], self.parent.settings_manager.ordered_metadata_fields[index]
+                self.parent.settings_manager.save_settings()
                 self.load_current_settings()
                 self.active_list.setCurrentRow(current_row + 1)
 
@@ -1210,11 +1814,12 @@ class SettingsDialog(QDialog):
         current_row = self.active_list.currentRow()
         if current_row > 0:
             field_name = self.active_list.item(current_row).text()
-            # Обновляем порядок в родительском классе
-            if field_name in self.parent.ordered_metadata_fields:
-                self.parent.ordered_metadata_fields.remove(field_name)
-                self.parent.ordered_metadata_fields.insert(0, field_name)
-                self.parent.save_settings()
+            
+            # ИСПРАВЛЕНИЕ: Используем settings_manager
+            if field_name in self.parent.settings_manager.ordered_metadata_fields:
+                self.parent.settings_manager.ordered_metadata_fields.remove(field_name)
+                self.parent.settings_manager.ordered_metadata_fields.insert(0, field_name)
+                self.parent.settings_manager.save_settings()
                 self.load_current_settings()
                 self.active_list.setCurrentRow(0)
 
@@ -1223,11 +1828,12 @@ class SettingsDialog(QDialog):
         current_row = self.active_list.currentRow()
         if current_row >= 0 and current_row < self.active_list.count() - 1:
             field_name = self.active_list.item(current_row).text()
-            # Обновляем порядок в родительском классе
-            if field_name in self.parent.ordered_metadata_fields:
-                self.parent.ordered_metadata_fields.remove(field_name)
-                self.parent.ordered_metadata_fields.append(field_name)
-                self.parent.save_settings()
+            
+            # ИСПРАВЛЕНИЕ: Используем settings_manager
+            if field_name in self.parent.settings_manager.ordered_metadata_fields:
+                self.parent.settings_manager.ordered_metadata_fields.remove(field_name)
+                self.parent.settings_manager.ordered_metadata_fields.append(field_name)
+                self.parent.settings_manager.save_settings()
                 self.load_current_settings()
                 self.active_list.setCurrentRow(self.active_list.count() - 1)
 
@@ -1284,50 +1890,51 @@ class SettingsDialog(QDialog):
 
     def change_field_color(self, field_name):
         """Изменяет цвет поля"""
-        if field_name in self.parent.color_metadata:
-            current_color_data = self.parent.color_metadata[field_name]
+        # УБРАТЬ вызов display_metadata и использовать только update_metadata_colors
+        if field_name in self.parent.settings_manager.color_metadata:
+            current_color_data = self.parent.settings_manager.color_metadata[field_name]
             current_color = QColor(current_color_data['r'], current_color_data['g'], current_color_data['b'])
             
             color = QColorDialog.getColor(current_color, self, f"Выберите цвет для поля '{field_name}'")
             if color.isValid():
-                self.parent.color_metadata[field_name] = {
+                self.parent.settings_manager.color_metadata[field_name] = {
                     'r': color.red(),
                     'g': color.green(),
                     'b': color.blue(),
                     'removed': False
                 }
                 
-                # Сохраняем настройки
-                self.parent.save_settings()
-                
-                # Обновляем интерфейс
+                self.parent.settings_manager.save_settings()
                 self.load_current_settings()
                 
-                # Обновляем отображение метаданных
-                self.parent.update_metadata_colors()
+                if hasattr(self.parent, 'metadata_manager'):
+                    # ИСПОЛЬЗОВАТЬ update_metadata_colors вместо перечитывания
+                    self.parent.metadata_manager.update_metadata_colors()
 
     def change_sequence_color(self, seq_type):
         """Изменяет цвет типа последовательности"""
-        if seq_type in self.parent.sequence_colors:
-            current_color_data = self.parent.sequence_colors[seq_type]
+        # ИСПРАВЛЕНИЕ: Используем settings_manager
+        if seq_type in self.parent.settings_manager.sequence_colors:
+            current_color_data = self.parent.settings_manager.sequence_colors[seq_type]
             current_color = QColor(current_color_data['r'], current_color_data['g'], current_color_data['b'])
             
             color = QColorDialog.getColor(current_color, self, f"Выберите цвет для типа '{seq_type}'")
             if color.isValid():
-                self.parent.sequence_colors[seq_type] = {
+                self.parent.settings_manager.sequence_colors[seq_type] = {
                     'r': color.red(),
                     'g': color.green(),
                     'b': color.blue()
                 }
                 
-                # Сохраняем настройки
-                self.parent.save_settings()
                 
-                # Обновляем интерфейс
+                self.parent.settings_manager.save_settings()
+                
+                
                 self.load_current_settings()
                 
-                # Обновляем отображение последовательностей
-                self.parent.update_sequences_colors()
+                
+                if hasattr(self.parent, 'tree_manager'):
+                    self.parent.tree_manager.update_sequences_colors()
 
 
 
@@ -1434,16 +2041,6 @@ class CameraEditorDialog(QDialog):
             self.process_bulk_import(text)
 
     def process_bulk_import(self, text):
-        """Массовый импорт с детальной отладкой"""
-        # print("=== ОТЛАДКА ФОРМАТА ДАННЫХ ===")
-        # print("Исходный текст:")
-        # print(repr(text))
-        # print("Строки:")
-        # for i, line in enumerate(text.strip().split('\n')):
-        #     print(f"{i+1}: {repr(line)}")
-        # print("=== КОНЕЦ ОТЛАДКИ ===")
-
-
         """Массовый импорт камер и данных из текста - для данных с табуляциями"""
         if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
             self.parent_window.debug_logger.log(f"=== НАЧАЛО МАССОВОГО ИМПОРТА ===")
@@ -1543,11 +2140,6 @@ class CameraEditorDialog(QDialog):
         
         return False
 
-    def process_camera_buffer(self, buffer):
-        """Обрабатывает накопленные данные камеры"""
-        if len(buffer) >= 3 and hasattr(self, '_current_camera_from_buffer'):
-            resolution_w, resolution_h, sensor_size = buffer[:3]
-            self.add_camera_resolution(self._current_camera_from_buffer, resolution_w, resolution_h, sensor_size)
 
     def setup_cameras_tab(self):
         layout = QVBoxLayout()
@@ -1809,9 +2401,12 @@ class CameraEditorDialog(QDialog):
         return None
 
     def normalize_sensor(self, sensor_str):
-        """Нормализует строку размера сенсора к формату '20.00mm x 10.00mm'"""
-        if not sensor_str.strip():
+        """Унифицированная нормализация строки размера сенсора к формату '20.00mm x 10.00mm'"""
+        if not sensor_str or not sensor_str.strip():
             return sensor_str
+        
+        original_str = sensor_str
+        sensor_str = sensor_str.strip()
         
         # ПРОВЕРКА: если строка уже в нормализованном формате, возвращаем как есть
         if re.match(r'^\d+\.?\d*mm x \d+\.?\d*mm$', sensor_str):
@@ -1820,84 +2415,103 @@ class CameraEditorDialog(QDialog):
             return sensor_str
         
         if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
-            self.parent_window.debug_logger.log(f"Нормализация сенсора: '{sensor_str}'")
+            self.parent_window.debug_logger.log(f"Универсальная нормализация сенсора: '{original_str}'")
         
-        # Убираем все лишние символы и приводим к нижнему регистру
-        clean_str = sensor_str.lower().strip()
+        # Шаг 1: Подготовка строки
+        # Приводим к нижнему регистру
+        clean_str = sensor_str.lower()
         
-        # Заменяем запятые на точки для десятичных чисел
-        clean_str = clean_str.replace(',', '.')
+        # Заменяем различные варианты разделителей на стандартный [SEP]
+        separators = [' на ', ' x ', 'х', '*', '×', '\\', '/', '|', ';', ',']
+        for sep in separators:
+            clean_str = clean_str.replace(sep, '[SEP]')
         
-        # Удаляем все нечисловые символы, кроме точек, x и пробелов
-        clean_str = re.sub(r'[^\d\.x\s]', '', clean_str)
+        # Заменяем множественные пробелы на один пробел
+        clean_str = re.sub(r'\s+', ' ', clean_str)
         
-        # Заменяем различные варианты x на стандартный
-        clean_str = re.sub(r'[xх*×]', 'x', clean_str)
+        # Теперь заменяем одиночные пробелы на [SEP] только если они разделяют числа
+        # Но сначала сохраним текущее состояние
+        temp_str = clean_str
         
-        # Убираем лишние пробелы
-        clean_str = re.sub(r'\s+', ' ', clean_str).strip()
+        # Попробуем разбить по [SEP]
+        if '[SEP]' in clean_str:
+            parts = clean_str.split('[SEP]')
+            if len(parts) >= 2:
+                # Обрабатываем каждую часть отдельно
+                numbers = []
+                for part in parts:
+                    part = part.strip()
+                    # Извлекаем числа из каждой части
+                    part_numbers = re.findall(r'[\d]+[.,]?[\d]*', part)
+                    numbers.extend(part_numbers)
+                
+                if len(numbers) >= 2:
+                    # У нас есть как минимум два числа
+                    try:
+                        width = float(numbers[0].replace(',', '.'))
+                        height = float(numbers[1].replace(',', '.'))
+                        
+                        # Форматируем результат
+                        width_str = f"{width:.2f}".rstrip('0').rstrip('.') if '.' in f"{width:.2f}" else f"{width:.0f}"
+                        height_str = f"{height:.2f}".rstrip('0').rstrip('.') if '.' in f"{height:.2f}" else f"{height:.0f}"
+                        
+                        result = f"{width_str}mm x {height_str}mm"
+                        
+                        if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                            self.parent_window.debug_logger.log(f"Универсальная нормализация (разделитель [SEP]): '{original_str}' -> '{result}'")
+                        
+                        return result
+                    except ValueError as e:
+                        if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+                            self.parent_window.debug_logger.log(f"Ошибка преобразования чисел: {e}")
+        
+        # Шаг 2: Если не сработало, ищем два числа в строке любым способом
+        # Извлекаем все числа (с запятыми и точками как десятичными разделителями)
+        numbers = re.findall(r'[\d]+[.,]?[\d]*', clean_str)
         
         if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
-            self.parent_window.debug_logger.log(f"Очищенная строка сенсора: '{clean_str}'")
-        
-        # Пробуем извлечь числа (теперь с точками вместо запятых)
-        numbers = re.findall(r'(\d+\.?\d*)', clean_str)
-        
-        if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
-            self.parent_window.debug_logger.log(f"Извлеченные числа сенсора: {numbers}")
+            self.parent_window.debug_logger.log(f"Извлеченные числа: {numbers}")
         
         if len(numbers) >= 2:
             # Берем первые два числа
             try:
-                width = float(numbers[0])
-                height = float(numbers[1])
+                width = float(numbers[0].replace(',', '.'))
+                height = float(numbers[1].replace(',', '.'))
                 
-                # Форматируем с двумя знаками после запятой
-                width_str = f"{width:.2f}"
-                height_str = f"{height:.2f}"
-                
-                # Убираем .00 если число целое
-                if width.is_integer():
-                    width_str = f"{int(width)}.00"
-                if height.is_integer():
-                    height_str = f"{int(height)}.00"
+                # Форматируем с двумя знаками после запятой, но убираем лишние нули
+                width_str = f"{width:.2f}".rstrip('0').rstrip('.') if '.' in f"{width:.2f}" else f"{width:.0f}"
+                height_str = f"{height:.2f}".rstrip('0').rstrip('.') if '.' in f"{height:.2f}" else f"{height:.0f}"
                 
                 result = f"{width_str}mm x {height_str}mm"
                 
                 if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
-                    self.parent_window.debug_logger.log(f"Нормализованный сенсор: '{result}'")
+                    self.parent_window.debug_logger.log(f"Универсальная нормализация (два числа): '{original_str}' -> '{result}'")
                 
                 return result
                 
             except ValueError as e:
-                # Если не удалось преобразовать в числа, возвращаем исходную строку
                 if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
-                    self.parent_window.debug_logger.log(f"Ошибка преобразования чисел сенсора: {e}")
-                return sensor_str
+                    self.parent_window.debug_logger.log(f"Ошибка преобразования чисел: {e}")
         
         elif len(numbers) == 1:
             # Если только одно число, предполагаем квадратный сенсор
             try:
-                size = float(numbers[0])
-                size_str = f"{size:.2f}"
-                if size.is_integer():
-                    size_str = f"{int(size)}.00"
+                size = float(numbers[0].replace(',', '.'))
+                size_str = f"{size:.2f}".rstrip('0').rstrip('.') if '.' in f"{size:.2f}" else f"{size:.0f}"
                 result = f"{size_str}mm x {size_str}mm"
                 
                 if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
-                    self.parent_window.debug_logger.log(f"Квадратный сенсор: '{result}'")
+                    self.parent_window.debug_logger.log(f"Квадратный сенсор: '{original_str}' -> '{result}'")
                 
                 return result
             except ValueError as e:
                 if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
                     self.parent_window.debug_logger.log(f"Ошибка преобразования квадратного сенсора: {e}")
-                return sensor_str
         
-        else:
-            # Если чисел не найдено, возвращаем исходную строку
-            if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
-                self.parent_window.debug_logger.log(f"Числа не найдены, возвращаем исходную строку: '{sensor_str}'")
-            return sensor_str
+        # Если ничего не помогло, возвращаем исходную строку
+        if self.parent_window and hasattr(self.parent_window, 'debug_logger'):
+            self.parent_window.debug_logger.log(f"Не удалось нормализовать, возвращаем исходную строку: '{original_str}'")
+        return original_str
 
 
 
@@ -2043,7 +2657,7 @@ class CameraEditorDialog(QDialog):
     def load_rules_from_settings(self):
         """Загружает правила из настроек приложения"""
         # Загружаем правила для камер
-        camera_rules = self.parent_window.camera_detection_settings.get('camera_rules', [])
+        camera_rules = self.parent_window.settings_manager.camera_detection_settings.get('camera_rules', [])
         self.camera_rules_table.setRowCount(len(camera_rules))
         for row, rule in enumerate(camera_rules):
             self.camera_rules_table.setItem(row, 0, QTableWidgetItem(rule.get('field', '')))
@@ -2051,7 +2665,7 @@ class CameraEditorDialog(QDialog):
             self.camera_rules_table.setItem(row, 2, QTableWidgetItem(rule.get('camera', '')))
         
         # Загружаем правила для разрешений
-        resolution_rules = self.parent_window.camera_detection_settings.get('resolution_rules', [])
+        resolution_rules = self.parent_window.settings_manager.camera_detection_settings.get('resolution_rules', [])
         self.resolution_rules_table.setRowCount(len(resolution_rules))
         for row, rule in enumerate(resolution_rules):
             self.resolution_rules_table.setItem(row, 0, QTableWidgetItem(rule.get('field', '')))
@@ -2087,12 +2701,12 @@ class CameraEditorDialog(QDialog):
         
         # Обновляем настройки родительского окна
         if self.parent_window:
-            self.parent_window.camera_detection_settings = {
+            self.parent_window.settings_manager.camera_detection_settings = {
                 'camera_rules': camera_rules,
                 'resolution_rules': resolution_rules
             }
             # ДОБАВИТЬ: сразу сохраняем настройки
-            self.parent_window.save_settings()
+            self.parent_window.settings_manager.save_settings()
 
 
     def load_rules_from_settings(self):
@@ -2101,7 +2715,7 @@ class CameraEditorDialog(QDialog):
             return
             
         # Загружаем правила для камер
-        camera_rules = self.parent_window.camera_detection_settings.get('camera_rules', [])
+        camera_rules = self.parent_window.settings_manager.camera_detection_settings.get('camera_rules', [])
         self.camera_rules_table.setRowCount(len(camera_rules))
         for row, rule in enumerate(camera_rules):
             self.camera_rules_table.setItem(row, 0, QTableWidgetItem(rule.get('field', '')))
@@ -2109,7 +2723,7 @@ class CameraEditorDialog(QDialog):
             self.camera_rules_table.setItem(row, 2, QTableWidgetItem(rule.get('camera', '')))
         
         # Загружаем правила для разрешений
-        resolution_rules = self.parent_window.camera_detection_settings.get('resolution_rules', [])
+        resolution_rules = self.parent_window.settings_manager.camera_detection_settings.get('resolution_rules', [])
         self.resolution_rules_table.setRowCount(len(resolution_rules))
         for row, rule in enumerate(resolution_rules):
             self.resolution_rules_table.setItem(row, 0, QTableWidgetItem(rule.get('field', '')))
@@ -2235,8 +2849,8 @@ class CameraEditorDialog(QDialog):
         
         # Уведомляем родительское окно об изменениях
         if self.parent_window:
-            self.parent_window.load_camera_data()
-            self.parent_window.save_settings()
+            self.parent_window.camera_manager.load_camera_data()
+            self.parent_window.settings_manager.save_settings()
         
         super().accept()
 
@@ -2404,410 +3018,225 @@ class CameraEditorDialog(QDialog):
 
 
 
-class EXRMetadataViewer(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.sequences = {}
-        self.current_sequence_files = []
-        self.current_metadata = {}
+class SettingsManager:
+    """Менеджер настроек приложения"""
+    
+    def __init__(self, main_window):
+        self.main_window = main_window
+        self.debug_logger = main_window.debug_logger
         
-        # Инициализация логгера
-        self.debug_logger = DebugLogger(DEBUG)
+        # Настройки по умолчанию
+        self.color_metadata = {}
+        self.removed_metadata = {}
+        self.sequence_colors = {}
+        self.ordered_metadata_fields = []
+        self.use_art_for_mxf = False
+        self.default_metadata_tool = 'mediainfo'
+        self.camera_detection_settings = {
+            'camera_rules': [],
+            'resolution_rules': [
+                {'field': 'dataWindow', 'type': 'range'},
+                {'field': 'displayWindow', 'type': 'range'},
+                {'field': 'width', 'type': 'single_w'},
+                {'field': 'height', 'type': 'single_h'}
+            ]
+        }
         
-        # Структуры данных для цветов
-        self.color_metadata = {}  # {field_name: {'r': int, 'g': int, 'b': int, 'removed': False}}
-        self.removed_metadata = {}  # {field_name: {'r': int, 'g': int, 'b': int, 'removed': True}}
-        self.sequence_colors = {}  # {seq_type: {'r': int, 'g': int, 'b': int}}
-        self.ordered_metadata_fields = []  # Порядок отображения полей метаданных
-        
-        # Настройки
-        self.use_art_for_mxf = False  # По умолчанию используем MediaInfo для MXF
-        self.default_metadata_tool = 'mediainfo'  # Инструмент по умолчанию для чтения метаданных
-        
-        # Для древовидной структуры
-        self.tree_structure = {}  # {path: {subfolders: {}, sequences: []}}
-        self.folder_items = {}  # {folder_path: QTreeWidgetItem}
-        self.root_item = None
-
-        self.forced_metadata_tool = None  # Текущий форсированный инструмент
-        self.forced_metadata_file = None  # Файл, для которого применено форсированное чтение
-        
-        # Данные камер
-        self.camera_data = {}
-        self.camera_detection_settings = {}
-        self.load_camera_data()
-
-        
-        # Настройки для ExifTool
-        self.exiftool_path = None
-        self.exiftool_available = False
-        self.exiftool_check_completed = False  # Флаг завершения проверки
-        
-        # Запускаем проверку доступности ExifTool
-        self.check_exiftool_availability()
-
-        # Используем жесткий путь если задан, иначе локальный файл
+        # Путь к файлу настроек
         if SETTINGS_FILE_HARD:
             self.settings_file = SETTINGS_FILE_HARD
         else:
             self.settings_file = "exr_viewer_settings.json"
-
+        
         self.load_settings()
-        self.setup_ui()
 
-    def check_exiftool_availability(self):
-        """Проверяет доступность exiftool в системе - синхронная версия"""
+    def load_settings(self):
+        """Загружает настройки из файла"""
         try:
-            if EXIFTOOL_AVAILABLE:
-                # Пробуем выполнить простую команду для проверки
-                with exiftool.ExifTool() as et:
-                    version = et.execute("-ver")
-                    if version and version.strip():
-                        self.debug_logger.log(f"ExifTool доступен, версия: {version.strip()}")
-                        self.exiftool_available = True
-                    else:
-                        self.debug_logger.log("ExifTool не вернул версию", "WARNING")
-                        self.exiftool_available = False
-            else:
-                self.debug_logger.log("PyExifTool не установлен", "WARNING")
-                self.exiftool_available = False
+            if SETTINGS_FILE_HARD:
+                settings_dir = os.path.dirname(SETTINGS_FILE_HARD)
+                if settings_dir and not os.path.exists(settings_dir):
+                    os.makedirs(settings_dir, exist_ok=True)
+                    
+            if os.path.exists(self.settings_file):
+                with open(self.settings_file, 'r', encoding='utf-8') as f:
+                    settings = json.load(f)
+                    
+                    self.color_metadata = settings.get('color_metadata', {})
+                    self.removed_metadata = settings.get('removed_metadata', {})
+                    self.sequence_colors = settings.get('sequence_colors', {})
+                    self.ordered_metadata_fields = settings.get('ordered_metadata_fields', [])
+                    self.use_art_for_mxf = settings.get('use_art_for_mxf', False)
+                    self.default_metadata_tool = settings.get('default_metadata_tool', 'mediainfo')
+                    
+                    if not self.ordered_metadata_fields and self.color_metadata:
+                        self.ordered_metadata_fields = list(self.color_metadata.keys())
+
+                    self.camera_detection_settings = settings.get('camera_detection', {
+                        'camera_rules': [],
+                        'resolution_rules': [
+                            {'field': 'dataWindow', 'type': 'range'},
+                            {'field': 'displayWindow', 'type': 'range'},
+                            {'field': 'DataWindow', 'type': 'range'},  # Добавляем с большой буквы
+                            {'field': 'DisplayWindow', 'type': 'range'},  # Добавляем с большой буквы
+                            {'field': 'width', 'type': 'single_w'},
+                            {'field': 'height', 'type': 'single_h'}
+                        ]
+                    })
+                        
         except Exception as e:
-            self.debug_logger.log(f"ExifTool недоступен: {str(e)}", "WARNING")
-            self.exiftool_available = False
-        
-        # Устанавливаем флаг завершения проверки
-        self.exiftool_check_completed = True
-        
-        # Обновляем UI
-        self.update_exiftool_ui()
+            self.debug_logger.log(f"Ошибка загрузки настроек: {e}", "ERROR")
+            # Оставляем значения по умолчанию
 
-
-
-    def update_exiftool_ui(self):
-        """Обновляет UI после проверки доступности ExifTool"""
-        if not self.exiftool_check_completed:
-            return
-            
+    def save_settings(self):
+        """Сохраняет настройки в файл"""
         try:
-            # Сохраняем текущий выбор
-            current_text = self.metadata_tool_combo.currentText()
-            current_data = self.metadata_tool_combo.currentData()
+            if SETTINGS_FILE_HARD:
+                settings_dir = os.path.dirname(SETTINGS_FILE_HARD)
+                if settings_dir and not os.path.exists(settings_dir):
+                    os.makedirs(settings_dir, exist_ok=True)
+
+            # Очистка данных цветов
+            cleaned_color_metadata = {}
+            for field_name, color_data in self.color_metadata.items():
+                if isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
+                    cleaned_color_metadata[field_name] = color_data
             
-            self.metadata_tool_combo.clear()
+            cleaned_removed_metadata = {}
+            for field_name, color_data in self.removed_metadata.items():
+                if isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
+                    cleaned_removed_metadata[field_name] = color_data
             
-            # Заполняем только доступные инструменты
-            available_tools = {}
-            for tool_key, tool_name in METADATA_TOOLS.items():
-                if tool_key == 'mediainfo' and PYMEDIAINFO_AVAILABLE:
-                    available_tools[tool_key] = tool_name
-                elif tool_key == 'ffprobe':
-                    available_tools[tool_key] = tool_name
-                elif tool_key == 'exiftool' and self.exiftool_available:
-                    available_tools[tool_key] = tool_name
+            cleaned_sequence_colors = {}
+            for seq_type, color_data in self.sequence_colors.items():
+                if isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
+                    cleaned_sequence_colors[seq_type] = color_data
             
-            # Добавляем инструменты в комбобокс
-            for tool_key, tool_name in available_tools.items():
-                self.metadata_tool_combo.addItem(tool_name, tool_key)
+            settings = {
+                'color_metadata': cleaned_color_metadata,
+                'removed_metadata': cleaned_removed_metadata,
+                'sequence_colors': cleaned_sequence_colors,
+                'ordered_metadata_fields': self.ordered_metadata_fields,
+                'use_art_for_mxf': self.use_art_for_mxf,
+                'default_metadata_tool': self.default_metadata_tool,
+                'camera_detection': self.camera_detection_settings
+            }
             
-            # Восстанавливаем выбор
-            restore_success = False
-            if current_data in available_tools:
-                self.metadata_tool_combo.setCurrentText(METADATA_TOOLS[current_data])
-                restore_success = True
-            elif self.default_metadata_tool in available_tools:
-                self.metadata_tool_combo.setCurrentText(METADATA_TOOLS[self.default_metadata_tool])
-                restore_success = True
-            
-            if not restore_success and available_tools:
-                first_tool = list(available_tools.keys())[0]
-                self.metadata_tool_combo.setCurrentText(available_tools[first_tool])
-                self.default_metadata_tool = first_tool
-            
-            # Если комбобокс пуст, добавляем сообщение
-            if self.metadata_tool_combo.count() == 0:
-                self.metadata_tool_combo.addItem("Нет доступных инструментов", None)
-                self.metadata_tool_combo.setEnabled(False)
-            else:
-                self.metadata_tool_combo.setEnabled(True)
+            with open(self.settings_file, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, ensure_ascii=False, indent=2)
                 
         except Exception as e:
-            self.debug_logger.log(f"Ошибка обновления UI ExifTool: {str(e)}", "ERROR")
+            self.debug_logger.log(f"Ошибка сохранения настроек: {e}", "ERROR")
 
+    def get_field_color(self, field_name):
+        """Возвращает цвет для поля метаданных"""
+        if field_name in self.color_metadata:
+            color_data = self.color_metadata[field_name]
+            if isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
+                if not color_data.get('removed', False):
+                    return QColor(color_data['r'], color_data['g'], color_data['b'])
+        return None
 
+    def add_field_with_color(self, field_name, color):
+        """Добавляет поле с выбранным цветом"""
+        self.color_metadata[field_name] = {
+            'r': color.red(),
+            'g': color.green(),
+            'b': color.blue(),
+            'removed': False
+        }
+        
+        if field_name not in self.ordered_metadata_fields:
+            self.ordered_metadata_fields.append(field_name)
+        
+        self.save_settings()
 
+    def change_field_color(self, field_name, color):
+        """Изменяет цвет поля"""
+        if field_name in self.color_metadata:
+            self.color_metadata[field_name] = {
+                'r': color.red(),
+                'g': color.green(),
+                'b': color.blue(),
+                'removed': False
+            }
+            self.save_settings()
 
-    def _update_exiftool_ui_impl(self):
-        """Реализация обновления UI для ExifTool"""
-        try:
-            # Сохраняем текущий выбор
-            current_text = self.metadata_tool_combo.currentText()
-            current_data = self.metadata_tool_combo.currentData()
+    def remove_field_from_colors(self, field_name):
+        """Удаляет поле из цветных в корзину"""
+        if field_name in self.color_metadata:
+            color_data = self.color_metadata[field_name]
+            self.removed_metadata[field_name] = color_data
+            del self.color_metadata[field_name]
             
-            self.metadata_tool_combo.clear()
+            if field_name in self.ordered_metadata_fields:
+                self.ordered_metadata_fields.remove(field_name)
             
-            # Заполняем только доступные инструменты
-            available_tools = {}
-            for tool_key, tool_name in METADATA_TOOLS.items():
-                if tool_key == 'mediainfo' and PYMEDIAINFO_AVAILABLE:
-                    available_tools[tool_key] = tool_name
-                elif tool_key == 'ffprobe':
-                    # FFprobe обычно доступен если установлен ffmpeg
-                    available_tools[tool_key] = tool_name
-                elif tool_key == 'exiftool' and self.exiftool_available:
-                    available_tools[tool_key] = tool_name
+            self.save_settings()
+
+    def restore_field_from_trash(self, field_name):
+        """Восстанавливает поле из корзины"""
+        if field_name in self.removed_metadata:
+            color_data = self.removed_metadata[field_name]
+            self.color_metadata[field_name] = color_data
             
-            # Добавляем инструменты в комбобокс
-            for tool_key, tool_name in available_tools.items():
-                self.metadata_tool_combo.addItem(tool_name, tool_key)
+            if field_name not in self.ordered_metadata_fields:
+                self.ordered_metadata_fields.append(field_name)
             
-            # Восстанавливаем выбор
-            if current_data in available_tools:
-                # Восстанавливаем по данным
-                self.metadata_tool_combo.setCurrentText(METADATA_TOOLS[current_data])
-            elif self.default_metadata_tool in available_tools:
-                # Используем настройку по умолчанию
-                self.metadata_tool_combo.setCurrentText(METADATA_TOOLS[self.default_metadata_tool])
-            elif available_tools:
-                # Используем первый доступный
-                first_tool = list(available_tools.keys())[0]
-                self.metadata_tool_combo.setCurrentText(available_tools[first_tool])
-            
-            # Если комбобокс пуст, добавляем сообщение
-            if self.metadata_tool_combo.count() == 0:
-                self.metadata_tool_combo.addItem("Нет доступных инструментов", None)
-                self.metadata_tool_combo.setEnabled(False)
-            else:
-                self.metadata_tool_combo.setEnabled(True)
-                
-        except Exception as e:
-            self.debug_logger.log(f"Ошибка обновления UI ExifTool: {str(e)}", "ERROR")
+            del self.removed_metadata[field_name]
+            self.save_settings()
+
+    def delete_field_permanently(self, field_name):
+        """Окончательно удаляет поле"""
+        if field_name in self.removed_metadata:
+            del self.removed_metadata[field_name]
+            self.save_settings()
+
+    def empty_trash(self):
+        """Очищает корзину"""
+        self.removed_metadata.clear()
+        self.save_settings()
+
+    def add_sequence_color(self, seq_type, color):
+        """Добавляет цвет для типа последовательности"""
+        self.sequence_colors[seq_type] = {
+            'r': color.red(),
+            'g': color.green(),
+            'b': color.blue()
+        }
+        self.save_settings()
+
+    def change_sequence_color(self, seq_type, color):
+        """Изменяет цвет типа последовательности"""
+        if seq_type in self.sequence_colors:
+            self.sequence_colors[seq_type] = {
+                'r': color.red(),
+                'g': color.green(),
+                'b': color.blue()
+            }
+            self.save_settings()
+
+    def delete_sequence_color(self, seq_type):
+        """Удаляет цвет типа последовательности"""
+        if seq_type in self.sequence_colors:
+            del self.sequence_colors[seq_type]
+            self.save_settings()
 
 
 
 
 
-    def setup_ui(self):
-        self.setWindowTitle("Universal File Sequence Metadata Viewer - Tree View")
-        self.setGeometry(100, 100, 1200, 800)
-        
-        # Устанавливаем шрифт приложения
-        app_font = QFont()
-        app_font.setPointSize(DEFAULT_FONT_SIZE)
-        QApplication.setFont(app_font)
-        
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        layout = QVBoxLayout()
-        
-        # Панель выбора папки
-        folder_layout = QHBoxLayout()
-        self.folder_path = QLineEdit()
-        self.browse_btn = QPushButton("Обзор")
-        self.browse_btn.clicked.connect(self.browse_folder)
-        
-        folder_layout.addWidget(QLabel("Папка:"))
-        folder_layout.addWidget(self.folder_path)
-        folder_layout.addWidget(self.browse_btn)
-        
-        # Панель управления
-        control_layout = QHBoxLayout()
-        self.start_btn = QPushButton("СТАРТ")
-        self.stop_btn = QPushButton("СТОП")
-        self.continue_btn = QPushButton("ПРОДОЛЖИТЬ")
-        self.settings_btn = QPushButton("Настройки цветов")
 
-        # Добавляем галочку для чтения MXF через ART
-        self.art_checkbox = QCheckBox("Читать Arri и RED")
-        self.art_checkbox.setChecked(self.use_art_for_mxf)
-        self.art_checkbox.stateChanged.connect(self.toggle_art_usage)
+class CameraManager:
+    """Менеджер работы с камерами и сенсорами"""
+    
+    def __init__(self, main_window, settings_manager):
+        self.main_window = main_window
+        self.settings_manager = settings_manager
+        self.debug_logger = main_window.debug_logger
+        self.camera_data = {}
         
-        # Добавляем галочку для включения/выключения логирования
-        self.log_checkbox = QCheckBox("Логирование")
-        self.log_checkbox.setChecked(DEBUG)
-        self.log_checkbox.stateChanged.connect(self.toggle_logging)
-        
-        self.log_btn = QPushButton("Лог")
-        
-        # Добавляем выбор инструмента для чтения метаданных
-        self.metadata_tool_label = QLabel("Инструмент метаданных:")
-        self.metadata_tool_combo = QComboBox()
-        
-        # Изначально заполняем комбобокс пустыми данными
-        # Фактическое заполнение произойдет после проверки доступности инструментов
-        self.metadata_tool_combo.addItem("Проверка доступности...", None)
-        self.metadata_tool_combo.setEnabled(False)
-
-        # Запускаем отложенное обновление комбобокса
-        QTimer.singleShot(100, self._update_exiftool_ui_impl)
-        
-        self.metadata_tool_combo.currentIndexChanged.connect(self.change_metadata_tool)
-
-
-        # Заполняем комбобокс только доступными инструментами
-        available_tools = {}
-        for tool_key, tool_name in METADATA_TOOLS.items():
-            if tool_key == 'mediainfo' and PYMEDIAINFO_AVAILABLE:
-                available_tools[tool_key] = tool_name
-            elif tool_key == 'ffprobe':
-                # FFprobe обычно доступен если установлен ffmpeg
-                available_tools[tool_key] = tool_name
-            elif tool_key == 'exiftool' and self.exiftool_available:
-                available_tools[tool_key] = tool_name
-        
-        for tool_key, tool_name in available_tools.items():
-            self.metadata_tool_combo.addItem(tool_name, tool_key)
-        
-        # Устанавливаем инструмент по умолчанию
-        if self.default_metadata_tool in available_tools:
-            self.metadata_tool_combo.setCurrentText(METADATA_TOOLS[self.default_metadata_tool])
-        elif available_tools:
-            # Используем первый доступный инструмент
-            first_tool = list(available_tools.keys())[0]
-            self.default_metadata_tool = first_tool
-            self.metadata_tool_combo.setCurrentText(available_tools[first_tool])
-        
-        self.metadata_tool_combo.currentIndexChanged.connect(self.change_metadata_tool)
-        
-        
-        
-        self.start_btn.clicked.connect(self.start_search)
-        self.stop_btn.clicked.connect(self.stop_search)
-        self.continue_btn.clicked.connect(self.continue_search)
-        self.settings_btn.clicked.connect(self.open_settings)
-        self.log_btn.clicked.connect(self.show_log)
-
-
-        self.camera_editor_btn = QPushButton("Редактор камер")
-        self.camera_editor_btn.clicked.connect(self.open_camera_editor)
-        
-        control_layout.addWidget(self.start_btn)
-        control_layout.addWidget(self.stop_btn)
-        control_layout.addWidget(self.continue_btn)
-        control_layout.addWidget(self.settings_btn)
-        control_layout.addWidget(self.camera_editor_btn)
-        control_layout.addWidget(self.art_checkbox)
-        control_layout.addWidget(self.log_checkbox)
-        control_layout.addWidget(self.log_btn)
-        
-        control_layout.addWidget(self.metadata_tool_label)
-        control_layout.addWidget(self.metadata_tool_combo)
-        
-        control_layout.addStretch()
-        
-        # Создаем разделитель для таблиц
-        splitter = QSplitter(Qt.Vertical)
-        
-        # Верхняя часть - дерево последовательностей
-        sequences_widget = QWidget()
-        sequences_layout = QVBoxLayout()
-        sequences_layout.addWidget(QLabel("Структура папок и последовательностей:"))
-        
-        # Дерево последовательностей
-        self.sequences_tree = QTreeWidget()
-        self.sequences_tree.setColumnCount(5)
-        self.sequences_tree.setHeaderLabels(["Имя", "Тип", "Диапазон", "Количество", "Путь"])
-        
-        # Настраиваем ширины столбцов
-        self.sequences_tree.setColumnWidth(0, 500)  # Имя
-        self.sequences_tree.setColumnWidth(1, 200)  # Тип
-        self.sequences_tree.setColumnWidth(2, 200)  # Диапазон
-        self.sequences_tree.setColumnWidth(3, 100)   # Количество
-        self.sequences_tree.setColumnWidth(4, 400)  # Путь
-        
-        self.sequences_tree.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.sequences_tree.setSortingEnabled(True)
-        self.sequences_tree.itemSelectionChanged.connect(self.on_tree_item_selected)
-        self.sequences_tree.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.sequences_tree.customContextMenuRequested.connect(self.show_tree_context_menu)
-        
-        sequences_layout.addWidget(self.sequences_tree)
-        
-        # ДОБАВЛЯЕМ ПОИСК ПО ПОСЛЕДОВАТЕЛЬНОСТЯМ
-        sequences_search_layout = QHBoxLayout()
-        sequences_search_layout.addWidget(QLabel("Поиск по последовательностям:"))
-        self.sequences_search_input = QLineEdit()
-        self.sequences_search_input.setPlaceholderText("Введите текст для поиска...")
-        self.sequences_search_input.textChanged.connect(self.filter_sequences)
-        sequences_search_layout.addWidget(self.sequences_search_input)
-        
-        # Кнопка сброса поиска
-        self.clear_sequences_search_btn = QPushButton("Очистить")
-        self.clear_sequences_search_btn.clicked.connect(self.clear_sequences_search)
-        sequences_search_layout.addWidget(self.clear_sequences_search_btn)
-        
-        sequences_layout.addLayout(sequences_search_layout)
-        
-        sequences_widget.setLayout(sequences_layout)
-        
-        # Нижняя часть - таблица метаданных
-        metadata_widget = QWidget()
-        metadata_layout = QVBoxLayout()
-        
-        # Метка для отображения источника метаданных
-        self.metadata_source_label = QLabel("Метаданные выбранного элемента:")
-        metadata_layout.addWidget(self.metadata_source_label)
-        
-        self.metadata_table = QTableWidget()
-        self.metadata_table.setColumnCount(2)
-        self.metadata_table.setHorizontalHeaderLabels(["Поле", "Значение"])
-        
-        # Устанавливаем ширины столбцов по умолчанию
-        for i, width in enumerate(DEFAULT_COLUMN_WIDTHS['metadata']):
-            self.metadata_table.setColumnWidth(i, width)
-        
-        # Настраиваем режимы изменения размеров столбцов
-        self.metadata_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)
-        self.metadata_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        
-        # Устанавливаем фиксированную ширину для столбца "Поле"
-        self.metadata_table.setColumnWidth(0, DEFAULT_COLUMN_WIDTHS['metadata'][0])
-        
-        self.metadata_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.metadata_table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.metadata_table.customContextMenuRequested.connect(self.show_metadata_table_context_menu)
-        
-        # Поле поиска по метаданным
-        search_layout = QHBoxLayout()
-        search_layout.addWidget(QLabel("Поиск по метаданным:"))
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Введите текст для поиска...")
-        self.search_input.textChanged.connect(self.filter_metadata)
-        search_layout.addWidget(self.search_input)
-        
-        # Кнопка сброса поиска
-        self.clear_search_btn = QPushButton("Очистить")
-        self.clear_search_btn.clicked.connect(self.clear_search)
-        search_layout.addWidget(self.clear_search_btn)
-        
-        metadata_layout.addWidget(self.metadata_table)
-        metadata_layout.addLayout(search_layout)
-        metadata_widget.setLayout(metadata_layout)
-        
-        # Добавляем виджеты в разделитель
-        splitter.addWidget(sequences_widget)
-        splitter.addWidget(metadata_widget)
-        
-        # Устанавливаем начальные размеры (верхняя часть - 50%, нижняя - 50%)
-        splitter.setSizes([400, 400])
-        
-        # Поле прогресса
-        self.progress_label = QLabel("Готов к работе")
-        
-        layout.addLayout(folder_layout)
-        layout.addLayout(control_layout)
-        layout.addWidget(self.progress_label)
-        layout.addWidget(splitter)
-        
-        central_widget.setLayout(layout)
-        
-        # Изначально кнопки Стоп и Продолжить неактивны
-        self.stop_btn.setEnabled(False)
-        self.continue_btn.setEnabled(False)
-
-    def show_toast(self, message, duration=2000, opacity=0.5):
-        """Показывает toast сообщение"""
-        toast = ToastMessage(message, self, duration, opacity)
-        toast.show_toast()
+        self.load_camera_data()
 
     def load_camera_data(self):
         """Загружает данные камер из JSON файла"""
@@ -2815,19 +3244,13 @@ class EXRMetadataViewer(QMainWindow):
             if os.path.exists(CAMERA_SENSOR_DATA_FILE):
                 with open(CAMERA_SENSOR_DATA_FILE, 'r', encoding='utf-8') as f:
                     self.camera_data = json.load(f)
-                self.debug_logger.log(f"Данные камер загружены из {CAMERA_SENSOR_DATA_FILE}")  # ИСПРАВЛЕНО
+                self.debug_logger.log(f"Данные камер загружены из {CAMERA_SENSOR_DATA_FILE}")
             else:
-                # Если файла нет, создаем пустую структуру
                 self.camera_data = {"cameras": {}}
                 self.save_camera_data()
-                self.debug_logger.log(f"Создан пустой файл данных камер: {CAMERA_SENSOR_DATA_FILE}")  # ИСПРАВЛЕНО
-            
-            # Убираем вызовы методов, которые не существуют в этом классе
-            # self.update_cameras_list()
-            # self.load_rules_from_settings()
-            
+                self.debug_logger.log(f"Создан пустой файл данных камер: {CAMERA_SENSOR_DATA_FILE}")
         except Exception as e:
-            self.debug_logger.log(f"Ошибка загрузки данных камер: {e}", "ERROR")  # ИСПРАВЛЕНО
+            self.debug_logger.log(f"Ошибка загрузки данных камер: {e}", "ERROR")
             self.camera_data = {"cameras": {}}
 
     def save_camera_data(self):
@@ -2835,24 +3258,22 @@ class EXRMetadataViewer(QMainWindow):
         try:
             with open(CAMERA_SENSOR_DATA_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.camera_data, f, ensure_ascii=False, indent=2)
-            self.debug_logger.log(f"Данные камер сохранены в {CAMERA_SENSOR_DATA_FILE}")  # ИСПРАВЛЕНО
+            self.debug_logger.log(f"Данные камер сохранены в {CAMERA_SENSOR_DATA_FILE}")
         except Exception as e:
-            self.debug_logger.log(f"Ошибка сохранения данных камер: {e}", "ERROR")  # ИСПРАВЛЕНО
+            self.debug_logger.log(f"Ошибка сохранения данных камер: {e}", "ERROR")
 
     def detect_camera_and_sensor(self, metadata):
-        """Определяет камеру и разрешение из метаданных и возвращает размер сенсора и информацию об определении"""
+        """Определяет камеру и разрешение из метаданных и возвращает размер сенсора, информацию об определении и разрешение"""
         camera, camera_detection_info = self.detect_camera(metadata)
         resolution, resolution_detection_info = self.detect_resolution(metadata)
         
         detection_info = []
         
-        # Добавляем фактическую информацию о камере и разрешении
         if camera:
             detection_info.append(f"Камера: {camera}")
         if resolution:
             detection_info.append(f"Разрешение: {resolution}")
         
-        # Добавляем информацию о правилах
         if camera_detection_info:
             detection_info.extend(camera_detection_info)
         if resolution_detection_info:
@@ -2860,17 +3281,16 @@ class EXRMetadataViewer(QMainWindow):
         
         if camera and resolution:
             sensor_size = self.get_sensor_size(camera, resolution)
-            if sensor_size:
-                return sensor_size, detection_info
+            return sensor_size, detection_info, resolution
         
-        return None, detection_info
+        return None, detection_info, resolution
 
     def detect_camera(self, metadata):
         """Определяет камеру из метаданных на основе правил"""
         detection_info = []
         
-        # Сначала проверяем правила из настроек
-        for rule in self.camera_detection_settings.get('camera_rules', []):
+        # Проверяем правила из настроек
+        for rule in self.settings_manager.camera_detection_settings.get('camera_rules', []):
             field = rule.get('field')
             value = rule.get('value')
             camera = rule.get('camera')
@@ -2878,11 +3298,10 @@ class EXRMetadataViewer(QMainWindow):
                 detection_info.append(f"Правило: {field} = {value} → {camera}")
                 return camera, detection_info
         
-        # Затем проверяем metadata_names из базы камер
+        # Автоматическое определение по именам в метаданных
         for camera_name, camera_info in self.camera_data.get('cameras', {}).items():
             for metadata_name in camera_info.get('metadata_names', []):
                 if metadata_name:
-                    # Ищем точное совпадение в любом поле метаданных
                     for field, value in metadata.items():
                         if metadata_name == str(value):
                             detection_info.append(f"Авто: {field} = {value} → {camera_name}")
@@ -2892,181 +3311,184 @@ class EXRMetadataViewer(QMainWindow):
 
     def detect_resolution(self, metadata):
         """Определяет разрешение из метаданных на основе правил, выбирая наибольшее из найденных"""
-        resolutions = []  # Список всех найденных разрешений
-        found_rules = []  # Для хинта - какие правила сработали
+        resolutions = []
+        found_rules = []
         
-        for rule in self.camera_detection_settings.get('resolution_rules', []):
+        self.debug_logger.log(f"=== НАЧАЛО ОПРЕДЕЛЕНИЯ РАЗРЕШЕНИЯ ===")
+        
+        for rule in self.settings_manager.camera_detection_settings.get('resolution_rules', []):
             field = rule.get('field')
             rule_type = rule.get('type')
-            if field in metadata:
-                value = metadata[field]
-                parsed = self.parse_resolution(value, rule_type, field)
+            
+            # Ищем поле в метаданных (точное или частичное совпадение)
+            matching_keys = []
+            for metadata_key in metadata.keys():
+                if metadata_key.lower() == field.lower():
+                    matching_keys.append(metadata_key)
+                elif field.lower() in metadata_key.lower():
+                    matching_keys.append(metadata_key)
+                    self.debug_logger.log(f"Частичное совпадение: '{metadata_key}' содержит '{field}'")
+            
+            for actual_field in matching_keys:
+                value = metadata[actual_field]
+                self.debug_logger.log(f"Проверка поля '{actual_field}' с правилом '{rule_type}'...")
+                parsed = self.parse_resolution(value, rule_type, actual_field)
                 if parsed:
-                    found_rules.append(f"{field} ({rule_type})")
+                    found_rules.append(f"{actual_field} ({rule_type})")
                     
                     if rule_type == 'single_w':
-                        # Для ширины сохраняем как (width, None)
                         resolutions.append((parsed, None, f"single_w: {parsed}"))
                     elif rule_type == 'single_h':
-                        # Для высоты сохраняем как (None, height)
                         resolutions.append((None, parsed, f"single_h: {parsed}"))
                     else:
-                        # Для range и combined возвращается кортеж (width, height)
                         if isinstance(parsed, tuple) and len(parsed) == 2:
                             width, height = parsed
                             resolutions.append((width, height, f"{rule_type}: {width}x{height}"))
+                else:
+                    self.debug_logger.log(f"  Правило '{rule_type}' для поля '{actual_field}' не дало результатов")
         
-        # Выбираем наилучшее разрешение из всех найденных
         best_resolution = self.select_best_resolution(resolutions)
         
         if best_resolution:
             width, height, source = best_resolution
             if width and height:
-                return f"{width}x{height}", found_rules + [f"выбрано: {source}"]
+                resolution_str = f"{width}x{height}"
+                self.debug_logger.log(f"=== ИТОГ: Выбрано разрешение {resolution_str} (из {source}) ===")
+                return resolution_str, found_rules + [f"выбрано: {source}"]
             elif width:
-                return f"{width}x?", found_rules + [f"выбрано: {source}"]
+                resolution_str = f"{width}x?"
+                self.debug_logger.log(f"=== ИТОГ: Выбрано разрешение {resolution_str} (из {source}) ===")
+                return resolution_str, found_rules + [f"выбрано: {source}"]
             elif height:
-                return f"?x{height}", found_rules + [f"выбрано: {source}"]
+                resolution_str = f"?x{height}"
+                self.debug_logger.log(f"=== ИТОГ: Выбрано разрешение {resolution_str} (из {source}) ===")
+                return resolution_str, found_rules + [f"выбрано: {source}"]
         
+        self.debug_logger.log(f"=== ИТОГ: Разрешение не определено. Найдено {len(resolutions)} вариантов ===")
         return None, found_rules
 
     def select_best_resolution(self, resolutions):
         """Выбирает наилучшее разрешение из списка найденных"""
         if not resolutions:
+            self.debug_logger.log("Нет разрешений для выбора")
             return None
         
-        # Фильтруем полные разрешения (и width, и height)
+        self.debug_logger.log(f"Доступные разрешения для выбора: {resolutions}")
+        
+        # Полные разрешения (ширина и высота)
         full_resolutions = [(w, h, s) for w, h, s in resolutions if w is not None and h is not None]
         
         if full_resolutions:
-            # Сортируем полные разрешения по площади (ширина * высота) в убывающем порядке
+            # Сортируем по площади (ширина * высота), выбираем наибольшее
             full_resolutions.sort(key=lambda x: x[0] * x[1], reverse=True)
-            return full_resolutions[0]  # Возвращаем наибольшее
+            best = full_resolutions[0]
+            self.debug_logger.log(f"Выбрано полное разрешение {best[0]}x{best[1]} (площадь: {best[0] * best[1]})")
+            return best
         
-        # Если полных разрешений нет, ищем частичные
+        # Если нет полных, пытаемся скомбинировать ширины и высоты
         widths = [(w, s) for w, h, s in resolutions if w is not None and h is None]
         heights = [(h, s) for w, h, s in resolutions if w is None and h is not None]
         
         if widths and heights:
-            # Берем наибольшую ширину и наибольшую высоту
+            # Берем максимальную ширину и максимальную высоту
             max_width = max(widths, key=lambda x: x[0])
             max_height = max(heights, key=lambda x: x[0])
-            return max_width[0], max_height[0], f"комбинировано: {max_width[1]} + {max_height[1]}"
+            combined_resolution = (max_width[0], max_height[0], f"комбинировано: {max_width[1]} + {max_height[1]}")
+            self.debug_logger.log(f"Скомбинировано разрешение {max_width[0]}x{max_height[0]}")
+            return combined_resolution
         elif widths:
-            # Только ширины
             max_width = max(widths, key=lambda x: x[0])
-            return max_width[0], None, max_width[1]
+            result = (max_width[0], None, max_width[1])
+            self.debug_logger.log(f"Только ширина: {max_width[0]}")
+            return result
         elif heights:
-            # Только высоты
             max_height = max(heights, key=lambda x: x[0])
-            return None, max_height[0], max_height[1]
+            result = (None, max_height[0], max_height[1])
+            self.debug_logger.log(f"Только высота: {max_height[0]}")
+            return result
         
+        self.debug_logger.log("Не удалось выбрать разрешение")
         return None
-
-    def add_redline_metadata(self, file_path):
-        """Добавляет метаданные из R3D файла через REDline"""
-        try:
-            # Проверяем доступность REDline
-            if not os.path.exists(REDLINE_TOOL_PATH):
-                self.current_metadata["Ошибка REDline"] = "REDline не доступен по указанному пути"
-                self.debug_logger.log(f"REDline не доступен по пути: {REDLINE_TOOL_PATH}", "WARNING")
-                return
-            
-            # Запускаем REDline для получения метаданных
-            cmd = [
-                REDLINE_TOOL_PATH,
-                '--i', file_path,
-                '--useMeta',
-                '--printMeta', '1'
-            ]
-            
-            self.debug_logger.log(f"Запуск REDline: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            
-            if result.returncode == 0:
-                output = result.stdout
-                self.debug_logger.log(f"REDline успешно выполнен для {file_path}")
-                
-                # Парсим вывод REDline
-                lines = output.strip().split('\n')
-                for line in lines:
-                    line = line.strip()
-                    if not line or ':' not in line:
-                        continue
-                    
-                    # Разделяем по первому двоеточию
-                    parts = line.split(':', 1)
-                    if len(parts) == 2:
-                        key = parts[0].strip()
-                        value = parts[1].strip()
-                        
-                        # Добавляем префикс RED для идентификации источника
-                        self.current_metadata[f"RED {key}"] = value
-                
-                self.debug_logger.log(f"Прочитано {len(lines)} строк метаданных RED из {file_path}")
-                
-            else:
-                self.current_metadata["Ошибка REDline"] = f"REDline вернул ошибку: {result.stderr}"
-                self.debug_logger.log(f"Ошибка REDline для {file_path}: {result.stderr}", "ERROR")
-                
-        except subprocess.TimeoutExpired:
-            self.current_metadata["Ошибка REDline"] = "Таймаут выполнения REDline"
-            self.debug_logger.log(f"Таймаут REDline для {file_path}", "ERROR")
-        except Exception as e:
-            self.current_metadata["Ошибка REDline"] = f"Не удалось прочитать REDline метаданные: {str(e)}"
-            self.debug_logger.log(f"Ошибка чтения REDline для {file_path}: {str(e)}", "ERROR")
 
     def parse_resolution(self, value, rule_type, field_name=""):
         """Парсит разрешение из значения в зависимости от типа правила"""
         try:
             value_str = str(value)
+
+            self.debug_logger.log(f"Парсинг разрешения: поле='{field_name}', тип='{rule_type}', значение='{value_str}'")
             
             if rule_type == 'range':
-                # Ожидаем строку вида "(min_x, min_y) - (max_x, max_y)"
-                # Пример: "(0, 0) - (3839, 2159)" -> 3840x2160
+                # Ищем формат (min_x, min_y) - (max_x, max_y)
                 match = re.match(r'\((\d+),\s*(\d+)\)\s*-\s*\((\d+),\s*(\d+)\)', value_str)
                 if match:
                     min_x, min_y, max_x, max_y = map(int, match.groups())
                     width = max_x - min_x + 1
                     height = max_y - min_y + 1
+                    self.debug_logger.log(f"  [УСПЕХ] Распознан range формат: {width}x{height} (из {min_x},{min_y}-{max_x},{max_y})")
                     return width, height
                 
-                # Альтернативный формат: "0 0 3839 2159"
+                # Ищем формат четыре числа через пробелы
                 match = re.match(r'(\d+)\s+(\d+)\s+(\d+)\s+(\d+)', value_str)
                 if match:
                     min_x, min_y, max_x, max_y = map(int, match.groups())
                     width = max_x - min_x + 1
                     height = max_y - min_y + 1
-                    return width, height
-            
-            elif rule_type == 'single_w':
-                # Просто число - ширина
-                return int(value_str)
-            
-            elif rule_type == 'single_h':
-                # Просто число - высота
-                return int(value_str)
-            
-            elif rule_type == 'combined':
-                # Ожидаем строку вида "WxH" или "W x H" или "W:H"
-                match = re.match(r'(\d+)\s*[xX:]\s*(\d+)', value_str)
-                if match:
-                    width, height = map(int, match.groups())
+                    self.debug_logger.log(f"  [УСПЕХ] Распознан range формат (4 числа): {width}x{height} (из {min_x} {min_y} {max_x} {max_y})")
                     return width, height
                 
-                # Альтернативный формат: "Width: 3840 Height: 2160"
+                # Ищем формат DataWindow: x1 y1 x2 y2
+                match = re.match(r'^(?:\w+\s*:\s*)?(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$', value_str.strip())
+                if match:
+                    min_x, min_y, max_x, max_y = map(int, match.groups())
+                    width = max_x - min_x + 1
+                    height = max_y - min_y + 1
+                    self.debug_logger.log(f"  [УСПЕХ] Распознан DataWindow формат: {width}x{height}")
+                    return width, height
+                
+                self.debug_logger.log(f"  [НЕУДАЧА] Не удалось распознать range формат")
+                
+            elif rule_type == 'single_w':
+                # Ищем только ширину
+                numbers = re.findall(r'\d+', value_str)
+                if numbers:
+                    width = int(numbers[0])
+                    self.debug_logger.log(f"  [УСПЕХ] Распознана ширина: {width}")
+                    return width
+                self.debug_logger.log(f"  [НЕУДАЧА] Не удалось распознать ширину")
+                
+            elif rule_type == 'single_h':
+                # Ищем только высоту
+                numbers = re.findall(r'\d+', value_str)
+                if numbers:
+                    height = int(numbers[0])
+                    self.debug_logger.log(f"  [УСПЕХ] Распознана высота: {height}")
+                    return height
+                self.debug_logger.log(f"  [НЕУДАЧА] Не удалось распознать высоту")
+                
+            elif rule_type == 'combined':
+                # Ищем формат WxH или W x H, включая символ × и скобки
+                match = re.match(r'\(?\s*(\d+)\s*[xX×:]\s*(\d+)\s*\)?', value_str)
+                if match:
+                    width, height = map(int, match.groups())
+                    self.debug_logger.log(f"  [УСПЕХ] Распознан combined формат: {width}x{height}")
+                    return width, height
+                
+                # Ищем отдельно ширину и высоту в тексте
                 width_match = re.search(r'[Ww]idth:\s*(\d+)', value_str)
                 height_match = re.search(r'[Hh]eight:\s*(\d+)', value_str)
                 if width_match and height_match:
                     width = int(width_match.group(1))
                     height = int(height_match.group(1))
+                    self.debug_logger.log(f"  [УСПЕХ] Распознан combined (width/height): {width}x{height}")
                     return width, height
+                
+                self.debug_logger.log(f"  [НЕУДАЧА] Не удалось распознать combined формат")
         
         except Exception as e:
-            self.debug_logger.log(f"Ошибка парсинга разрешения для поля {field_name}: {e}", "ERROR")
+            self.debug_logger.log(f"  [ОШИБКА] Ошибка парсинга разрешения для поля {field_name}: {e}", "ERROR")
         
         return None
-    
+
     def get_sensor_size(self, camera, resolution):
         """Возвращает размер сенсора для заданной камеры и разрешения"""
         if camera in self.camera_data.get('cameras', {}):
@@ -3075,96 +3497,401 @@ class EXRMetadataViewer(QMainWindow):
                 return camera_info['resolutions'][resolution]
         return None
 
-    def open_camera_editor(self):
-        """Открывает редактор камер"""
-        # Проверяем, есть ли камеры в базе
-        if not self.camera_data.get('cameras'):
-            reply = QMessageBox.information(self, "База камер пуста", 
-                                        "База данных камер пуста. Хотите добавить первую камеру?",
-                                        QMessageBox.Yes | QMessageBox.No)
-            if reply == QMessageBox.Yes:
-                dialog = CameraEditorDialog(self)  # Передаем self как родитель
-                if dialog.exec_() == QDialog.Accepted:
-                    # Перезагружаем данные камер после закрытия редактора
-                    self.load_camera_data()
-        else:
-            dialog = CameraEditorDialog(self)  # Передаем self как родитель
-            dialog.exec_()
+    def add_camera_rule(self, field, value, camera):
+        """Добавляет правило для камеры"""
+        new_rule = {
+            'field': field,
+            'value': value,
+            'camera': camera
+        }
+        self.settings_manager.camera_detection_settings.setdefault('camera_rules', []).append(new_rule)
+        self.settings_manager.save_settings()
 
-    def filter_sequences(self):
-        """Фильтрует дерево последовательностей по введенному тексту"""
-        search_text = self.sequences_search_input.text().lower().strip()
+    def add_resolution_rule(self, field, rule_type):
+        """Добавляет правило для разрешения"""
+        new_rule = {
+            'field': field,
+            'type': rule_type
+        }
+        self.settings_manager.camera_detection_settings.setdefault('resolution_rules', []).append(new_rule)
+        self.settings_manager.save_settings()
+
+
+
+
+class TreeManager:
+    """Менеджер для работы с древовидной структурой файлов и последовательностей"""
+    
+    def __init__(self, main_window, sequence_manager):
+        self.main_window = main_window
+        self.sequence_manager = sequence_manager
+        self.debug_logger = main_window.debug_logger
+        self.settings_manager = main_window.settings_manager
         
-        # Если поле поиска пустое, показываем все элементы
+        # Структуры данных для дерева
+        self.tree_structure = {}
+        self.folder_items = {}
+        self.root_item = None
+        
+        # Ссылки на UI элементы
+        self.sequences_tree = None
+
+    def setup_ui(self, sequences_tree):
+        """Настраивает UI элементы дерева"""
+        self.sequences_tree = sequences_tree
+        
+        # Настройка столбцов
+        self.sequences_tree.setColumnCount(5)
+        self.sequences_tree.setHeaderLabels(["Имя", "Тип", "Диапазон", "Количество", "Путь"])
+        
+        # Настройка размеров столбцов
+        self.sequences_tree.setColumnWidth(0, 500)
+        self.sequences_tree.setColumnWidth(1, 200)
+        self.sequences_tree.setColumnWidth(2, 200)
+        self.sequences_tree.setColumnWidth(3, 100)
+        self.sequences_tree.setColumnWidth(4, 400)
+        
+        # Настройка поведения
+        self.sequences_tree.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.sequences_tree.setSortingEnabled(True)
+        self.sequences_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+
+    def clear_tree(self):
+        """Очищает дерево"""
+        self.sequences_tree.clear()
+        self.tree_structure.clear()
+        self.folder_items.clear()
+        self.root_item = None
+
+    def initialize_root(self, root_path):
+        """Инициализирует корневой элемент дерева"""
+        root_name = os.path.basename(root_path) if root_path != "/" else root_path
+        self.root_item = QTreeWidgetItem(self.sequences_tree, [
+            root_name, 
+            "Папка", 
+            "", 
+            "0", 
+            root_path
+        ])
+        self.root_item.setData(0, Qt.UserRole, {"type": "folder", "path": root_path})
+        self.folder_items[root_path] = self.root_item
+        self.root_item.setExpanded(True)
+        
+        self.debug_logger.log(f"Создан и раскрыт корневой элемент: {root_path}")
+
+    def add_sequence_to_tree(self, seq_info):
+        """Добавляет последовательность в дерево в реальном времени"""
+        try:
+            seq_path = seq_info['path']
+            display_name = seq_info.get('display_name', seq_info.get('name', 'Unknown'))
+            frame_range = seq_info.get('frame_range', '')
+            frame_count = seq_info.get('frame_count', 0)
+            seq_type = seq_info.get('type', 'unknown')
+            
+            self.debug_logger.log(f"add_sequence_to_tree: Добавляем '{display_name}' в папку '{seq_path}'")
+            
+            # Проверяем, что путь находится в корневой папке
+            root_path = self.main_window.ui_manager.folder_path.text()
+            if not seq_path.startswith(root_path):
+                self.debug_logger.log(f"  Пропускаем последовательность вне корневой папки: {seq_path}")
+                return
+            
+            # Находим или создаем родительскую папку
+            parent_item = self.find_or_create_folder_item(seq_path)
+            
+            # Создаем элемент последовательности
+            seq_item = QTreeWidgetItem([
+                display_name,
+                seq_type,
+                frame_range,
+                str(frame_count),
+                seq_path
+            ])
+            seq_item.setData(0, Qt.UserRole, {"type": "sequence", "info": seq_info})
+            
+            # Применяем цвет
+            self.color_tree_item_by_type(seq_item, seq_type)
+            
+            # Добавляем к родителю
+            parent_item.addChild(seq_item)
+            
+            # Раскрываем путь до корня
+            self.expand_path_to_root(parent_item)
+            
+            self.debug_logger.log(f"Успешно добавлено в дерево: {display_name}")
+            
+        except Exception as e:
+            self.debug_logger.log(f"Ошибка при добавлении в дерево: {str(e)}", "ERROR")
+            import traceback
+            self.debug_logger.log(f"Трассировка: {traceback.format_exc()}", "ERROR")
+
+    def find_or_create_folder_item(self, folder_path):
+        """Находит или создает элементы папок для указанного пути"""
+        # Если папка уже существует, возвращаем ее
+        if folder_path in self.folder_items:
+            item = self.folder_items[folder_path]
+            item.setExpanded(True)
+            return item
+        
+        self.debug_logger.log(f"find_or_create_folder_item: Создаем папку '{folder_path}'")
+        
+        root_path = self.main_window.ui_manager.folder_path.text()
+        
+        # Если это корневая папка
+        if folder_path == root_path:
+            return self.root_item
+        
+        # Вычисляем относительный путь
+        if folder_path.startswith(root_path):
+            relative_path = folder_path[len(root_path):].lstrip(os.sep)
+        else:
+            relative_path = folder_path
+        
+        # Разбиваем путь на части и создаем папки рекурсивно
+        parts = relative_path.split(os.sep)
+        current_path = root_path
+        parent_item = self.root_item
+        
+        for part in parts:
+            if not part:  # Пропускаем пустые части
+                continue
+                
+            current_path = os.path.join(current_path, part)
+            
+            # Создаем папку, если ее нет
+            if current_path not in self.folder_items:
+                folder_name = part
+                folder_item = QTreeWidgetItem([
+                    folder_name,
+                    "Папка",
+                    "",
+                    "", 
+                    "" 
+                ])
+                folder_item.setData(0, Qt.UserRole, {"type": "folder", "path": current_path})
+                
+                # Добавляем к родителю
+                parent_item.addChild(folder_item)
+                self.folder_items[current_path] = folder_item
+                
+                # Раскрываем папку
+                folder_item.setExpanded(True)
+                
+                self.debug_logger.log(f"  Создана и раскрыта папка: '{folder_name}' -> '{current_path}'")
+            
+            # Переходим к следующему уровню
+            parent_item = self.folder_items[current_path]
+            
+            # Убеждаемся, что папка раскрыта
+            if hasattr(parent_item, 'setExpanded'):
+                parent_item.setExpanded(True)
+        
+        return parent_item
+
+    def expand_path_to_root(self, item):
+        """Рекурсивно раскрывает все родительские элементы до корня"""
+        current_item = item
+        while current_item is not None:
+            current_item.setExpanded(True)
+            current_item = current_item.parent()
+
+    def color_tree_item_by_type(self, item, seq_type):
+        """Подкрашивает элемент дерева в зависимости от типа последовательности"""
+        color_data = self.settings_manager.sequence_colors.get(seq_type)
+        if color_data and isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
+            color = QColor(color_data['r'], color_data['g'], color_data['b'])
+        else:
+            # Цвет по умолчанию
+            color = QColor(240, 240, 240)
+        
+        # Применяем цвет ко всем столбцам
+        for col in range(self.sequences_tree.columnCount()):
+            item.setBackground(col, color)
+
+    def expand_all_tree_items(self):
+        """Раскрывает все элементы дерева"""
+        def expand_item(item):
+            item.setExpanded(True)
+            for i in range(item.childCount()):
+                expand_item(item.child(i))
+        
+        for i in range(self.sequences_tree.topLevelItemCount()):
+            expand_item(self.sequences_tree.topLevelItem(i))
+
+    def expand_folder_recursive(self, item):
+        """Рекурсивно раскрывает папку и все вложенные"""
+        item.setExpanded(True)
+        for i in range(item.childCount()):
+            child = item.child(i)
+            child_data = child.data(0, Qt.UserRole)
+            if child_data and child_data.get('type') == 'folder':
+                self.expand_folder_recursive(child)
+
+    def collapse_folder_recursive(self, item):
+        """Рекурсивно сворачивает папку и все вложенные"""
+        item.setExpanded(False)
+        for i in range(item.childCount()):
+            child = item.child(i)
+            child_data = child.data(0, Qt.UserRole)
+            if child_data and child_data.get('type') == 'folder':
+                self.collapse_folder_recursive(child)
+
+    def filter_sequences(self, search_text):
+        """Фильтрует дерево последовательностей по введенному тексту с правильным подсчетом секвенций"""
+        search_text = search_text.lower().strip()
+        
+        self.debug_logger.log(f"Поиск последовательностей: '{search_text}'")
+        
         if not search_text:
             self.show_all_tree_items()
+            self.debug_logger.log("Поиск очищен, показаны все элементы")
             return
         
-        # Скрываем все элементы сначала
         self.hide_all_tree_items()
         
-        # Показываем только соответствующие поиску элементы и их родителей
         root = self.sequences_tree.invisibleRootItem()
-        self.filter_tree_items(root, search_text)
+        visible_sequences_count = self.filter_tree_items_sequences_only(root, search_text)
+        
+        # Подсчитываем общее количество секвенций в дереве
+        total_sequences = self.count_all_sequences()
+        self.debug_logger.log(f"Найдено последовательностей: {visible_sequences_count} из {total_sequences}")
+        
+        # Если ничего не найдено, показываем сообщение
+        if visible_sequences_count == 0:
+            self.debug_logger.log("Ни одной последовательности не найдено по запросу")
+
+    def filter_tree_items_sequences_only(self, parent_item, search_text):
+        """Рекурсивно фильтрует элементы дерева, считая только секвенции"""
+        visible_sequences = 0
+        
+        for i in range(parent_item.childCount()):
+            child = parent_item.child(i)
+            child_data = child.data(0, Qt.UserRole)
+            
+            if child_data and child_data.get('type') == 'sequence':
+                # Это секвенция - проверяем соответствие поиску
+                matches_search = self.item_matches_search(child, search_text)
+                
+                if matches_search:
+                    child.setHidden(False)
+                    visible_sequences += 1
+                    # Раскрываем родителей для показа найденных элементов
+                    self.expand_parents(child)
+                    self.debug_logger.log(f"Секвенция показана: {child.text(0)}")
+                else:
+                    child.setHidden(True)
+                    self.debug_logger.log(f"Секвенция скрыта: {child.text(0)}")
+                    
+            elif child_data and child_data.get('type') == 'folder':
+                # Это папка - рекурсивно обрабатываем детей
+                child_visible_sequences = self.filter_tree_items_sequences_only(child, search_text)
+                
+                if child_visible_sequences > 0:
+                    # В папке есть видимые секвенции - показываем папку
+                    child.setHidden(False)
+                    visible_sequences += child_visible_sequences
+                    # Раскрываем папку
+                    child.setExpanded(True)
+                    self.debug_logger.log(f"Папка показана (содержит {child_visible_sequences} секвенций): {child.text(0)}")
+                else:
+                    # В папке нет видимых секвенций - скрываем
+                    child.setHidden(True)
+                    self.debug_logger.log(f"Папка скрыта (нет секвенций): {child.text(0)}")
+        
+        return visible_sequences
+
+    def count_all_sequences(self, parent_item=None):
+        """Рекурсивно подсчитывает общее количество секвенций в дереве"""
+        if parent_item is None:
+            parent_item = self.sequences_tree.invisibleRootItem()
+        
+        sequence_count = 0
+        
+        for i in range(parent_item.childCount()):
+            child = parent_item.child(i)
+            child_data = child.data(0, Qt.UserRole)
+            
+            if child_data and child_data.get('type') == 'sequence':
+                sequence_count += 1
+            elif child_data and child_data.get('type') == 'folder':
+                sequence_count += self.count_all_sequences(child)
+        
+        return sequence_count
+
+    def count_all_tree_items(self):
+        """Подсчитывает общее количество элементов в дереве"""
+        root = self.sequences_tree.invisibleRootItem()
+        return self.count_tree_items(root)
+
+    def count_tree_items(self, item):
+        """Рекурсивно подсчитывает количество элементов в дереве"""
+        count = 1  # Текущий элемент
+        for i in range(item.childCount()):
+            count += self.count_tree_items(item.child(i))
+        return count
 
     def filter_tree_items(self, parent_item, search_text):
-        """Рекурсивно фильтрует элементы дерева"""
+        """Рекурсивно фильтрует элементы дерева с улучшенным подсчетом"""
         visible_children = 0
         
         for i in range(parent_item.childCount()):
             child = parent_item.child(i)
             
-            # Проверяем, соответствует ли элемент поиску
             matches_search = self.item_matches_search(child, search_text)
             
-            # Рекурсивно проверяем детей
             child_visible_children = self.filter_tree_items(child, search_text)
             
-            # Показываем элемент если:
-            # 1. Он сам соответствует поиску ИЛИ
-            # 2. У него есть видимые дети
             if matches_search or child_visible_children > 0:
                 child.setHidden(False)
                 visible_children += 1
-                # Раскрываем родительские элементы, чтобы были видны найденные
+                
+                # Раскрываем родителей для показа найденных элементов
                 self.expand_parents(child)
+                
+                self.debug_logger.log(f"Элемент показан: {child.text(0)} (совпадение: {matches_search}, дочерние: {child_visible_children})")
             else:
                 child.setHidden(True)
+                self.debug_logger.log(f"Элемент скрыт: {child.text(0)}")
         
         return visible_children
 
     def item_matches_search(self, item, search_text):
         """Проверяет, соответствует ли элемент дерева поисковому запросу"""
-        # Проверяем все столбцы элемента
-        for col in range(self.sequences_tree.columnCount()):
-            text = item.text(col).lower()
-            if search_text in text:
-                return True
+        if not search_text:
+            return True
         
-        # Также проверяем данные элемента (если есть)
+        # Собираем весь текст элемента
+        item_text = ""
+        for col in range(self.sequences_tree.columnCount()):
+            item_text += " " + item.text(col).lower()
+        
         item_data = item.data(0, Qt.UserRole)
         if item_data:
             if item_data.get('type') == 'sequence':
                 seq_info = item_data.get('info', {})
-                # Проверяем различные поля последовательности
-                fields_to_check = [
-                    seq_info.get('name', ''),
-                    seq_info.get('display_name', ''),
-                    seq_info.get('type', ''),
-                    seq_info.get('frame_range', ''),
-                    seq_info.get('extension', ''),
-                    seq_info.get('path', '')
-                ]
-                for field in fields_to_check:
-                    if search_text in str(field).lower():
-                        return True
+                
+                item_text += " " + seq_info.get('name', '').lower()
+                item_text += " " + seq_info.get('display_name', '').lower()
+                item_text += " " + seq_info.get('type', '').lower()
+                item_text += " " + seq_info.get('frame_range', '').lower()
+                item_text += " " + seq_info.get('extension', '').lower()
+                item_text += " " + seq_info.get('path', '').lower()
+                
+                files = seq_info.get('files', [])
+                for file_path in files:
+                    item_text += " " + os.path.basename(file_path).lower()
+                    item_text += " " + file_path.lower()
+                    
             elif item_data.get('type') == 'folder':
-                # Для папок проверяем путь
                 path = item_data.get('path', '')
-                if search_text in path.lower():
-                    return True
+                item_text += " " + path.lower()
         
-        return False
+        # Проверяем соответствие
+        matches = search_text in item_text
+        if matches:
+            self.debug_logger.log(f"Найдено соответствие: '{search_text}' в '{item_text.strip()}'")
+        
+        return matches
 
     def expand_parents(self, item):
         """Раскрывает всех родителей элемента"""
@@ -3186,7 +3913,7 @@ class EXRMetadataViewer(QMainWindow):
             self.show_tree_items_recursive(child)
 
     def hide_all_tree_items(self):
-        """Скрывает все элементы дерева"""
+        """Скрывает все элементы дерева (кроме корневого)"""
         root = self.sequences_tree.invisibleRootItem()
         self.hide_tree_items_recursive(root)
 
@@ -3197,771 +3924,6 @@ class EXRMetadataViewer(QMainWindow):
             child.setHidden(True)
             self.hide_tree_items_recursive(child)
 
-    def clear_sequences_search(self):
-        """Очищает поле поиска последовательностей и показывает все элементы"""
-        self.sequences_search_input.clear()
-        self.show_all_tree_items()
-
-    def change_metadata_tool(self, index):
-        """Изменяет инструмент для чтения метаданных"""
-        tool_key = self.metadata_tool_combo.currentData()
-        
-        # Проверяем, что tool_key не None и существует в METADATA_TOOLS
-        if tool_key is None or tool_key not in METADATA_TOOLS:
-            self.debug_logger.log(f"Предупреждение: неверный ключ инструмента: {tool_key}", "WARNING")
-            return
-        
-        self.default_metadata_tool = tool_key
-        self.save_settings()
-        self.debug_logger.log(f"Изменен инструмент метаданных на: {METADATA_TOOLS[tool_key]}")
-
-
-    def show_tree_context_menu(self, position):
-        """Контекстное меню для дерева с добавлением ExifTool"""
-         # Отладочная информация
-        self.debug_logger.log(f"show_tree_context_menu: exiftool_available={self.exiftool_available}, check_completed={self.exiftool_check_completed}")
-        # Ждем завершения проверки ExifTool, если она еще не завершена
-        if not self.exiftool_check_completed:
-            self.debug_logger.log("Проверка ExifTool еще не завершена, ожидание...")
-            # Показываем сообщение и ждем
-            QApplication.processEvents()
-            # Даем немного времени для завершения проверки
-            import time
-            start_time = time.time()
-            while not self.exiftool_check_completed and time.time() - start_time < 3:  # Ждем до 3 секунд
-                time.sleep(0.1)
-                QApplication.processEvents()
-        
-        index = self.sequences_tree.indexAt(position)
-        if not index.isValid():
-            return
-            
-        item = self.sequences_tree.itemFromIndex(index)
-        item_data = item.data(0, Qt.UserRole)
-        
-        if not item_data:
-            return
-            
-        menu = QMenu(self)
-        
-        if item_data['type'] == 'folder':
-            open_action = menu.addAction("Открыть в проводнике")
-            expand_all_action = menu.addAction("Раскрыть все вложенные")
-            collapse_all_action = menu.addAction("Свернуть все вложенные")
-            
-            open_action.triggered.connect(lambda: self.open_in_explorer(item_data['path']))
-            expand_all_action.triggered.connect(lambda: self.expand_folder_recursive(item))
-            collapse_all_action.triggered.connect(lambda: self.collapse_folder_recursive(item))
-        else:
-            # Для последовательности или одиночного файла
-            seq_info = item_data['info']
-            open_action = menu.addAction("Открыть в проводнике")
-            open_action.triggered.connect(lambda: self.open_in_explorer(seq_info['path']))
-            
-            menu.addSeparator()
-            
-            # ВСЕГДА добавляем пункты для принудительного чтения метаданных для ЛЮБОГО файла
-            if len(seq_info['files']) > 0:
-                file_path = seq_info['files'][0]
-                extension = seq_info['extension'].lower()
-                
-                # Показываем эти пункты для ВСЕХ файлов, независимо от расширения
-                mediainfo_action = menu.addAction("Читать принудительно mediainfo")
-                ffprobe_action = menu.addAction("Читать принудительно ffprobe")
-                
-                # Добавляем ExifTool если доступен
-                exiftool_action = menu.addAction("Читать принудительно ExifTool")
-                if self.exiftool_available:
-                    exiftool_action.triggered.connect(lambda: self.force_read_metadata(file_path, extension, 'exiftool'))
-                    self.debug_logger.log(f"ExifTool доступен в контекстном меню для {file_path}")
-                else:
-                    exiftool_action.setEnabled(False)
-                    exiftool_action.setToolTip(f"ExifTool недоступен. Проверка завершена: {self.exiftool_check_completed}")
-                    self.debug_logger.log(f"ExifTool недоступен в контекстном меню для {file_path}")
-                
-                mediainfo_action.triggered.connect(lambda: self.force_read_metadata(file_path, extension, 'mediainfo'))
-                ffprobe_action.triggered.connect(lambda: self.force_read_metadata(file_path, extension, 'ffprobe'))
-                
-                menu.addSeparator()
-            
-            color_action = menu.addAction(f"Изменить цвет для '{seq_info['type']}'")
-            color_action.triggered.connect(lambda: self.change_sequence_color(seq_info['type']))
-        
-        menu.exec_(self.sequences_tree.viewport().mapToGlobal(position))
-
-
-
-    def force_read_metadata(self, file_path, extension, tool):
-        """Принудительно читает метаданные с помощью указанного инструмента"""
-        self.debug_logger.log(f"Принудительное чтение метаданных для {file_path} с помощью {tool}")
-        
-        # Устанавливаем состояние форсированного чтения
-        self.forced_metadata_tool = tool
-        self.forced_metadata_file = file_path
-        
-        # Читаем метаданные с выбранным инструментом
-        self.display_metadata(file_path, extension, forced_tool=tool)
-
-    def toggle_art_usage(self, state):
-        """Включает/выключает использование ART для MXF файлов"""
-        self.use_art_for_mxf = state == Qt.Checked
-        self.save_settings()
-        if state == Qt.Checked:
-            self.debug_logger.log("Включено чтение MXF через ART")
-        else:
-            self.debug_logger.log("Выключено чтение MXF через ART")
-
-    def build_tree_structure(self):
-        """Строит полную древовидную структуру папок и последовательностей"""
-        self.tree_structure = {}
-        root_path = self.folder_path.text()
-        
-        # Создаем корневой узел
-        self.tree_structure[root_path] = {
-            'name': os.path.basename(root_path) if root_path else "Корневая папка",
-            'full_path': root_path,
-            'subfolders': {},
-            'sequences': [],
-            'files': []
-        }
-        
-        # Собираем все уникальные пути из последовательностей, которые находятся внутри корневой папки
-        all_paths = set()
-        for seq_info in self.sequences.values():
-            path = seq_info['path']
-            
-            # Добавляем только пути, которые находятся внутри корневой папки
-            if path.startswith(root_path):
-                all_paths.add(path)
-                
-                # Добавляем все родительские пути внутри корневой папки
-                parent_path = path
-                while (parent_path and 
-                       parent_path.startswith(root_path) and 
-                       parent_path != root_path and 
-                       os.path.dirname(parent_path) != parent_path):
-                    all_paths.add(parent_path)
-                    parent_path = os.path.dirname(parent_path)
-        
-        # Создаем узлы для всех путей
-        for path in sorted(all_paths):
-            if path not in self.tree_structure:
-                self.tree_structure[path] = {
-                    'name': os.path.basename(path),
-                    'full_path': path,
-                    'subfolders': {},
-                    'sequences': [],
-                    'files': []
-                }
-        
-        # Добавляем последовательности в соответствующие папки
-        for seq_info in self.sequences.values():
-            path = seq_info['path']
-            
-            # Убедимся, что у последовательности есть все необходимые поля
-            self.ensure_sequence_fields(seq_info)
-            
-            # Добавляем последовательность в папку только если она внутри корневой папки
-            if path in self.tree_structure:
-                self.tree_structure[path]['sequences'].append(seq_info)
-        
-        # Строим иерархию подпапок
-        self.build_folder_hierarchy(root_path)
-
-    def build_folder_hierarchy(self, root_path):
-        """Строит иерархию подпапок для корневой папки"""
-        if root_path not in self.tree_structure:
-            return
-            
-        # Создаем копию ключей для безопасной итерации
-        all_paths = list(self.tree_structure.keys())
-        
-        for path in all_paths:
-            if path == root_path:
-                continue
-                
-            parent_path = os.path.dirname(path)
-            
-            # Если родитель существует в структуре, добавляем текущую папку как подпапку
-            if parent_path in self.tree_structure:
-                # Убедимся, что подпапка еще не добавлена
-                if path not in self.tree_structure[parent_path]['subfolders']:
-                    self.tree_structure[parent_path]['subfolders'][path] = self.tree_structure[path]
-
-    def build_subfolder_hierarchy(self, parent_path, parent_info):
-        """Рекурсивно строит иерархию для подпапки"""
-        # Находим все подпапки текущей папки
-        subfolders = {}
-        for path, folder_info in self.tree_structure.items():
-            if os.path.dirname(path) == parent_path:
-                subfolders[path] = folder_info
-                # Добавляем в подпапки родителя
-                parent_info['subfolders'][path] = folder_info
-                # Рекурсивно обрабатываем подпапки
-                self.build_subfolder_hierarchy(path, folder_info)
-
-    def ensure_sequence_fields(self, seq_info):
-        """Убеждается, что у последовательности есть все необходимые поля"""
-        if 'name' not in seq_info:
-            seq_info['name'] = os.path.basename(seq_info.get('first_file', 'Unknown'))
-        if 'display_name' not in seq_info:
-            seq_info['display_name'] = seq_info['name']
-        if 'frame_range' not in seq_info:
-            seq_info['frame_range'] = ''
-        if 'frame_count' not in seq_info:
-            seq_info['frame_count'] = len(seq_info.get('files', []))
-        if 'type' not in seq_info:
-            seq_info['type'] = 'unknown'
-
-    def create_parent_folders(self, path, root_path):
-        """Рекурсивно создает родительские папки в структуре"""
-        if path == root_path or not path.startswith(root_path):
-            return
-            
-        parent_path = os.path.dirname(path)
-        
-        # Если родительской папки нет, создаем ее рекурсивно
-        if parent_path not in self.tree_structure and parent_path.startswith(root_path):
-            self.create_parent_folders(parent_path, root_path)
-        
-        # Создаем текущую папку
-        if path not in self.tree_structure:
-            self.tree_structure[path] = {
-                'name': os.path.basename(path),
-                'full_path': path,
-                'subfolders': {},
-                'sequences': [],
-                'files': []
-            }
-
-    def populate_tree_widget(self):
-        """Заполняет дерево на основе древовидной структуры"""
-        self.sequences_tree.clear()
-        root_path = self.folder_path.text()
-        
-        if root_path not in self.tree_structure:
-            self.debug_logger.log(f"populate_tree_widget: корневой путь {root_path} не найден в tree_structure")
-            return
-            
-        root_info = self.tree_structure[root_path]
-        
-        # Создаем корневой элемент
-        root_item = QTreeWidgetItem(self.sequences_tree, [
-            root_info['name'], 
-            "Папка", 
-            "", 
-            "", #str(len(root_info['sequences'])), 
-            "" #root_path
-        ])
-        root_item.setData(0, Qt.UserRole, {"type": "folder", "path": root_path})
-        
-        # Добавляем подпапки и последовательности корневой папки
-        self.add_tree_children(root_item, root_info)
-        
-        # Раскрываем ВСЕ узлы дерева
-        self.expand_all_tree_items(root_item)
-        
-        # Логируем результат
-        total_sequences = sum(len(folder_info['sequences']) for folder_info in self.tree_structure.values())
-        total_folders = len(self.tree_structure)
-        self.debug_logger.log(f"populate_tree_widget: отображено {total_sequences} последовательностей в {total_folders} папках")
-        
-        # Дополнительная информация для отладки
-        expanded_count = self.count_expanded_items(root_item)
-        self.debug_logger.log(f"Раскрыто элементов дерева: {expanded_count}")
-
-    def expand_all_tree_items(self, item):
-        """Рекурсивно раскрывает все элементы дерева"""
-        item.setExpanded(True)
-        for i in range(item.childCount()):
-            child = item.child(i)
-            self.expand_all_tree_items(child)
-
-    def count_expanded_items(self, item):
-        """Рекурсивно подсчитывает количество раскрытых элементов"""
-        count = 1  # Текущий элемент
-        if item.isExpanded():
-            for i in range(item.childCount()):
-                count += self.count_expanded_items(item.child(i))
-        return count
-
-    def expand_all_tree_items_iterative(self, root_item):
-        """Раскрывает все элементы дерева итеративно (без рекурсии)"""
-        stack = [root_item]
-        while stack:
-            item = stack.pop()
-            item.setExpanded(True)
-            # Добавляем всех детей в стек
-            for i in range(item.childCount()):
-                stack.append(item.child(i))
-
-    def expand_first_levels(self, item, levels):
-        """Рекурсивно расширяет первые несколько уровней дерева"""
-        if levels <= 0:
-            return
-            
-        item.setExpanded(True)
-        for i in range(item.childCount()):
-            child = item.child(i)
-            child_data = child.data(0, Qt.UserRole)
-            if child_data and child_data.get('type') == 'folder':
-                self.expand_first_levels(child, levels - 1)
-
-    def add_tree_children(self, parent_item, folder_info):
-        """Рекурсивно добавляет дочерние элементы в дерево"""
-        # Сначала добавляем подпапки
-        for subfolder_path, subfolder_info in sorted(folder_info['subfolders'].items(), 
-                                                key=lambda x: x[1]['name'].lower()):
-            subfolder_item = QTreeWidgetItem(parent_item, [
-                subfolder_info['name'], 
-                "Папка", 
-                "", 
-                "", #str(len(subfolder_info['sequences'])), 
-                "" #subfolder_path
-            ])
-            subfolder_item.setData(0, Qt.UserRole, {"type": "folder", "path": subfolder_path})
-            
-            # Рекурсивно добавляем содержимое подпапки
-            self.add_tree_children(subfolder_item, subfolder_info)
-        
-        # Затем добавляем последовательности текущей папки
-        for seq_info in sorted(folder_info['sequences'], 
-                            key=lambda x: x.get('display_name', x.get('name', 'Unknown')).lower()):
-            display_name = seq_info.get('display_name', seq_info.get('name', 'Unknown'))
-            frame_range = seq_info.get('frame_range', '')
-            frame_count = seq_info.get('frame_count', 0)
-            seq_type = seq_info.get('type', 'unknown')
-            
-            seq_item = QTreeWidgetItem(parent_item, [
-                display_name,
-                seq_type,
-                frame_range,
-                str(frame_count),
-                seq_info.get('path', '')
-            ])
-            seq_item.setData(0, Qt.UserRole, {"type": "sequence", "info": seq_info})
-            
-            # Применяем цвет в зависимости от типа последовательности
-            self.color_tree_item_by_type(seq_item, seq_type)
-
-    def is_item_already_added(self, parent_item, path):
-        """Проверяет, был ли элемент с таким путем уже добавлен"""
-        for i in range(parent_item.childCount()):
-            child = parent_item.child(i)
-            child_data = child.data(0, Qt.UserRole)
-            if child_data and child_data.get('path') == path:
-                return True
-        return False
-
-    def color_tree_item_by_type(self, item, seq_type):
-        """Подкрашивает элемент дерева в зависимости от типа последовательности"""
-        color_data = self.sequence_colors.get(seq_type)
-        if color_data and isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
-            color = QColor(color_data['r'], color_data['g'], color_data['b'])
-        else:
-            # Цвет по умолчанию - серый
-            color = QColor(240, 240, 240)
-        
-        # Применяем цвет ко всем столбцам элемента
-        for col in range(self.sequences_tree.columnCount()):
-            item.setBackground(col, color)
-
-    def on_tree_item_selected(self):
-        """Обрабатывает выбор элемента в дереве"""
-        selected_items = self.sequences_tree.selectedItems()
-        if not selected_items:
-            return
-            
-        item = selected_items[0]
-        item_data = item.data(0, Qt.UserRole)
-        
-        if not item_data:
-            return
-            
-        if item_data['type'] == 'sequence':
-            # Для последовательности показываем метаданные первого файла
-            seq_info = item_data['info']
-            self.current_sequence_files = seq_info['files']
-            extension = seq_info['extension']
-            
-            if self.current_sequence_files:
-                current_file = self.current_sequence_files[0]
-                
-                # Сбрасываем форсированное чтение, если выбран другой файл
-                if self.forced_metadata_file != current_file:
-                    self.forced_metadata_tool = None
-                    self.forced_metadata_file = None
-                    
-                # Определяем, использовать ли форсированный инструмент
-                if self.forced_metadata_tool and self.forced_metadata_file == current_file:
-                    self.display_metadata(current_file, extension, forced_tool=self.forced_metadata_tool)
-                else:
-                    self.display_metadata(current_file, extension)
-        else:
-            # Для папки очищаем метаданные и состояние форсированного чтения
-            self.metadata_table.setRowCount(0)
-            self.current_sequence_files = []
-            self.current_metadata = {}
-            self.forced_metadata_tool = None
-            self.forced_metadata_file = None
-            self.metadata_source_label.setText("Метаданные выбранного элемента:")
-
-    def expand_folder_recursive(self, item):
-        """Рекурсивно раскрывает папку и все вложенные"""
-        item.setExpanded(True)
-        for i in range(item.childCount()):
-            child = item.child(i)
-            child_data = child.data(0, Qt.UserRole)
-            if child_data and child_data.get('type') == 'folder':
-                self.expand_folder_recursive(child)
-
-    def collapse_folder_recursive(self, item):
-        """Рекурсивно сворачивает папку и все вложенные"""
-        item.setExpanded(False)
-        for i in range(item.childCount()):
-            child = item.child(i)
-            child_data = child.data(0, Qt.UserRole)
-            if child_data and child_data.get('type') == 'folder':
-                self.collapse_folder_recursive(child)
-
-    def toggle_logging(self, state):
-        """Включает/выключает логирование"""
-        enabled = state == Qt.Checked
-        self.debug_logger.set_debug_enabled(enabled)
-        if enabled:
-            self.debug_logger.log("Логирование включено")
-        else:
-            self.debug_logger.log("Логирование выключено")
-
-    def browse_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Выберите папку с файлами")
-        if folder:
-            self.folder_path.setText(folder)
-
-    def start_search(self):
-        folder = self.folder_path.text()
-        if not folder or not os.path.exists(folder):
-            QMessageBox.warning(self, "Ошибка", "Укажите существующую папку")
-            return
-        
-        self.debug_logger.log(f"=== НАЧАЛО ПОИСКА В ПАПКЕ: {folder} ===")
-        
-        # Полностью останавливаем и удаляем предыдущий поиск
-        if hasattr(self, 'sequence_finder'):
-            self.debug_logger.log("Останавливаем предыдущий поиск...")
-            self.sequence_finder.stop()
-            self.sequence_finder.wait(2000)
-            try:
-                self.sequence_finder.quit()
-                self.sequence_finder.wait(1000)
-            except:
-                pass
-            del self.sequence_finder
-        
-        # Очищаем все данные
-        self.debug_logger.log("Очищаем данные...")
-        self.sequences_tree.clear()
-        self.metadata_table.setRowCount(0)
-        self.sequences.clear()
-        self.current_sequence_files = []
-        self.current_metadata = {}
-        self.folder_items = {}  # Очищаем словарь папок
-        self.metadata_source_label.setText("Метаданные выбранного элемента:")
-        
-        # Создаем корневой элемент
-        root_path = folder
-        root_name = os.path.basename(root_path) if root_path != "/" else root_path
-        self.root_item = QTreeWidgetItem(self.sequences_tree, [
-            root_name, 
-            "Папка", 
-            "", 
-            "0", 
-            root_path
-        ])
-        self.root_item.setData(0, Qt.UserRole, {"type": "folder", "path": root_path})
-        self.folder_items[root_path] = self.root_item
-        
-        # СРАЗУ РАСКРЫВАЕМ корневой элемент
-        self.root_item.setExpanded(True)
-        
-        self.debug_logger.log(f"Создан и раскрыт корневой элемент: {root_path}")
-        self.debug_logger.log(f"Словарь sequences очищен: {len(self.sequences)} элементов")
-        
-        # Принудительно обновляем интерфейс
-        QApplication.processEvents()
-        
-        # Сбрасываем поиск
-        self.clear_search()
-        
-        # Обновляем прогресс
-        self.progress_label.setText("Начинаем поиск...")
-        QApplication.processEvents()
-        
-        # Создаем новый поиск
-        self.debug_logger.log("Создаем новый поиск...")
-        self.sequence_finder = SequenceFinder(folder, self.debug_logger)
-        self.sequence_finder.sequence_found.connect(self.on_sequence_found)
-        self.sequence_finder.progress_update.connect(self.update_progress)
-        self.sequence_finder.finished_signal.connect(self.on_search_finished)
-        
-        self.sequence_finder.start()
-        
-        self.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self.continue_btn.setEnabled(False)
-
-    def expand_all_tree_items(self):
-        """Раскрывает все элементы дерева"""
-        def expand_item(item):
-            item.setExpanded(True)
-            for i in range(item.childCount()):
-                expand_item(item.child(i))
-        
-        for i in range(self.sequences_tree.topLevelItemCount()):
-            expand_item(self.sequences_tree.topLevelItem(i))
-
-    def stop_search(self):
-        if hasattr(self, 'sequence_finder') and self.sequence_finder.isRunning():
-            self.sequence_finder.stop()
-            self.stop_btn.setEnabled(False)
-            self.continue_btn.setEnabled(True)
-            self.progress_label.setText("Поиск приостановлен")
-
-    def continue_search(self):
-        if hasattr(self, 'sequence_finder'):
-            self.sequence_finder.continue_search()
-            self.sequence_finder.start()
-            self.stop_btn.setEnabled(True)
-            self.continue_btn.setEnabled(False)
-
-    def on_sequence_found(self, sequence_data):
-        """Добавляет найденную последовательность в коллекцию и сразу в дерево"""
-        self.debug_logger.log(f"\n--- ПОЛУЧЕНА ПОСЛЕДОВАТЕЛЬНОСТЬ ---")
-        self.debug_logger.log(f"Данные: {sequence_data}")
-        
-        # Проверяем, что данные корректны и добавляем недостающие поля
-        required_keys = ['path', 'name', 'frame_range', 'frame_count', 'files', 'extension', 'type']
-        
-        # Добавляем недостающие поля
-        if 'name' not in sequence_data:
-            sequence_data['name'] = os.path.basename(sequence_data.get('first_file', 'Unknown'))
-        if 'display_name' not in sequence_data:
-            sequence_data['display_name'] = sequence_data['name']
-        if 'frame_range' not in sequence_data:
-            sequence_data['frame_range'] = ''
-        if 'frame_count' not in sequence_data:
-            sequence_data['frame_count'] = len(sequence_data.get('files', []))
-        if 'type' not in sequence_data:
-            sequence_data['type'] = 'unknown'
-        
-        # Проверяем наличие обязательных ключей
-        missing_keys = [key for key in required_keys if key not in sequence_data]
-        if missing_keys:
-            self.debug_logger.log(f"ОШИБКА: Отсутствуют ключи: {missing_keys}", "ERROR")
-            return
-            
-        # Проверяем, что ключевые поля не пустые
-        empty_fields = []
-        for key in ['path', 'name', 'extension']:
-            if not sequence_data.get(key):
-                empty_fields.append(key)
-        
-        if empty_fields:
-            self.debug_logger.log(f"ОШИБКА: Пустые поля: {empty_fields}", "ERROR")
-            return
-            
-        # Сохраняем последовательность
-        key = f"{sequence_data['path']}/{sequence_data['name']}"
-        self.sequences[key] = sequence_data
-        self.debug_logger.log(f"  Сохранено в словарь sequences с ключом: '{key}'")
-        
-        # НЕМЕДЛЕННО добавляем в дерево
-        self.add_sequence_to_tree(sequence_data)
-        
-        self.debug_logger.log(f"--- КОНЕЦ ДОБАВЛЕНИЯ ПОСЛЕДОВАТЕЛЬНОСТИ ---\n")
-
-    def add_sequence_to_tree(self, seq_info):
-        """Добавляет последовательность в дерево в реальном времени с сохранением структуры папок"""
-        try:
-            seq_path = seq_info['path']
-            display_name = seq_info.get('display_name', seq_info.get('name', 'Unknown'))
-            frame_range = seq_info.get('frame_range', '')
-            frame_count = seq_info.get('frame_count', 0)
-            seq_type = seq_info.get('type', 'unknown')
-            
-            self.debug_logger.log(f"add_sequence_to_tree: Добавляем '{display_name}' в папку '{seq_path}'")
-            
-            # Проверяем, что путь последовательности находится внутри корневой папки
-            root_path = self.folder_path.text()
-            if not seq_path.startswith(root_path):
-                self.debug_logger.log(f"  Пропускаем последовательность вне корневой папки: {seq_path}")
-                return
-            
-            # Находим или создаем родительскую папку для последовательности
-            parent_item = self.find_or_create_folder_item(seq_path)
-            
-            # Создаем элемент для последовательности
-            seq_item = QTreeWidgetItem([
-                display_name,
-                seq_type,
-                frame_range,
-                str(frame_count),
-                seq_path
-            ])
-            seq_item.setData(0, Qt.UserRole, {"type": "sequence", "info": seq_info})
-            
-            # Применяем цвет в зависимости от типа последовательности
-            self.color_tree_item_by_type(seq_item, seq_type)
-            
-            # Добавляем последовательность в родительскую папку
-            parent_item.addChild(seq_item)
-            
-            # РАСКРЫВАЕМ всю иерархию до корня для этой последовательности
-            self.expand_path_to_root(parent_item)
-            
-            self.debug_logger.log(f"Успешно добавлено в дерево: {display_name}")
-            
-        except Exception as e:
-            self.debug_logger.log(f"Ошибка при добавлении в дерево: {str(e)}", "ERROR")
-            import traceback
-            self.debug_logger.log(f"Трассировка: {traceback.format_exc()}", "ERROR")
-
-    def expand_path_to_root(self, item):
-        """Рекурсивно раскрывает все родительские элементы до корня"""
-        current_item = item
-        while current_item is not None:
-            current_item.setExpanded(True)
-            current_item = current_item.parent()
-
-    def find_or_create_folder_item(self, folder_path):
-        """Находит или создает элементы папок для указанного пути"""
-        # Если папка уже существует в словаре, возвращаем ее
-        if folder_path in self.folder_items:
-            item = self.folder_items[folder_path]
-            # РАСКРЫВАЕМ существующую папку
-            item.setExpanded(True)
-            return item
-        
-        self.debug_logger.log(f"find_or_create_folder_item: Создаем папку '{folder_path}'")
-        
-        # Получаем корневую папку поиска
-        root_path = self.folder_path.text()
-        
-        # Если путь совпадает с корневым, возвращаем корневой элемент
-        if folder_path == root_path:
-            return self.root_item
-        
-        # Определяем относительный путь от корневой папки
-        if folder_path.startswith(root_path):
-            relative_path = folder_path[len(root_path):].lstrip(os.sep)
-        else:
-            relative_path = folder_path
-        
-        # Разбиваем относительный путь на компоненты
-        parts = relative_path.split(os.sep)
-        current_path = root_path
-        parent_item = self.root_item
-        
-        # Строим путь от корня до целевой папки
-        for part in parts:
-            if not part:  # Пропускаем пустые части
-                continue
-                
-            # Обновляем текущий путь
-            current_path = os.path.join(current_path, part)
-            
-            # Если папка еще не создана, создаем ее
-            if current_path not in self.folder_items:
-                folder_name = part
-                folder_item = QTreeWidgetItem([
-                    folder_name,
-                    "Папка",
-                    "",
-                    "", #"0",
-                    "" #current_path
-                ])
-                folder_item.setData(0, Qt.UserRole, {"type": "folder", "path": current_path})
-                
-                # Добавляем в родительскую папку
-                parent_item.addChild(folder_item)
-                self.folder_items[current_path] = folder_item
-                
-                # СРАЗУ РАСКРЫВАЕМ новую папку
-                folder_item.setExpanded(True)
-                
-                self.debug_logger.log(f"  Создана и раскрыта папка: '{folder_name}' -> '{current_path}'")
-            
-            # Обновляем родительский элемент для следующей итерации
-            parent_item = self.folder_items[current_path]
-            
-            # Убедимся, что родительская папка тоже раскрыта
-            if hasattr(parent_item, 'setExpanded'):
-                parent_item.setExpanded(True)
-        
-        return parent_item
-
-    def update_folder_count(self, folder_item):
-        """Обновляет счетчик файлов в папке"""
-        try:
-            folder_data = folder_item.data(0, Qt.UserRole)
-            if folder_data and folder_data.get('type') == 'folder':
-                folder_path = folder_data.get('path')
-                
-                # Подсчитываем последовательности в этой папке
-                count = 0
-                for seq_info in self.sequences.values():
-                    if seq_info['path'] == folder_path:
-                        count += 1
-                
-                # Обновляем отображение счетчика
-                folder_item.setText(3, str(count))
-                
-                # Рекурсивно обновляем родительские папки
-                parent = folder_item.parent()
-                if parent:
-                    self.update_folder_count(parent)
-                else:
-                    # Если это корневой элемент, обновляем его
-                    root_count = sum(1 for seq_info in self.sequences.values())
-                    folder_item.setText(3, str(root_count))
-                    
-        except Exception as e:
-            self.debug_logger.log(f"Ошибка при обновлении счетчика папки: {str(e)}", "ERROR")
-
-    def update_progress(self, message):
-        self.progress_label.setText(message)
-
-    def on_search_finished(self):
-        """Обрабатывает завершение поиска"""
-        try:
-            # Обновляем статистику
-            sequence_count = len(self.sequences)
-            folder_count = len(self.folder_items)
-            
-            self.progress_label.setText(f"Поиск завершен. Найдено {sequence_count} последовательностей в {folder_count} папках")
-            self.debug_logger.log(f"Поиск завершен. Найдено {sequence_count} последовательностей в {folder_count} папках")
-            
-            # Дополнительная отладочная информация
-            total_tree_items = self.count_tree_items(self.root_item)
-            self.debug_logger.log(f"Всего элементов в дереве: {total_tree_items}")
-            
-            # РАСКРЫВАЕМ ВСЕ ДЕРЕВО после завершения поиска
-            self.expand_all_tree_items()
-            
-            # СБРАСЫВАЕМ ПОИСК ПОСЛЕДОВАТЕЛЬНОСТЕЙ
-            self.clear_sequences_search()
-            
-        except Exception as e:
-            self.debug_logger.log(f"Ошибка при завершении поиска: {str(e)}", "ERROR")
-            self.progress_label.setText(f"Ошибка при завершении поиска: {str(e)}")
-        
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.continue_btn.setEnabled(False)
-        
-        # Принудительно обновляем интерфейс
-        QApplication.processEvents()
-
     def count_tree_items(self, item):
         """Рекурсивно подсчитывает количество элементов в дереве"""
         count = 1  # Текущий элемент
@@ -3969,140 +3931,92 @@ class EXRMetadataViewer(QMainWindow):
             count += self.count_tree_items(item.child(i))
         return count
 
-    def flatten_json(self, json_data, parent_key='', separator='.'):
-        """
-        Рекурсивно разбирает JSON на отдельные ключи и значения
-        """
-        items = {}
-        if isinstance(json_data, dict):
-            for key, value in json_data.items():
-                new_key = f"{parent_key}{separator}{key}" if parent_key else key
-                if isinstance(value, (dict, list)):
-                    items.update(self.flatten_json(value, new_key, separator))
-                else:
-                    items[new_key] = value
-        elif isinstance(json_data, list):
-            for i, value in enumerate(json_data):
-                new_key = f"{parent_key}{separator}{i}" if parent_key else str(i)
-                if isinstance(value, (dict, list)):
-                    items.update(self.flatten_json(value, new_key, separator))
-                else:
-                    items[new_key] = value
-        else:
-            items[parent_key] = json_data
-        return items
+    def get_selected_item_data(self):
+        """Возвращает данные выбранного элемента"""
+        selected_items = self.sequences_tree.selectedItems()
+        if not selected_items:
+            return None
+        return selected_items[0].data(0, Qt.UserRole)
 
+    def update_sequences_colors(self):
+        """Обновляет цвета в дереве последовательностей"""
+        for i in range(self.sequences_tree.topLevelItemCount()):
+            top_item = self.sequences_tree.topLevelItem(i)
+            self.update_tree_item_colors(top_item)
 
-    def add_exiftool_metadata(self, file_path):
-        """Добавляет метаданные через ExifTool"""
-        if not self.exiftool_available:
-            self.current_metadata["ExifTool Error"] = "ExifTool не доступен"
-            self.debug_logger.log("Попытка использовать недоступный ExifTool", "WARNING")
-            return
-
-        try:
-            self.debug_logger.log(f"Чтение метаданных ExifTool для {file_path}")
-            
-            # Используем exiftool через pyexiftool - ПРАВИЛЬНЫЙ СПОСОБ
-            with exiftool.ExifTool() as et:
-                # Получаем метаданные в формате JSON
-                metadata_json = et.execute("-j", file_path)
-            
-            if metadata_json:
-                # Парсим JSON
-                metadata_list = json.loads(metadata_json)
-                if metadata_list:
-                    metadata = metadata_list[0]  # Берем первый элемент (для одного файла)
-                    
-                    for tag, value in metadata.items():
-                        # Форматируем имя тега (убираем namespace если нужно)
-                        if ':' in tag:
-                            # Оставляем только последнюю часть после двоеточия
-                            display_tag = tag.split(':')[-1]
-                        else:
-                            display_tag = tag
-                        
-                        # Форматируем значение
-                        formatted_value = self.format_exiftool_value(value)
-                        self.current_metadata[f"ExifTool {display_tag}"] = formatted_value
-                    
-                    self.debug_logger.log(f"Прочитано {len(metadata)} метаданных ExifTool из {file_path}")
-                else:
-                    self.current_metadata["ExifTool"] = "Метаданные не найдены"
-                    self.debug_logger.log(f"ExifTool не нашел метаданных для {file_path}")
-            else:
-                self.current_metadata["ExifTool"] = "Метаданные не найдены"
-                self.debug_logger.log(f"ExifTool не вернул данных для {file_path}")
-                    
-        except Exception as e:
-            error_msg = f"Ошибка чтения ExifTool: {str(e)}"
-            self.current_metadata["ExifTool Error"] = error_msg
-            self.debug_logger.log(f"Ошибка чтения ExifTool для {file_path}: {str(e)}", "ERROR")
-
-
-
-
-    def format_exiftool_value(self, value):
-        """Форматирует значение ExifTool для лучшего отображения"""
-        if value is None:
-            return "None"
+    def update_tree_item_colors(self, item):
+        """Рекурсивно обновляет цвета элементов дерева"""
+        item_data = item.data(0, Qt.UserRole)
+        if item_data and item_data['type'] == 'sequence':
+            seq_type = item_data['info']['type']
+            self.color_tree_item_by_type(item, seq_type)
         
-        # Если значение - список, объединяем элементы
-        if isinstance(value, list):
-            if len(value) == 1:
-                return self.format_exiftool_value(value[0])
-            else:
-                return ", ".join(str(self.format_exiftool_value(item)) for item in value)
-        
-        # Если значение - словарь, преобразуем в JSON
-        if isinstance(value, dict):
-            try:
-                return json.dumps(value, ensure_ascii=False, indent=2)
-            except:
-                return str(value)
-        
-        # Если значение - байты, пробуем декодировать
-        if isinstance(value, bytes):
-            try:
-                return value.decode('utf-8', errors='ignore')
-            except:
-                return str(value)
-        
-        # Для специальных числовых форматов ExifTool
-        if isinstance(value, (int, float)):
-            return str(value)
-        
-        # Для строк проверяем, не являются ли они бинарными данными
-        if isinstance(value, str):
-            # Если строка слишком длинная, возможно это бинарные данные
-            if len(value) > 1000:
-                return f"[Бинарные данные, размер: {len(value)} байт]"
-            
-            # Проверяем на наличие непечатаемых символов
-            if any(ord(c) < 32 and c not in '\n\r\t' for c in value):
-                return f"[Данные с непечатаемыми символами, размер: {len(value)} байт]"
-        
-        # Для всех остальных случаев возвращаем строковое представление
-        return str(value)
+        # Рекурсивно обновляем дочерние элементы
+        for i in range(item.childCount()):
+            self.update_tree_item_colors(item.child(i))
 
 
+
+class MetadataManager:
+    """Менеджер для работы с метаданными файлов"""
+    
+    def __init__(self, main_window, camera_manager, tool_manager):
+        self.main_window = main_window
+        self.camera_manager = camera_manager
+        self.tool_manager = tool_manager
+        self.debug_logger = main_window.debug_logger
+        self.settings_manager = main_window.settings_manager
+        
+        # Текущие метаданные
+        self.current_metadata = {}
+        self.current_sensor_info = {}
+        
+        # Принудительные настройки чтения
+        self.forced_metadata_tool = None
+        self.forced_metadata_file = None
+        
+        # Ссылки на UI элементы
+        self.metadata_table = None
+        self.metadata_source_label = None
+        self.search_input = None
+
+    def setup_ui(self, metadata_table, metadata_source_label, search_input):
+        """Настраивает UI элементы для метаданных"""
+        self.metadata_table = metadata_table
+        self.metadata_source_label = metadata_source_label
+        self.search_input = search_input
+        
+        # Настройка таблицы метаданных
+        self.metadata_table.setColumnCount(2)
+        self.metadata_table.setHorizontalHeaderLabels(["Поле", "Значение"])
+        
+        # Настройка размеров столбцов
+        for i, width in enumerate(DEFAULT_COLUMN_WIDTHS['metadata']):
+            self.metadata_table.setColumnWidth(i, width)
+        
+        # Настройка поведения заголовков
+        self.metadata_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)
+        self.metadata_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.metadata_table.setColumnWidth(0, DEFAULT_COLUMN_WIDTHS['metadata'][0])
+        
+        self.metadata_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.metadata_table.setContextMenuPolicy(Qt.CustomContextMenu)
 
     def display_metadata(self, file_path, extension, forced_tool=None):
-        """Отображает метаданные для файла с поддержкой ExifTool"""
+        """Отображает метаданные для файла"""
         try:
             if not os.path.exists(file_path):
-                self.metadata_table.setRowCount(1)
-                self.metadata_table.setItem(0, 0, QTableWidgetItem("Ошибка"))
-                self.metadata_table.setItem(0, 1, QTableWidgetItem(f"Файл не найден: {file_path}"))
-                self.metadata_source_label.setText("Метаданные выбранного элемента: Ошибка")
+                self.show_error(f"Файл не найден: {file_path}")
                 return
             
-            # Сбрасываем состояние форсированного чтения, если выбран другой файл
+            # Сбрасываем принудительные настройки, если файл изменился
+            # ИСПРАВЛЕНИЕ: Используем sequence_manager вместо прямого обращения к current_sequence_files
+            current_files = self.main_window.sequence_manager.get_current_sequence_files()
             if forced_tool is None and self.forced_metadata_file != file_path:
                 self.forced_metadata_tool = None
                 self.forced_metadata_file = None
             
-            # Определяем инструмент для чтения метаданных
+            # Определяем инструмент для чтения
             if forced_tool:
                 metadata_tool = forced_tool
             elif self.forced_metadata_tool and self.forced_metadata_file == file_path:
@@ -4112,463 +4026,670 @@ class EXRMetadataViewer(QMainWindow):
             
             self.debug_logger.log(f"Чтение метаданных для {file_path} с помощью {metadata_tool if metadata_tool else 'автоматического выбора'}")
             
-            # Собираем все метаданные
+            # Читаем метаданные
             self.current_metadata = {}
-            metadata_source = "Unknown"
+            metadata_source = self.read_metadata(file_path, extension, metadata_tool)
             
-            # ЕСЛИ УКАЗАН ПРИНУДИТЕЛЬНЫЙ ИНСТРУМЕНТ - ИСПОЛЬЗУЕМ ЕГО ДЛЯ ЛЮБОГО ФАЙЛА
-            if metadata_tool:
-                if metadata_tool == 'ffprobe':
-                    self.add_ffprobe_metadata(file_path)
-                    metadata_source = f"FFprobe ({'принудительно' if forced_tool else 'сохранено'})"
-                elif metadata_tool == 'mediainfo':
-                    if PYMEDIAINFO_AVAILABLE:
-                        self.add_mediainfo_metadata(file_path)
-                        metadata_source = f"MediaInfo ({'принудительно' if forced_tool else 'сохранено'})"
-                    else:
-                        self.current_metadata["MediaInfo Error"] = "MediaInfo не доступен"
-                        metadata_source = "MediaInfo Not Available"
-                elif metadata_tool == 'exiftool':
-                    if self.exiftool_available:
-                        self.add_exiftool_metadata(file_path)
-                        metadata_source = f"ExifTool ({'принудительно' if forced_tool else 'сохранено'})"
-                    else:
-                        self.current_metadata["ExifTool Error"] = "ExifTool не доступен"
-                        metadata_source = "ExifTool Not Available"
-
+            # Добавляем базовую информацию о файле
+            self.add_file_info(file_path)
             
-            # СТАНДАРТНАЯ ЛОГИКА (когда инструмент не указан принудительно)
-            else:
-                extension_lower = extension.lower()
-                
-                # Для EXR файлов используем OpenEXR для чтения метаданных
-                if extension_lower == '.exr':
-                    try:
-                        exr_file = OpenEXR.InputFile(file_path)
-                        header = exr_file.header()
-                        
-                        for key, value in header.items():
-                            self.current_metadata[key] = self.format_metadata_value(value)
-                        metadata_source = "OpenEXR"
-                        self.debug_logger.log(f"Прочитано {len(header)} метаданных EXR из {file_path}")
-                    except Exception as e:
-                        self.current_metadata["Ошибка чтения EXR"] = f"Не удалось прочитать EXR метаданные: {str(e)}"
-                        metadata_source = "OpenEXR Error"
-                        self.debug_logger.log(f"Ошибка чтения EXR для {file_path}: {str(e)}", "ERROR")
-                
-                # Для R3D файлов используем REDline
-                elif extension_lower == '.r3d':
-                    # Если REDline доступен, используем его
-                    if self.use_art_for_mxf and os.path.exists(REDLINE_TOOL_PATH):
-                        temp_output_path = None
-                        try:
-                            # Создаем временный файл для вывода REDline
-                            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as temp_file:
-                                temp_output_path = temp_file.name
-                            
-                            # Запускаем REDline для получения метаданных
-                            cmd = [
-                                REDLINE_TOOL_PATH,
-                                '--i', file_path,
-                                '--useMeta',
-                                '--printMeta', '1'
-                            ]
-                            
-                            self.debug_logger.log(f"Запуск REDline: {' '.join(cmd)}")
-                            self.debug_logger.log(f"Временный файл вывода: {temp_output_path}")
-                            
-                            # Запускаем процесс и захватываем stdout и stderr
-                            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
-                            
-                            # Сохраняем ВСЕ выводы (stdout и stderr) в файл для отладки
-                            with open(temp_output_path, 'w') as output_file:
-                                output_file.write("=== STDOUT ===\n")
-                                output_file.write(result.stdout)
-                                output_file.write("\n=== STDERR ===\n")
-                                output_file.write(result.stderr)
-                            
-                            # Пробуем использовать stderr как основной вывод, так как REDline может выводить туда
-                            output = result.stderr if result.stderr.strip() else result.stdout
-                            
-                            if output.strip():
-                                # Парсим вывод REDline независимо от кода возврата
-                                lines = output.strip().split('\n')
-                                redline_metadata_count = 0
-                                for line in lines:
-                                    line = line.strip()
-                                    if not line or ':' not in line:
-                                        continue
-                                    
-                                    # Разделяем по первому двоеточию
-                                    parts = line.split(':', 1)
-                                    if len(parts) == 2:
-                                        key = parts[0].strip()
-                                        value = parts[1].strip()
-                                        
-                                        # Пропускаем строки с разделителями отладки
-                                        if key.startswith("==="):
-                                            continue
-                                            
-                                        # Добавляем префикс RED для идентификации источника
-                                        self.current_metadata[f"RED {key}"] = value
-                                        redline_metadata_count += 1
-                                
-                                if redline_metadata_count > 0:
-                                    metadata_source = "REDline"
-                                    self.debug_logger.log(f"Прочитано {redline_metadata_count} метаданных RED из {file_path} (код возврата: {result.returncode})")
-                                else:
-                                    # Если не нашли метаданных, считаем это ошибкой
-                                    error_msg = f"REDline не вернул метаданные (код {result.returncode})"
-                                    self.debug_logger.log(error_msg, "WARNING")
-                                    self.current_metadata["REDline Error"] = error_msg
-                                    metadata_source = "REDline No Data"
-                                    
-                                    # Используем MediaInfo как fallback
-                                    if PYMEDIAINFO_AVAILABLE:
-                                        self.debug_logger.log("Используем MediaInfo как fallback для R3D")
-                                        self.add_mediainfo_metadata(file_path)
-                                        metadata_source = "MediaInfo (REDline fallback)"
-                            else:
-                                error_msg = f"REDline не вернул данных (код {result.returncode})"
-                                self.debug_logger.log(error_msg, "WARNING")
-                                self.current_metadata["REDline Error"] = error_msg
-                                metadata_source = "REDline No Output"
-                                
-                                # Используем MediaInfo как fallback
-                                if PYMEDIAINFO_AVAILABLE:
-                                    self.debug_logger.log("Используем MediaInfo как fallback для R3D")
-                                    self.add_mediainfo_metadata(file_path)
-                                    metadata_source = "MediaInfo (REDline fallback)"
-                                    
-                        except subprocess.TimeoutExpired:
-                            self.debug_logger.log("REDline timeout", "WARNING")
-                            if PYMEDIAINFO_AVAILABLE:
-                                self.add_mediainfo_metadata(file_path)
-                                metadata_source = "MediaInfo (REDline timeout fallback)"
-                            else:
-                                self.current_metadata["REDline Error"] = "REDline timeout"
-                                metadata_source = "REDline Timeout"
-                        except Exception as e:
-                            self.debug_logger.log(f"Ошибка REDline: {str(e)}", "WARNING")
-                            if PYMEDIAINFO_AVAILABLE:
-                                self.add_mediainfo_metadata(file_path)
-                                metadata_source = "MediaInfo (REDline error fallback)"
-                            else:
-                                self.current_metadata["REDline Error"] = f"REDline error: {str(e)}"
-                                metadata_source = "REDline Error"
-                        finally:
-                            # Всегда удаляем временный файл, так как мы уже обработали вывод
-                            if temp_output_path and os.path.exists(temp_output_path):
-                                os.unlink(temp_output_path)
-                   
-                    else:
-                        # Если REDline недоступен, используем MediaInfo
-                        if PYMEDIAINFO_AVAILABLE:
-                            self.add_mediainfo_metadata(file_path)
-                            metadata_source = "MediaInfo"
-                        else:
-                            self.current_metadata["MediaInfo Error"] = "MediaInfo не доступен"
-                            metadata_source = "MediaInfo Not Available"
-                
-                # Для JPEG и RAW файлов используем exifread
-                elif extension_lower in ['.jpg', '.jpeg', '.arw', '.cr2', '.dng', '.nef', '.tif', '.tiff'] and EXIFREAD_AVAILABLE:
-                    try:
-                        with open(file_path, 'rb') as f:
-                            tags = exifread.process_file(f, details=False)
-                        
-                        if tags:
-                            for tag, value in tags.items():
-                                # Форматируем значение для лучшего отображения
-                                formatted_value = self.format_exif_value(tag, value)
-                                self.current_metadata[f"EXIF {tag}"] = formatted_value
-                            metadata_source = "exifread"
-                            self.debug_logger.log(f"Прочитано {len(tags)} EXIF тегов из {file_path}")
-                        else:
-                            self.current_metadata["EXIF"] = "EXIF данные не найдены"
-                            metadata_source = "exifread"
-                            self.debug_logger.log(f"EXIF данные не найдены в {file_path}")
-                    except Exception as e:
-                        self.current_metadata["Ошибка чтения EXIF"] = f"Не удалось прочитать EXIF метаданные: {str(e)}"
-                        metadata_source = "exifread Error"
-                        self.debug_logger.log(f"Ошибка чтения EXIF для {file_path}: {str(e)}", "ERROR")
-                
-                # Для PNG, TIFF и других изображений используем Pillow
-                elif extension_lower in ['.png', '.bmp', '.gif', '.webp'] and PILLOW_AVAILABLE:
-                    try:
-                        with Image.open(file_path) as img:
-                            # Получаем базовую информацию об изображении
-                            self.current_metadata["Формат"] = img.format
-                            self.current_metadata["Режим"] = img.mode
-                            self.current_metadata["Размер"] = f"{img.width} x {img.height}"
-                            
-                            # Получаем EXIF данные, если они есть
-                            exif_data = img._getexif()
-                            if exif_data:
-                                for tag_id, value in exif_data.items():
-                                    tag_name = TAGS.get(tag_id, tag_id)
-                                    formatted_value = self.format_exif_value(tag_name, value)
-                                    self.current_metadata[f"EXIF {tag_name}"] = formatted_value
-                                metadata_source = "Pillow"
-                                self.debug_logger.log(f"Прочитано {len(exif_data)} EXIF тегов из {file_path}")
-                            else:
-                                self.current_metadata["EXIF"] = "EXIF данные не найдены"
-                                metadata_source = "Pillow"
-                                self.debug_logger.log(f"EXIF данные не найдены в {file_path}")
-                            
-                            # Получаем другую информацию
-                            info = img.info
-                            for key, value in info.items():
-                                if key != 'exif':  # EXIF уже обработали отдельно
-                                    self.current_metadata[key] = str(value)
-                    except Exception as e:
-                        self.current_metadata["Ошибка чтения"] = f"Не удалось прочитать метаданные изображения: {str(e)}"
-                        metadata_source = "Pillow Error"
-                        self.debug_logger.log(f"Ошибка чтения изображения для {file_path}: {str(e)}", "ERROR")
-                
-                # Для MXF файлов (логика остается прежней)
-                elif extension_lower in ['.mxf', '.arr', '.arx']:
-                    # Если включена галочка и ART доступен, используем ART
-                    if self.use_art_for_mxf and os.path.exists(ARRI_REFERENCE_TOOL_PATH):
-                        try:
-                            # Создаем временный файл для вывода ARRI Tool
-                            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp_file:
-                                temp_json_path = temp_file.name
-                            
-                            # Запускаем ARRI Reference Tool
-                            cmd = [
-                                ARRI_REFERENCE_TOOL_PATH,
-                                'export',
-                                '--duration', '1',
-                                '--input', file_path,
-                                '--output', temp_json_path
-                            ]
-                            
-                            self.debug_logger.log(f"Запуск ARRI Reference Tool: {' '.join(cmd)}")
-                            
-                            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-                            
-                            if result.returncode == 0 and os.path.exists(temp_json_path):
-                                # Успешно получили метаданные от ARRI Tool
-                                with open(temp_json_path, 'r', encoding='utf-8') as f:
-                                    arri_metadata = json.load(f)
-                                
-                                # Разбираем JSON на отдельные ключи и значения
-                                flattened_metadata = self.flatten_json(arri_metadata)
-                                
-                                # Добавляем метаданные в общий словарь
-                                for key, value in flattened_metadata.items():
-                                    self.current_metadata[f"ARRI.{key}"] = self.format_metadata_value(value)
-                                
-                                metadata_source = "ARRI Reference Tool"
-                                self.debug_logger.log(f"Прочитано {len(flattened_metadata)} метаданных ARRI из {file_path}")
-                                
-                                # Удаляем временный файл
-                                os.unlink(temp_json_path)
-                            else:
-                                self.debug_logger.log(f"ARRI Tool вернул ошибку: {result.stderr}", "WARNING")
-                                # Если ARRI Tool не сработал, используем MediaInfo
-                                if PYMEDIAINFO_AVAILABLE:
-                                    self.debug_logger.log("Используем MediaInfo как fallback для MXF")
-                                    self.add_mediainfo_metadata(file_path)
-                                    metadata_source = "MediaInfo (ART fallback)"
-                                else:
-                                    self.current_metadata["ARRI Tool Error"] = f"ARRI Tool failed: {result.stderr}"
-                                    metadata_source = "ARRI Tool Failed"
-                                    
-                        except subprocess.TimeoutExpired:
-                            self.debug_logger.log("ARRI Tool timeout", "WARNING")
-                            if PYMEDIAINFO_AVAILABLE:
-                                self.add_mediainfo_metadata(file_path)
-                                metadata_source = "MediaInfo (ART timeout fallback)"
-                            else:
-                                self.current_metadata["ARRI Tool Error"] = "ARRI Tool timeout"
-                                metadata_source = "ARRI Tool Timeout"
-                        except Exception as e:
-                            self.debug_logger.log(f"Ошибка ARRI Tool: {str(e)}", "WARNING")
-                            if PYMEDIAINFO_AVAILABLE:
-                                self.add_mediainfo_metadata(file_path)
-                                metadata_source = "MediaInfo (ART error fallback)"
-                            else:
-                                self.current_metadata["ARRI Tool Error"] = f"ARRI Tool error: {str(e)}"
-                                metadata_source = "ARRI Tool Error"
-                    else:
-                        # По умолчанию используем MediaInfo для MXF
-                        if PYMEDIAINFO_AVAILABLE:
-                            self.add_mediainfo_metadata(file_path)
-                            metadata_source = "MediaInfo"
-                        else:
-                            self.current_metadata["MediaInfo Error"] = "MediaInfo не доступен"
-                            metadata_source = "MediaInfo Not Available"
-                
-                # Для остальных файлов (включая видео) используем выбранный инструмент по умолчанию
-                else:
-                    if self.default_metadata_tool == 'ffprobe':
-                        self.add_ffprobe_metadata(file_path)
-                        metadata_source = "FFprobe"
-                    elif self.default_metadata_tool == 'mediainfo':
-                        if PYMEDIAINFO_AVAILABLE:
-                            self.add_mediainfo_metadata(file_path)
-                            metadata_source = "MediaInfo"
-                        else:
-                            self.current_metadata["MediaInfo Error"] = "MediaInfo не доступен"
-                            metadata_source = "MediaInfo Not Available"
-                    elif self.default_metadata_tool == 'exiftool':
-                        if self.exiftool_available:
-                            self.add_exiftool_metadata(file_path)
-                            metadata_source = "ExifTool"
-                        else:
-                            self.current_metadata["ExifTool Error"] = "ExifTool не доступен"
-                            metadata_source = "ExifTool Not Available"
-            
-            # Для всех файлов добавляем базовую информацию
-            file_stats = os.stat(file_path)
-            self.current_metadata["Имя файла"] = os.path.basename(file_path)
-            self.current_metadata["Путь"] = file_path
-            self.current_metadata["Размер файла"] = f"{file_stats.st_size} байт ({file_stats.st_size / 1024 / 1024:.2f} MB)"
-            self.current_metadata["Дата создания"] = datetime.datetime.fromtimestamp(file_stats.st_ctime).strftime("%Y-%m-%d %H:%M:%S")
-            self.current_metadata["Дата изменения"] = datetime.datetime.fromtimestamp(file_stats.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-            
-            self.debug_logger.log(f"Всего собрано {len(self.current_metadata)} метаданных для {file_path}")
-
-            # Если использовался принудительный инструмент, добавляем отметку
-            if forced_tool:
-                metadata_source = f"{metadata_source} (принудительно)"
-
-            # ОПРЕДЕЛЯЕМ РАЗМЕР СЕНСОРА
-            sensor_size, detection_info = self.detect_camera_and_sensor(self.current_metadata)
+            # Определяем камеру и сенсор
+            sensor_size, detection_info, resolution_str = self.camera_manager.detect_camera_and_sensor(self.current_metadata)
             self.current_sensor_info = {
                 'size': sensor_size,
                 'detection_info': detection_info
             }
+            self.current_resolution_str = resolution_str   # сохраняем разрешение
 
-            # Разделяем метаданные на цветные и обычные
-            colored_metadata = {}
-            normal_metadata = {}
-            
-            for key, value in self.current_metadata.items():
-                if key in self.color_metadata and not self.color_metadata[key].get('removed', False):
-                    colored_metadata[key] = value
-                else:
-                    normal_metadata[key] = value
-            
-            # Сортируем цветные метаданные в соответствии с порядком из ordered_metadata_fields
-            sorted_colored = []
-            for field_name in self.ordered_metadata_fields:
-                if field_name in colored_metadata:
-                    sorted_colored.append((field_name, colored_metadata[field_name]))
-            
-            # Добавляем оставшиеся цветные поля
-            for field_name, value in colored_metadata.items():
-                if field_name not in self.ordered_metadata_fields:
-                    sorted_colored.append((field_name, value))
-            
-            # Сортируем обычные метаданные по ключу
-            sorted_normal = sorted(normal_metadata.items())
-            
-            # Объединяем: сначала Detected Sensor (всегда), потом цветные, потом обычные
-            sorted_metadata = []
-            # Всегда добавляем строку Detected Sensor
-            sensor_display_value = sensor_size if sensor_size else "не определено"
-            sorted_metadata.append(("Detected Sensor", sensor_display_value))
-
-            sorted_metadata.extend(sorted_colored)
-            sorted_metadata.extend(sorted_normal)
-            
-            # Заполняем таблицу
-            self.metadata_table.setRowCount(len(sorted_metadata))
-            
-            for row, (key, value) in enumerate(sorted_metadata):
-                key_item = QTableWidgetItem(key)
-                key_item.setFlags(key_item.flags() & ~Qt.ItemIsEditable)
-                
-                value_item = QTableWidgetItem(str(value))
-                value_item.setFlags(value_item.flags() & ~Qt.ItemIsEditable)
-                
-                # Добавляем tooltip для строки Detected Sensor
-                if key == "Detected Sensor":
-                    if detection_info:
-                        # Формируем более информативный tooltip
-                        resolution_info = []
-                        camera_info = []
-                        actual_resolution = None
-                        actual_camera = None
-                        
-                        # Извлекаем фактические значения камеры и разрешения из detection_info
-                        for info in detection_info:
-                            if "разрешение:" in info.lower():
-                                actual_resolution = info.replace("Разрешение:", "").strip()
-                            elif "камера:" in info.lower():
-                                actual_camera = info.replace("Камера:", "").strip()
-                            elif "разрешение" in info.lower() or "width" in info.lower() or "height" in info.lower():
-                                resolution_info.append(info)
-                            else:
-                                camera_info.append(info)
-                        
-                        tooltip_parts = []
-                        
-                        # Добавляем фактическую камеру и разрешение
-                        if actual_camera:
-                            tooltip_parts.append(f"Камера: {actual_camera}")
-                        if actual_resolution:
-                            tooltip_parts.append(f"Разрешение: {actual_resolution}")
-                        
-                        if tooltip_parts:
-                            tooltip_parts.append("")  # Пустая строка как разделитель
-                        
-                        # Добавляем информацию о выборе наибольшего разрешения
-                        if any("выбрано:" in info for info in resolution_info):
-                            tooltip_parts.append("Стратегия выбора: наибольшее разрешение")
-                        
-                        if camera_info:
-                            tooltip_parts.append("Камера определена по:")
-                            tooltip_parts.extend(camera_info)
-                        if resolution_info:
-                            if tooltip_parts:
-                                tooltip_parts.append("")  # Пустая строка как разделитель
-                            tooltip_parts.append("Разрешение определено по:")
-                            tooltip_parts.extend(resolution_info)
-                        
-                        tooltip_text = "\n".join(tooltip_parts)
-                    else:
-                        tooltip_text = "Не удалось определить камеру или разрешение"
-                    
-                    key_item.setToolTip(tooltip_text)
-                    value_item.setToolTip(tooltip_text)
-                
-                self.metadata_table.setItem(row, 0, key_item)
-                self.metadata_table.setItem(row, 1, value_item)
-                
-                # Применяем цвет, если поле есть в цветном списке (включая Detected Sensor)
-                self.apply_field_color(row, key)
-
-            # Обновляем метку с источником метаданных
-            if self.forced_metadata_tool and self.forced_metadata_file == file_path:
-                tool_name = METADATA_TOOLS.get(self.forced_metadata_tool, self.forced_metadata_tool)
-                self.metadata_source_label.setText(f"Метаданные выбранного элемента ({tool_name} - принудительно):")
-            else:
-                self.metadata_source_label.setText(f"Метаданные выбранного элемента ({metadata_source}):")
-            
-            # Сбрасываем фильтр поиска при отображении новых данных
-            self.clear_search()
+            # Форматируем и отображаем метаданные
+            self.format_and_display_metadata(metadata_source, forced_tool)
             
         except Exception as e:
-            self.metadata_table.setRowCount(1)
-            self.metadata_table.setItem(0, 0, QTableWidgetItem("Ошибка"))
-            self.metadata_table.setItem(0, 1, QTableWidgetItem(f"Ошибка чтения метаданных: {str(e)}"))
-            self.metadata_source_label.setText("Метаданные выбранного элемента: Ошибка")
+            self.show_error(f"Ошибка чтения метаданных: {str(e)}")
             self.debug_logger.log(f"Общая ошибка чтения метаданных для {file_path}: {str(e)}", "ERROR")
 
+    def update_metadata_colors(self):
+        """Обновляет цвета в таблице метаданных"""
+        if not self.current_metadata:
+            return
+        
+        # Перерисовываем таблицу с текущими метаданными
+        if hasattr(self, 'last_metadata_source'):
+            self.format_and_display_metadata(self.last_metadata_source, None)
+
+
+    def read_metadata(self, file_path, extension, metadata_tool=None):
+        """Читает метаданные файла с помощью указанного инструмента"""
+        extension_lower = extension.lower()
+        metadata_source = "Unknown"
+        
+        if metadata_tool:
+            # Принудительное чтение указанным инструментом
+            if metadata_tool == 'ffprobe':
+                self.add_ffprobe_metadata(file_path)
+                metadata_source = f"FFprobe ({'принудительно' if metadata_tool else 'сохранено'})"
+            elif metadata_tool == 'mediainfo':
+                if PYMEDIAINFO_AVAILABLE:
+                    self.add_mediainfo_metadata(file_path)
+                    metadata_source = f"MediaInfo ({'принудительно' if metadata_tool else 'сохранено'})"
+                else:
+                    self.current_metadata["MediaInfo Error"] = "MediaInfo не доступен"
+                    metadata_source = "MediaInfo Not Available"
+            elif metadata_tool == 'exiftool':
+                if self.tool_manager.exiftool_available:
+                    self.add_exiftool_metadata(file_path)
+                    metadata_source = f"ExifTool ({'принудительно' if metadata_tool else 'сохранено'})"
+                else:
+                    self.current_metadata["ExifTool Error"] = "ExifTool не доступен"
+                    metadata_source = "ExifTool Not Available"
+        else:
+            # Автоматический выбор инструмента на основе типа файла
+            if extension_lower == '.exr':
+                metadata_source = self.read_exr_metadata(file_path)
+            elif extension_lower == '.r3d':
+                metadata_source = self.read_r3d_metadata(file_path)
+            elif extension_lower in ['.jpg', '.jpeg', '.arw', '.cr2', '.dng', '.nef', '.tif', '.tiff'] and EXIFREAD_AVAILABLE:
+                metadata_source = self.read_exif_metadata(file_path)
+            elif extension_lower in ['.png', '.bmp', '.gif', '.webp'] and PILLOW_AVAILABLE:
+                metadata_source = self.read_image_metadata(file_path)
+            elif extension_lower in ['.mxf', '.arr', '.arx']:
+                metadata_source = self.read_mxf_metadata(file_path)
+            else:
+                # Используем инструмент по умолчанию для других форматов
+                metadata_source = self.read_with_default_tool(file_path)
+        
+        return metadata_source
+
+    def read_exr_metadata(self, file_path):
+        """Читает метаданные EXR файла"""
+        try:
+            exr_file = OpenEXR.InputFile(file_path)
+            header = exr_file.header()
+            
+            for key, value in header.items():
+                self.current_metadata[key] = self.format_metadata_value(value)
+            
+            self.debug_logger.log(f"Прочитано {len(header)} метаданных EXR из {file_path}")
+            return "OpenEXR"
+            
+        except Exception as e:
+            self.current_metadata["Ошибка чтения EXR"] = f"Не удалось прочитать EXR метаданные: {str(e)}"
+            self.debug_logger.log(f"Ошибка чтения EXR для {file_path}: {str(e)}", "ERROR")
+            return "OpenEXR Error"
+
+    def read_r3d_metadata(self, file_path):
+        """Читает метаданные R3D файла"""
+        if self.settings_manager.use_art_for_mxf and os.path.exists(REDLINE_TOOL_PATH):
+            return self.read_redline_metadata(file_path)
+        else:
+            if PYMEDIAINFO_AVAILABLE:
+                self.add_mediainfo_metadata(file_path)
+                return "MediaInfo"
+            else:
+                self.current_metadata["MediaInfo Error"] = "MediaInfo не доступен"
+                return "MediaInfo Not Available"
+
+    def read_redline_metadata(self, file_path):
+        """Читает метаданные через REDline"""
+        try:
+            temp_output_path = None
+            try:
+                # Создаем временный файл для вывода
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as temp_file:
+                    temp_output_path = temp_file.name
+                
+                # Запускаем REDline
+                cmd = [
+                    REDLINE_TOOL_PATH,
+                    '--i', file_path,
+                    '--useMeta',
+                    '--printMeta', '1'
+                ]
+                
+                self.debug_logger.log(f"Запуск REDline: {' '.join(cmd)}")
+                self.debug_logger.log(f"Временный файл вывода: {temp_output_path}")
+                
+                result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+                
+                # Сохраняем вывод в файл для отладки
+                with open(temp_output_path, 'w') as output_file:
+                    output_file.write("=== STDOUT ===\n")
+                    output_file.write(result.stdout)
+                    output_file.write("\n=== STDERR ===\n")
+                    output_file.write(result.stderr)
+                
+                # Анализируем вывод - REDline часто пишет в stderr
+                output = result.stderr if result.stderr.strip() else result.stdout
+                
+                if output.strip():
+                    lines = output.strip().split('\n')
+                    redline_metadata_count = 0
+                    for line in lines:
+                        line = line.strip()
+                        if not line or ':' not in line:
+                            continue
+                        
+                        parts = line.split(':', 1)
+                        if len(parts) == 2:
+                            key = parts[0].strip()
+                            value = parts[1].strip()
+                            
+                            # Пропускаем разделители отладки
+                            if key.startswith("==="):
+                                continue
+                                
+                            self.current_metadata[f"RED {key}"] = value
+                            redline_metadata_count += 1
+                    
+                    if redline_metadata_count > 0:
+                        self.debug_logger.log(f"Прочитано {redline_metadata_count} метаданных RED из {file_path} (код возврата: {result.returncode})")
+                        return "REDline"
+                    else:
+                        error_msg = f"REDline не вернул метаданные (код {result.returncode})"
+                        self.debug_logger.log(error_msg, "WARNING")
+                        self.current_metadata["REDline Error"] = error_msg
+                        
+                        # Fallback на MediaInfo
+                        if PYMEDIAINFO_AVAILABLE:
+                            self.debug_logger.log("Используем MediaInfo как fallback для R3D")
+                            self.add_mediainfo_metadata(file_path)
+                            return "MediaInfo (REDline fallback)"
+                        else:
+                            return "REDline No Data"
+                else:
+                    error_msg = f"REDline не вернул данных (код {result.returncode})"
+                    self.debug_logger.log(error_msg, "WARNING")
+                    self.current_metadata["REDline Error"] = error_msg
+                    
+                    # Fallback на MediaInfo
+                    if PYMEDIAINFO_AVAILABLE:
+                        self.debug_logger.log("Используем MediaInfo как fallback для R3D")
+                        self.add_mediainfo_metadata(file_path)
+                        return "MediaInfo (REDline fallback)"
+                    else:
+                        return "REDline No Output"
+                        
+            except subprocess.TimeoutExpired:
+                self.debug_logger.log("REDline timeout", "WARNING")
+                if PYMEDIAINFO_AVAILABLE:
+                    self.add_mediainfo_metadata(file_path)
+                    return "MediaInfo (REDline timeout fallback)"
+                else:
+                    self.current_metadata["REDline Error"] = "REDline timeout"
+                    return "REDline Timeout"
+            except Exception as e:
+                self.debug_logger.log(f"Ошибка REDline: {str(e)}", "WARNING")
+                if PYMEDIAINFO_AVAILABLE:
+                    self.add_mediainfo_metadata(file_path)
+                    return "MediaInfo (REDline error fallback)"
+                else:
+                    self.current_metadata["REDline Error"] = f"REDline error: {str(e)}"
+                    return "REDline Error"
+            finally:
+                # Удаляем временный файл
+                if temp_output_path and os.path.exists(temp_output_path):
+                    try:
+                        os.unlink(temp_output_path)
+                        self.debug_logger.log(f"Временный файл удален: {temp_output_path}")
+                    except Exception as e:
+                        self.debug_logger.log(f"Ошибка удаления временного файла: {e}", "WARNING")
+        except Exception as e:
+            self.debug_logger.log(f"Общая ошибка в read_redline_metadata: {str(e)}", "ERROR")
+            self.current_metadata["REDline Error"] = f"Общая ошибка: {str(e)}"
+            return "REDline Error"
+
+
+    def read_exif_metadata(self, file_path):
+        """Читает EXIF метаданные изображений"""
+        try:
+            with open(file_path, 'rb') as f:
+                tags = exifread.process_file(f, details=False)
+            
+            if tags:
+                for tag, value in tags.items():
+                    formatted_value = self.format_exif_value(tag, value)
+                    self.current_metadata[f"EXIF {tag}"] = formatted_value
+                self.debug_logger.log(f"Прочитано {len(tags)} EXIF тегов из {file_path}")
+                return "exifread"
+            else:
+                self.current_metadata["EXIF"] = "EXIF данные не найдены"
+                self.debug_logger.log(f"EXIF данные не найдены в {file_path}")
+                return "exifread"
+                
+        except Exception as e:
+            self.current_metadata["Ошибка чтения EXIF"] = f"Не удалось прочитать EXIF метаданные: {str(e)}"
+            self.debug_logger.log(f"Ошибка чтения EXIF для {file_path}: {str(e)}", "ERROR")
+            return "exifread Error"
+
+    def read_image_metadata(self, file_path):
+        """Читает метаданные изображений через Pillow"""
+        try:
+            with Image.open(file_path) as img:
+                self.current_metadata["Формат"] = img.format
+                self.current_metadata["Режим"] = img.mode
+                self.current_metadata["Размер"] = f"{img.width} x {img.height}"
+                
+                # Читаем EXIF данные
+                exif_data = img._getexif()
+                if exif_data:
+                    for tag_id, value in exif_data.items():
+                        tag_name = TAGS.get(tag_id, tag_id)
+                        formatted_value = self.format_exif_value(tag_name, value)
+                        self.current_metadata[f"EXIF {tag_name}"] = formatted_value
+                    self.debug_logger.log(f"Прочитано {len(exif_data)} EXIF тегов из {file_path}")
+                else:
+                    self.current_metadata["EXIF"] = "EXIF данные не найдены"
+                    self.debug_logger.log(f"EXIF данные не найдены в {file_path}")
+                
+                # Дополнительная информация
+                info = img.info
+                for key, value in info.items():
+                    if key != 'exif':  # EXIF уже обработали
+                        self.current_metadata[key] = str(value)
+                        
+            return "Pillow"
+            
+        except Exception as e:
+            self.current_metadata["Ошибка чтения"] = f"Не удалось прочитать метаданные изображения: {str(e)}"
+            self.debug_logger.log(f"Ошибка чтения изображения для {file_path}: {str(e)}", "ERROR")
+            return "Pillow Error"
+
+    def read_mxf_metadata(self, file_path):
+        """Читает метаданные MXF файлов"""
+        if self.settings_manager.use_art_for_mxf and os.path.exists(ARRI_REFERENCE_TOOL_PATH):
+            return self.read_arri_metadata(file_path)
+        else:
+            if PYMEDIAINFO_AVAILABLE:
+                self.add_mediainfo_metadata(file_path)
+                return "MediaInfo"
+            else:
+                self.current_metadata["MediaInfo Error"] = "MediaInfo не доступен"
+                return "MediaInfo Not Available"
+
+    def read_arri_metadata(self, file_path):
+        """Читает метаданные через ARRI Reference Tool"""
+        try:
+            temp_json_path = None
+            try:
+                # Создаем временный файл для JSON вывода
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as temp_file:
+                    temp_json_path = temp_file.name
+                
+                # Запускаем ARRI Reference Tool
+                cmd = [
+                    ARRI_REFERENCE_TOOL_PATH,
+                    'export',
+                    '--duration', '1',
+                    '--input', file_path,
+                    '--output', temp_json_path
+                ]
+                
+                self.debug_logger.log(f"Запуск ARRI Reference Tool: {' '.join(cmd)}")
+                
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0 and os.path.exists(temp_json_path):
+                    # Читаем JSON с метаданными
+                    with open(temp_json_path, 'r', encoding='utf-8') as f:
+                        arri_metadata = json.load(f)
+                    
+                    # Разбираем JSON на отдельные ключи
+                    flattened_metadata = self.flatten_json(arri_metadata)
+                    
+                    # Добавляем метаданные
+                    for key, value in flattened_metadata.items():
+                        self.current_metadata[f"ARRI.{key}"] = self.format_metadata_value(value)
+                    
+                    self.debug_logger.log(f"Прочитано {len(flattened_metadata)} метаданных ARRI из {file_path}")
+                    return "ARRI Reference Tool"
+                    
+                else:
+                    self.debug_logger.log(f"ARRI Tool вернул ошибку: {result.stderr}", "WARNING")
+                    
+                    # Fallback на MediaInfo
+                    if PYMEDIAINFO_AVAILABLE:
+                        self.debug_logger.log("Используем MediaInfo как fallback для MXF")
+                        self.add_mediainfo_metadata(file_path)
+                        return "MediaInfo (ART fallback)"
+                    else:
+                        self.current_metadata["ARRI Tool Error"] = f"ARRI Tool failed: {result.stderr}"
+                        return "ARRI Tool Failed"
+                        
+            except subprocess.TimeoutExpired:
+                self.debug_logger.log("ARRI Tool timeout", "WARNING")
+                if PYMEDIAINFO_AVAILABLE:
+                    self.add_mediainfo_metadata(file_path)
+                    return "MediaInfo (ART timeout fallback)"
+                else:
+                    self.current_metadata["ARRI Tool Error"] = "ARRI Tool timeout"
+                    return "ARRI Tool Timeout"
+            except Exception as e:
+                self.debug_logger.log(f"Ошибка ARRI Tool: {str(e)}", "WARNING")
+                if PYMEDIAINFO_AVAILABLE:
+                    self.add_mediainfo_metadata(file_path)
+                    return "MediaInfo (ART error fallback)"
+                else:
+                    self.current_metadata["ARRI Tool Error"] = f"ARRI Tool error: {str(e)}"
+                    return "ARRI Tool Error"
+            finally:
+                # Удаляем временный файл
+                if temp_json_path and os.path.exists(temp_json_path):
+                    try:
+                        os.unlink(temp_json_path)
+                        self.debug_logger.log(f"Временный файл удален: {temp_json_path}")
+                    except Exception as e:
+                        self.debug_logger.log(f"Ошибка удаления временного файла: {e}", "WARNING")
+        except Exception as e:
+            self.debug_logger.log(f"Общая ошибка в read_arri_metadata: {str(e)}", "ERROR")
+            self.current_metadata["ARRI Tool Error"] = f"Общая ошибка: {str(e)}"
+            return "ARRI Tool Error"
+
+
+    def read_with_default_tool(self, file_path):
+        """Читает метаданные с помощью инструмента по умолчанию"""
+        if self.settings_manager.default_metadata_tool == 'ffprobe':
+            self.add_ffprobe_metadata(file_path)
+            return "FFprobe"
+        elif self.settings_manager.default_metadata_tool == 'mediainfo':
+            if PYMEDIAINFO_AVAILABLE:
+                self.add_mediainfo_metadata(file_path)
+                return "MediaInfo"
+            else:
+                self.current_metadata["MediaInfo Error"] = "MediaInfo не доступен"
+                return "MediaInfo Not Available"
+        elif self.settings_manager.default_metadata_tool == 'exiftool':
+            if self.tool_manager.exiftool_available:
+                self.add_exiftool_metadata(file_path)
+                return "ExifTool"
+            else:
+                self.current_metadata["ExifTool Error"] = "ExifTool не доступен"
+                return "ExifTool Not Available"
+
+    def add_file_info(self, file_path):
+        """Добавляет базовую информацию о файле"""
+        file_stats = os.stat(file_path)
+        self.current_metadata["Имя файла"] = os.path.basename(file_path)
+        self.current_metadata["Путь"] = file_path
+        self.current_metadata["Размер файла"] = f"{file_stats.st_size} байт ({file_stats.st_size / 1024 / 1024:.2f} MB)"
+        self.current_metadata["Дата создания"] = datetime.datetime.fromtimestamp(file_stats.st_ctime).strftime("%Y-%m-%d %H:%M:%S")
+        self.current_metadata["Дата изменения"] = datetime.datetime.fromtimestamp(file_stats.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+
+    def format_and_display_metadata(self, metadata_source, forced_tool=None):
+        """Форматирует и отображает метаданные в таблице"""
+
+            # Сохраняем источник для возможного обновления
+        self.last_metadata_source = metadata_source
+
+        self.debug_logger.log(f"Всего собрано {len(self.current_metadata)} метаданных")
+
+        # Добавляем принудительную пометку к источнику
+        if forced_tool:
+            metadata_source = f"{metadata_source} (принудительно)"
+
+        # Сортируем метаданные с учетом цветов
+        colored_metadata = {}
+        normal_metadata = {}
+        
+        for key, value in self.current_metadata.items():
+            if key in self.settings_manager.color_metadata and not self.settings_manager.color_metadata[key].get('removed', False):
+                colored_metadata[key] = value
+            else:
+                normal_metadata[key] = value
+        
+        # Сортируем цветные метаданные по порядку
+        sorted_colored = []
+        for field_name in self.settings_manager.ordered_metadata_fields:
+            if field_name in colored_metadata:
+                sorted_colored.append((field_name, colored_metadata[field_name]))
+        
+        # Добавляем остальные цветные метаданные
+        for field_name, value in colored_metadata.items():
+            if field_name not in self.settings_manager.ordered_metadata_fields:
+                sorted_colored.append((field_name, value))
+        
+        # Сортируем обычные метаданные
+        sorted_normal = sorted(normal_metadata.items())
+        
+        # Объединяем с информацией о сенсоре в начале
+        sorted_metadata = []
+        
+        sensor_display_value = self.current_sensor_info['size'] if self.current_sensor_info['size'] else "не определено"
+        sorted_metadata.append(("Detected Sensor", sensor_display_value))
+
+        sorted_metadata.extend(sorted_colored)
+        sorted_metadata.extend(sorted_normal)
+        
+        # Отображаем в таблице
+        self.metadata_table.setRowCount(len(sorted_metadata))
+        
+        for row, (key, value) in enumerate(sorted_metadata):
+            key_item = QTableWidgetItem(key)
+            key_item.setFlags(key_item.flags() & ~Qt.ItemIsEditable)
+            
+            value_item = QTableWidgetItem(str(value))
+            value_item.setFlags(value_item.flags() & ~Qt.ItemIsEditable)
+            
+            # Добавляем подсказку для сенсора
+            if key == "Detected Sensor":
+                detection_info = self.current_sensor_info.get('detection_info', [])
+                if detection_info:
+                    resolution_info = []
+                    camera_info = []
+                    actual_resolution = None
+                    actual_camera = None
+                    
+                    for info in detection_info:
+                        if "разрешение:" in info.lower():
+                            actual_resolution = info.replace("Разрешение:", "").strip()
+                        elif "камера:" in info.lower():
+                            actual_camera = info.replace("Камера:", "").strip()
+                        elif "разрешение" in info.lower() or "width" in info.lower() or "height" in info.lower():
+                            resolution_info.append(info)
+                        else:
+                            camera_info.append(info)
+                    
+                    tooltip_parts = []
+                    
+                    if actual_camera:
+                        tooltip_parts.append(f"Камера: {actual_camera}")
+                    if actual_resolution:
+                        tooltip_parts.append(f"Разрешение: {actual_resolution}")
+                    
+                    if tooltip_parts:
+                        tooltip_parts.append("")  
+                    
+                    if any("выбрано:" in info for info in resolution_info):
+                        tooltip_parts.append("Стратегия выбора: наибольшее разрешение")
+                    
+                    if camera_info:
+                        tooltip_parts.append("Камера определена по:")
+                        tooltip_parts.extend(camera_info)
+                    if resolution_info:
+                        if tooltip_parts:
+                            tooltip_parts.append("")  
+                        tooltip_parts.append("Разрешение определено по:")
+                        tooltip_parts.extend(resolution_info)
+                    
+                    tooltip_text = "\n".join(tooltip_parts)
+                else:
+                    tooltip_text = "Не удалось определить камеру или разрешение"
+                
+                key_item.setToolTip(tooltip_text)
+                value_item.setToolTip(tooltip_text)
+            
+            self.metadata_table.setItem(row, 0, key_item)
+            self.metadata_table.setItem(row, 1, value_item)
+            
+            # Применяем цвет
+            self.apply_field_color(row, key)
+
+
+        source_res = self.current_resolution_str if self.current_resolution_str else "не определено"
+
+        # Вычисляем реформат и аспект
+        reformat_res = "не определено"
+        aspect_str = "?"
+        if self.current_resolution_str and 'x' in self.current_resolution_str:
+            try:
+                w_str, h_str = self.current_resolution_str.split('x')
+                w = int(w_str)
+                h = int(h_str)
+                aspect = w / h
+                new_w = 2048
+                new_h = int(round(new_w / aspect))
+                reformat_res = f"{new_w}x{new_h}"
+                aspect_str = f"{aspect:.2f}"
+            except Exception:
+                pass
+
+
+
+        detection_info = self.current_sensor_info.get('detection_info', [])
+            
+
+        if detection_info:
+            # Форматируем информацию так же, как и в tooltip
+            resolution_info = []
+            camera_info = []
+            actual_resolution = None
+            actual_camera = None
+            
+            for info in detection_info:
+                if "разрешение:" in info.lower():
+                    actual_resolution = info.replace("Разрешение:", "").strip()
+                elif "камера:" in info.lower():
+                    actual_camera = info.replace("Камера:", "").strip()
+                elif "разрешение" in info.lower() or "width" in info.lower() or "height" in info.lower():
+                    resolution_info.append(info)
+                else:
+                    camera_info.append(info)
+            
+            detection_text = ""
+            
+            if actual_camera:
+                detection_text += f"Камера: {actual_camera}\n"
+            if actual_resolution:
+                detection_text += f"Разрешение: {actual_resolution}\n"
+            
+            if camera_info:
+                detection_text += "\nКамера определена по:\n"
+                detection_text += "\n".join(camera_info) + "\n"
+            
+            if resolution_info:
+                detection_text += "\nРазрешение определено по:\n"
+                detection_text += "\n".join(resolution_info)
+            
+            if "выбрано:" in detection_text.lower():
+                detection_text += "\nСтратегия выбора: наибольшее разрешение"
+            
+            self.main_window.detection_info_text.setPlainText(detection_text)
+        else:
+            self.main_window.detection_info_text.setPlainText("Не удалось определить камеру или разрешение")
+        
+    # Обновляем правое нижнее поле (итоговые значения) с новым форматом
+        sensor_size = self.current_sensor_info.get('size', 'не определено')
+        camera_name = None
+        for info in detection_info:
+            if info.startswith("Камера:"):
+                camera_name = info.replace("Камера:", "").strip()
+                break
+        
+    # Получаем информацию о количестве кадров из текущей последовательности
+        frame_count = "N/A"
+        if hasattr(self.main_window, 'sequence_manager') and self.main_window.sequence_manager.current_sequence_files:
+            frame_count = len(self.main_window.sequence_manager.current_sequence_files)
+        elif self.current_metadata.get("Имя файла"):
+            # Для одиночного файла
+            frame_count = 1
+
+        # Новый формат текста
+        result_text = f"FOCAL LENGTH:\n"
+        result_text += "\n"
+        result_text += f"FILMBACK: {camera_name if camera_name else 'не определена'}\n"
+        result_text += "\n"
+        result_text += f"DETECTED SENSOR {sensor_size}\n"
+        result_text += "\n"
+        result_text += f"SOURCE FRAMES: {frame_count}\n"
+        result_text += "\n"  # пустая строка перед блоком разрешений
+        result_text += f"Source Resolution: {source_res}\n"
+        result_text += f"Reformat Resolution: {reformat_res}\n"
+        result_text += f"Aspect: {aspect_str}"
+        
+        self.main_window.sensor_camera_text.setPlainText(result_text)
+        
+        # Обновляем источник метаданных
+        current_files = self.main_window.sequence_manager.get_current_sequence_files()
+        if self.forced_metadata_tool and self.forced_metadata_file == (current_files[0] if current_files else None):
+            tool_name = METADATA_TOOLS.get(self.forced_metadata_tool, self.forced_metadata_tool)
+            self.metadata_source_label.setText(f"Метаданные выбранного элемента ({tool_name} - принудительно):")
+        else:
+            self.metadata_source_label.setText(f"Метаданные выбранного элемента ({metadata_source}):")
+        
+        self.clear_search()
+
+    def apply_field_color(self, row, field_name):
+        """Применяет цвет к полю в таблице"""
+        color = self.settings_manager.get_field_color(field_name)
+        if color:
+            for col in range(2):
+                item = self.metadata_table.item(row, col)
+                if item:
+                    item.setBackground(color)
+
+    def show_error(self, message):
+        """Показывает сообщение об ошибке в таблице"""
+        self.metadata_table.setRowCount(1)
+        self.metadata_table.setItem(0, 0, QTableWidgetItem("Ошибка"))
+        self.metadata_table.setItem(0, 1, QTableWidgetItem(message))
+        self.metadata_source_label.setText("Метаданные выбранного элемента: Ошибка")
+
+    def filter_metadata(self, search_text):
+        """Фильтрует таблицу метаданных по введенному тексту"""
+        search_text = search_text.lower().strip()
+        
+        if not search_text:
+            for row in range(self.metadata_table.rowCount()):
+                self.metadata_table.setRowHidden(row, False)
+            return
+        
+        for row in range(self.metadata_table.rowCount()):
+            field_item = self.metadata_table.item(row, 0)
+            value_item = self.metadata_table.item(row, 1)
+            
+            field_text = field_item.text().lower() if field_item else ""
+            value_text = value_item.text().lower() if value_item else ""
+            
+            if search_text in field_text or search_text in value_text:
+                self.metadata_table.setRowHidden(row, False)
+            else:
+                self.metadata_table.setRowHidden(row, True)
+
+    def clear_search(self):
+        """Очищает поле поиска и показывает все строки"""
+        self.search_input.clear()
+        for row in range(self.metadata_table.rowCount()):
+            self.metadata_table.setRowHidden(row, False)
+
+    def force_read_metadata(self, file_path, extension, tool):
+        """Принудительно читает метаданные с помощью указанного инструмента"""
+        self.debug_logger.log(f"Принудительное чтение метаданных для {file_path} с помощью {tool}")
+        
+        self.forced_metadata_tool = tool
+        self.forced_metadata_file = file_path
+        
+        self.display_metadata(file_path, extension, forced_tool=tool)
+
+    # Методы для чтения метаданных различными инструментами
     def add_ffprobe_metadata(self, file_path):
         """Добавляет метаданные через FFprobe"""
         try:
-            # Проверяем доступность ffprobe
+            # Проверяем доступность FFprobe
             result = subprocess.run(['ffprobe', '-version'], capture_output=True, text=True)
             if result.returncode != 0:
                 self.current_metadata["Ошибка FFprobe"] = "FFprobe не доступен в системе"
                 self.debug_logger.log("FFprobe не доступен в системе", "WARNING")
                 return
             
-            # Запускаем ffprobe для получения метаданных в формате JSON
             cmd = [
                 'ffprobe', 
                 '-v', 'quiet',
@@ -4590,10 +4711,10 @@ class EXRMetadataViewer(QMainWindow):
                 if 'format' in ffprobe_data:
                     format_data = ffprobe_data['format']
                     for key, value in format_data.items():
-                        if key != 'tags':  # Теги обработаем отдельно
+                        if key != 'tags':  
                             self.current_metadata[f"FFprobe Format - {key}"] = self.format_ffprobe_value(value)
                     
-                    # Обрабатываем теги формата
+                    # Теги формата
                     if 'tags' in format_data:
                         for tag_key, tag_value in format_data['tags'].items():
                             self.current_metadata[f"FFprobe Format Tag - {tag_key}"] = self.format_ffprobe_value(tag_value)
@@ -4606,15 +4727,15 @@ class EXRMetadataViewer(QMainWindow):
                             if key != 'tags' and key != 'disposition':
                                 self.current_metadata[f"FFprobe Stream {i} ({stream_type}) - {key}"] = self.format_ffprobe_value(value)
                         
-                        # Обрабатываем теги потока
+                        # Теги потока
                         if 'tags' in stream:
                             for tag_key, tag_value in stream['tags'].items():
                                 self.current_metadata[f"FFprobe Stream {i} ({stream_type}) Tag - {tag_key}"] = self.format_ffprobe_value(tag_value)
                         
-                        # Обрабатываем disposition
+                        # Диспозиции
                         if 'disposition' in stream:
                             for disp_key, disp_value in stream['disposition'].items():
-                                if disp_value == 1:  # Показываем только активные disposition
+                                if disp_value == 1:  
                                     self.current_metadata[f"FFprobe Stream {i} ({stream_type}) Disposition - {disp_key}"] = "Да"
                 
                 # Обрабатываем программы
@@ -4652,6 +4773,84 @@ class EXRMetadataViewer(QMainWindow):
             self.current_metadata["Ошибка FFprobe"] = f"Не удалось прочитать FFprobe метаданные: {str(e)}"
             self.debug_logger.log(f"Ошибка чтения FFprobe для {file_path}: {str(e)}", "ERROR")
 
+    def add_mediainfo_metadata(self, file_path):
+        """Добавляет метаданные через MediaInfo"""
+        try:
+            media_info = MediaInfo.parse(file_path)
+            self.debug_logger.log(f"Прочитано {len(media_info.tracks)} треков MediaInfo из {file_path}")
+            
+            for track in media_info.tracks:
+                track_type = track.track_type
+                
+                # Разделитель для типа трека
+                self.current_metadata[f"MediaInfo - {track_type} Track"] = "---"
+                
+                # Читаем все атрибуты трека
+                for attribute_name in dir(track):
+                    # Пропускаем служебные атрибуты
+                    if attribute_name.startswith('_') or attribute_name in ['to_data', 'to_json']:
+                        continue
+                    
+                    try:
+                        attribute_value = getattr(track, attribute_name)
+                        
+                        # Добавляем только непустые значения
+                        if attribute_value is not None and str(attribute_value).strip() != '':
+                            # Ограничиваем длину значения
+                            str_value = str(attribute_value)
+                            if len(str_value) > 500:
+                                str_value = str_value[:500] + "... [урезано]"
+                            
+                            self.current_metadata[f"MediaInfo {track_type} - {attribute_name}"] = str_value
+                    except Exception as e:
+                        self.debug_logger.log(f"Ошибка чтения атрибута {attribute_name} для трека {track_type}: {str(e)}", "WARNING")
+                        
+        except Exception as e:
+            self.current_metadata["Ошибка чтения MediaInfo"] = f"Не удалось прочитать MediaInfo метаданные: {str(e)}"
+            self.debug_logger.log(f"Ошибка чтения MediaInfo для {file_path}: {str(e)}", "ERROR")
+
+    def add_exiftool_metadata(self, file_path):
+        """Добавляет метаданные через ExifTool"""
+        if not self.tool_manager.exiftool_available:
+            self.current_metadata["ExifTool Error"] = "ExifTool не доступен"
+            self.debug_logger.log("Попытка использовать недоступный ExifTool", "WARNING")
+            return
+
+        try:
+            self.debug_logger.log(f"Чтение метаданных ExifTool для {file_path}")
+            
+            with exiftool.ExifTool() as et:
+                metadata_json = et.execute("-j", file_path)
+            
+            if metadata_json:
+                metadata_list = json.loads(metadata_json)
+                if metadata_list:
+                    metadata = metadata_list[0]  # Берем первый (и обычно единственный) результат
+                    
+                    for tag, value in metadata.items():
+                        # Упрощаем имя тега
+                        if ':' in tag:
+                            display_tag = tag.split(':')[-1]
+                        else:
+                            display_tag = tag
+                        
+                        formatted_value = self.format_exiftool_value(value)
+                        self.current_metadata[f"ExifTool {display_tag}"] = formatted_value
+                    
+                    self.debug_logger.log(f"Прочитано {len(metadata)} метаданных ExifTool из {file_path}")
+                else:
+                    self.current_metadata["ExifTool"] = "Метаданные не найдены"
+                    self.debug_logger.log(f"ExifTool не нашел метаданных для {file_path}")
+            else:
+                self.current_metadata["ExifTool"] = "Метаданные не найдены"
+                self.debug_logger.log(f"ExifTool не вернул данных для {file_path}")
+                    
+        except Exception as e:
+            error_msg = f"Ошибка чтения ExifTool: {str(e)}"
+            self.current_metadata["ExifTool Error"] = error_msg
+            self.debug_logger.log(f"Ошибка чтения ExifTool для {file_path}: {str(e)}", "ERROR")
+
+    # Методы форматирования значений
     def format_ffprobe_value(self, value):
         """Форматирует значение FFprobe для лучшего отображения"""
         if isinstance(value, (int, float)):
@@ -4665,75 +4864,66 @@ class EXRMetadataViewer(QMainWindow):
         else:
             return str(value)
 
-    def add_mediainfo_metadata(self, file_path):
-        """Добавляет метаданные через MediaInfo"""
-        try:
-            media_info = MediaInfo.parse(file_path)
-            self.debug_logger.log(f"Прочитано {len(media_info.tracks)} треков MediaInfo из {file_path}")
+    def format_exiftool_value(self, value):
+        """Форматирует значение ExifTool для лучшего отображения"""
+        if value is None:
+            return "None"
+        
+        if isinstance(value, list):
+            if len(value) == 1:
+                return self.format_exiftool_value(value[0])
+            else:
+                return ", ".join(str(self.format_exiftool_value(item)) for item in value)
+        
+        if isinstance(value, dict):
+            try:
+                return json.dumps(value, ensure_ascii=False, indent=2)
+            except:
+                return str(value)
+        
+        if isinstance(value, bytes):
+            try:
+                return value.decode('utf-8', errors='ignore')
+            except:
+                return str(value)
+        
+        if isinstance(value, (int, float)):
+            return str(value)
+        
+        if isinstance(value, str):
+            if len(value) > 1000:
+                return f"[Бинарные данные, размер: {len(value)} байт]"
             
-            for track in media_info.tracks:
-                track_type = track.track_type
-                
-                # Добавляем заголовок для типа трека
-                self.current_metadata[f"MediaInfo - {track_type} Track"] = "---"
-                
-                # Получаем все атрибуты трека
-                for attribute_name in dir(track):
-                    # Пропускаем служебные атрибуты
-                    if attribute_name.startswith('_') or attribute_name in ['to_data', 'to_json']:
-                        continue
-                    
-                    try:
-                        attribute_value = getattr(track, attribute_name)
-                        
-                        # Пропускаем None, пустые строки и слишком длинные значения
-                        if attribute_value is not None and str(attribute_value).strip() != '':
-                            # Форматируем длинные значения
-                            str_value = str(attribute_value)
-                            if len(str_value) > 500:
-                                str_value = str_value[:500] + "... [урезано]"
-                            
-                            self.current_metadata[f"MediaInfo {track_type} - {attribute_name}"] = str_value
-                    except Exception as e:
-                        self.debug_logger.log(f"Ошибка чтения атрибута {attribute_name} для трека {track_type}: {str(e)}", "WARNING")
-                        
-        except Exception as e:
-            self.current_metadata["Ошибка чтения MediaInfo"] = f"Не удалось прочитать MediaInfo метаданные: {str(e)}"
-            self.debug_logger.log(f"Ошибка чтения MediaInfo для {file_path}: {str(e)}", "ERROR")
+            if any(ord(c) < 32 and c not in '\n\r\t' for c in value):
+                return f"[Данные с непечатаемыми символами, размер: {len(value)} байт]"
+        
+        return str(value)
 
     def format_exif_value(self, tag, value):
         """Форматирует значение EXIF для лучшего отображения"""
         try:
-            # Если значение - bytes, декодируем его
             if isinstance(value, bytes):
                 try:
-                    # Пробуем декодировать как UTF-8
                     return value.decode('utf-8').strip()
                 except UnicodeDecodeError:
-                    # Если не получается, возвращаем строковое представление
                     return str(value)
             
-            # Для некоторых специфических тегов можно добавить специальную обработку
+            # Специальное форматирование для определенных тегов
             if tag in ['EXIF ExposureTime', 'EXIF ShutterSpeedValue']:
-                # Обработка времени экспозиции
                 if hasattr(value, 'num') and hasattr(value, 'den'):
                     return f"{value.num}/{value.den} сек"
             
             if tag in ['EXIF FNumber', 'EXIF ApertureValue']:
-                # Обработка диафрагмы
                 if hasattr(value, 'num') and hasattr(value, 'den'):
                     return f"f/{value.num/value.den:.1f}"
             
             if tag == 'EXIF FocalLength':
-                # Фокусное расстояние
                 if hasattr(value, 'num') and hasattr(value, 'den'):
                     return f"{value.num/value.den} мм"
             
             if tag == 'EXIF ISOSpeedRatings':
-                # ISO
                 return f"ISO {value}"
             
-            # Для всех остальных случаев возвращаем строковое представление
             return str(value)
             
         except Exception as e:
@@ -4742,14 +4932,11 @@ class EXRMetadataViewer(QMainWindow):
 
     def format_metadata_value(self, value):
         """Форматирует значение метаданных, убирая лишние символы"""
-        # Обработка специальных типов Imath
         if hasattr(value, '__class__'):
             class_name = value.__class__.__name__
             
-            # Обработка TimeCode
             if class_name == 'TimeCode':
                 try:
-                    # Получаем атрибуты TimeCode напрямую
                     hours = value.hours
                     minutes = value.minutes
                     seconds = value.seconds
@@ -4758,17 +4945,15 @@ class EXRMetadataViewer(QMainWindow):
                     color_frame = value.colorFrame
                     field_phase = value.fieldPhase
                     
-                    # Форматируем в читаемый вид
                     time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}:{frame:02d}"
                     return f"{time_str} (dropFrame: {drop_frame}, colorFrame: {color_frame}, fieldPhase: {field_phase})"
                 except Exception as e:
-                    # Если не удалось получить атрибуты, парсим строковое представление
                     str_repr = str(value)
-                    # Пример: '<Imath.TimeCode instance { time: 14:33:4:15, dropFrame: 0, ... }'
+                    
                     match = re.search(r'time:\s*([^,]+)', str_repr)
                     if match:
                         time_str = match.group(1).strip()
-                        # Извлекаем остальные параметры
+                        
                         drop_match = re.search(r'dropFrame:\s*(\d+)', str_repr)
                         drop_frame = drop_match.group(1) if drop_match else '?'
                         
@@ -4781,7 +4966,6 @@ class EXRMetadataViewer(QMainWindow):
                         return f"{time_str} (dropFrame: {drop_frame}, colorFrame: {color_frame}, fieldPhase: {field_phase})"
                     return str_repr
             
-            # Обработка Box2i и Box2f
             elif class_name in ['Box2i', 'Box2f']:
                 try:
                     min_x = value.min.x
@@ -4792,7 +4976,6 @@ class EXRMetadataViewer(QMainWindow):
                 except:
                     return str(value)
             
-            # Обработка V2i, V2f, V3i, V3f
             elif class_name in ['V2i', 'V2f']:
                 try:
                     x = value.x
@@ -4810,7 +4993,6 @@ class EXRMetadataViewer(QMainWindow):
                 except:
                     return str(value)
             
-            # Обработка Rational
             elif class_name == 'Rational':
                 try:
                     numerator = value.n
@@ -4819,11 +5001,10 @@ class EXRMetadataViewer(QMainWindow):
                 except:
                     return str(value)
         
-        # Обработка байтовых строк
         if isinstance(value, bytes):
             try:
                 decoded = value.decode('utf-8', errors='ignore').strip()
-                # Если после декодирования получилась строка с префиксом b'', пробуем обработать дальше
+                
                 if decoded.startswith("b'") and decoded.endswith("'"):
                     try:
                         return ast.literal_eval(decoded).decode('utf-8', errors='ignore')
@@ -4833,7 +5014,6 @@ class EXRMetadataViewer(QMainWindow):
             except:
                 return str(value)
         
-        # Обработка строк с префиксом b''
         elif isinstance(value, str):
             if value.startswith("b'") and value.endswith("'"):
                 try:
@@ -4841,118 +5021,931 @@ class EXRMetadataViewer(QMainWindow):
                 except:
                     return value[2:-1]
         
-        # Для всех остальных типов используем строковое представление
         return str(value)
 
-    def filter_metadata(self):
-        """Фильтрует таблицу метаданных по введенному тексту"""
-        search_text = self.search_input.text().lower().strip()
+    def flatten_json(self, json_data, parent_key='', separator='.'):
+        """
+        Рекурсивно разбирает JSON на отдельные ключи и значения
+        """
+        items = {}
+        if isinstance(json_data, dict):
+            for key, value in json_data.items():
+                new_key = f"{parent_key}{separator}{key}" if parent_key else key
+                if isinstance(value, (dict, list)):
+                    items.update(self.flatten_json(value, new_key, separator))
+                else:
+                    items[new_key] = value
+        elif isinstance(json_data, list):
+            for i, value in enumerate(json_data):
+                new_key = f"{parent_key}{separator}{i}" if parent_key else str(i)
+                if isinstance(value, (dict, list)):
+                    items.update(self.flatten_json(value, new_key, separator))
+                else:
+                    items[new_key] = value
+        else:
+            items[parent_key] = json_data
+        return items
+    
+
+    def get_metadata_dict(self, file_path, extension):
+        """Читает метаданные файла и возвращает словарь, не затрагивая текущее состояние интерфейса"""
+        # Сохраняем текущее состояние
+        old_metadata = self.current_metadata
+        old_source = getattr(self, 'last_metadata_source', None)
         
-        # Если поле поиска пустое, показываем все строки
-        if not search_text:
-            for row in range(self.metadata_table.rowCount()):
-                self.metadata_table.setRowHidden(row, False)
+        # Создаём временный словарь
+        self.current_metadata = {}
+        
+        # Читаем метаданные (метод read_metadata заполнит self.current_metadata)
+        self.read_metadata(file_path, extension, metadata_tool=None)
+        
+        # Копируем результат
+        result_metadata = self.current_metadata.copy()
+        
+        # Восстанавливаем состояние
+        self.current_metadata = old_metadata
+        self.last_metadata_source = old_source
+        
+        return result_metadata
+
+
+
+
+
+
+class SequenceManager:
+    """Менеджер для работы с последовательностями файлов"""
+    
+    def __init__(self, main_window, tool_manager):
+        self.main_window = main_window
+        self.tool_manager = tool_manager
+        self.debug_logger = main_window.debug_logger
+        
+        # Данные последовательностей
+        self.sequences = {}
+        self.current_sequence_files = []
+        
+        # Поиск последовательностей
+        self.sequence_finder = None
+
+    def clear_sequences(self):
+        """Очищает данные о последовательностях"""
+        self.sequences.clear()
+        self.current_sequence_files = []
+
+    def start_search(self, folder):
+        """Начинает поиск последовательностей в указанной папке"""
+        if not folder or not os.path.exists(folder):
+            return False
+        
+        self.debug_logger.log(f"=== НАЧАЛО ПОИСКА В ПАПКЕ: {folder} ===")
+        
+        # Останавливаем предыдущий поиск, если он активен
+        self.stop_search()
+        
+        # Очищаем данные
+        self.clear_sequences()
+        
+        # Создаем и запускаем поиск
+        self.sequence_finder = SequenceFinder(folder, self.debug_logger)
+        self.sequence_finder.sequence_found.connect(self.on_sequence_found)
+        self.sequence_finder.progress_update.connect(self.update_progress)  # Это подключение должно быть
+        self.sequence_finder.finished_signal.connect(self.on_search_finished)
+        
+        self.sequence_finder.start()
+        return True
+
+    def stop_search(self):
+        """Останавливает поиск последовательностей"""
+        if hasattr(self, 'sequence_finder') and self.sequence_finder and self.sequence_finder.isRunning():
+            self.sequence_finder.stop()
+            self.sequence_finder.wait(2000)
+            try:
+                self.sequence_finder.quit()
+                self.sequence_finder.wait(1000)
+            except:
+                pass
+            self.sequence_finder = None
+
+    def continue_search(self):
+        """Продолжает приостановленный поиск"""
+        if hasattr(self, 'sequence_finder') and self.sequence_finder:
+            self.sequence_finder.continue_search()
+            self.sequence_finder.start()
+
+    def on_sequence_found(self, sequence_data):
+        """Обрабатывает найденную последовательность"""
+        self.debug_logger.log(f"\n--- ПОЛУЧЕНА ПОСЛЕДОВАТЕЛЬНОСТЬ ---")
+        self.debug_logger.log(f"Данные: {sequence_data}")
+        
+        # Обеспечиваем наличие всех необходимых ключей
+        required_keys = ['path', 'name', 'frame_range', 'frame_count', 'files', 'extension', 'type']
+        
+        if 'name' not in sequence_data:
+            sequence_data['name'] = os.path.basename(sequence_data.get('first_file', 'Unknown'))
+        if 'display_name' not in sequence_data:
+            sequence_data['display_name'] = sequence_data['name']
+        if 'frame_range' not in sequence_data:
+            sequence_data['frame_range'] = ''
+        if 'frame_count' not in sequence_data:
+            sequence_data['frame_count'] = len(sequence_data.get('files', []))
+        if 'type' not in sequence_data:
+            sequence_data['type'] = 'unknown'
+        
+        # Проверяем наличие обязательных ключей
+        missing_keys = [key for key in required_keys if key not in sequence_data]
+        if missing_keys:
+            self.debug_logger.log(f"ОШИБКА: Отсутствуют ключи: {missing_keys}", "ERROR")
+            return
+            
+        # Проверяем, что обязательные поля не пустые
+        empty_fields = []
+        for key in ['path', 'name', 'extension']:
+            if not sequence_data.get(key):
+                empty_fields.append(key)
+        
+        if empty_fields:
+            self.debug_logger.log(f"ОШИБКА: Пустые поля: {empty_fields}", "ERROR")
+            return
+            
+        # Сохраняем последовательность
+        key = f"{sequence_data['path']}/{sequence_data['name']}"
+        self.sequences[key] = sequence_data
+        self.debug_logger.log(f"  Сохранено в словарь sequences с ключом: '{key}'")
+        
+        # Обновляем прогресс - показываем найденную последовательность
+        display_name = sequence_data.get('display_name', sequence_data.get('name', 'Unknown'))
+        self.update_progress(f"Найдена последовательность: {display_name}")
+        
+        # Добавляем в дерево через TreeManager
+        if hasattr(self.main_window, 'tree_manager'):
+            self.main_window.tree_manager.add_sequence_to_tree(sequence_data)
+        
+        self.debug_logger.log(f"--- КОНЕЦ ДОБАВЛЕНИЯ ПОСЛЕДОВАТЕЛЬНОСТИ ---\n")
+
+    def on_search_finished(self):
+        """Обрабатывает завершение поиска"""
+        try:
+            sequence_count = len(self.sequences)
+            self.debug_logger.log(f"Поиск завершен. Найдено {sequence_count} последовательностей")
+            
+            # Уведомляем главное окно о завершении
+            if hasattr(self.main_window, 'on_search_finished'):
+                self.main_window.on_search_finished()
+                
+        except Exception as e:
+            self.debug_logger.log(f"Ошибка при завершении поиска: {str(e)}", "ERROR")
+
+    def update_progress(self, message):
+        """Обновляет прогресс поиска"""
+        # Передаем сообщение в UIManager для отображения
+        if hasattr(self.main_window, 'ui_manager'):
+            self.main_window.ui_manager.update_progress(message)
+
+    def get_sequence_info(self, sequence_key):
+        """Возвращает информацию о последовательности по ключу"""
+        return self.sequences.get(sequence_key)
+
+    def get_all_sequences(self):
+        """Возвращает все последовательности"""
+        return self.sequences
+
+    def set_current_sequence_files(self, files):
+        """Устанавливает текущие файлы последовательности"""
+        self.current_sequence_files = files
+
+    def get_current_sequence_files(self):
+        """Возвращает текущие файлы последовательности"""
+        return self.current_sequence_files
+
+    def get_sequence_count(self):
+        """Возвращает количество найденных последовательностей"""
+        return len(self.sequences)
+    
+
+
+
+class ToolManager:
+    """Менеджер для работы с внешними инструментами"""
+    
+    def __init__(self, main_window):
+        self.main_window = main_window
+        self.debug_logger = main_window.debug_logger
+        
+        # Доступность инструментов
+        self.exiftool_available = False
+        self.exiftool_check_completed = False
+        
+        # Проверяем доступность инструментов
+        self.check_tools_availability()
+
+    def check_tools_availability(self):
+        """Проверяет доступность внешних инструментов"""
+        self.check_exiftool_availability()
+        # Здесь можно добавить проверки других инструментов
+
+    def check_exiftool_availability(self):
+        """Проверяет доступность exiftool в системе - синхронная версия"""
+        try:
+            if EXIFTOOL_AVAILABLE:
+                with exiftool.ExifTool() as et:
+                    version = et.execute("-ver")
+                    if version and version.strip():
+                        self.debug_logger.log(f"ExifTool доступен, версия: {version.strip()}")
+                        self.exiftool_available = True
+                    else:
+                        self.debug_logger.log("ExifTool не вернул версию", "WARNING")
+                        self.exiftool_available = False
+            else:
+                self.debug_logger.log("PyExifTool не установлен", "WARNING")
+                self.exiftool_available = False
+        except Exception as e:
+            self.debug_logger.log(f"ExifTool недоступен: {str(e)}", "WARNING")
+            self.exiftool_available = False
+        
+        self.exiftool_check_completed = True
+
+    def is_tool_available(self, tool_name):
+        """Проверяет доступность указанного инструмента"""
+        if tool_name == 'exiftool':
+            return self.exiftool_available
+        elif tool_name == 'mediainfo':
+            return PYMEDIAINFO_AVAILABLE
+        elif tool_name == 'ffprobe':
+            # FFprobe обычно доступен в системе
+            try:
+                result = subprocess.run(['ffprobe', '-version'], capture_output=True, text=True)
+                return result.returncode == 0
+            except:
+                return False
+        return False
+
+    def get_available_tools(self):
+        """Возвращает список доступных инструментов"""
+        available_tools = {}
+        
+        for tool_key, tool_name in METADATA_TOOLS.items():
+            if tool_key == 'mediainfo' and PYMEDIAINFO_AVAILABLE:
+                available_tools[tool_key] = tool_name
+            elif tool_key == 'ffprobe' and self.is_tool_available('ffprobe'):
+                available_tools[tool_key] = tool_name
+            elif tool_key == 'exiftool' and self.exiftool_available:
+                available_tools[tool_key] = tool_name
+        
+        return available_tools
+
+    def wait_for_exiftool_check(self, timeout=3):
+        """Ожидает завершения проверки ExifTool"""
+        if self.exiftool_check_completed:
+            return True
+            
+        import time
+        start_time = time.time()
+        while not self.exiftool_check_completed and time.time() - start_time < timeout:
+            time.sleep(0.1)
+            QApplication.processEvents()
+        
+        return self.exiftool_check_completed
+    
+
+
+class UIManager:
+    """Менеджер для работы с пользовательским интерфейсом"""
+    
+    def __init__(self, main_window):
+        self.main_window = main_window
+        self.debug_logger = main_window.debug_logger
+        
+        # Ссылки на UI элементы
+        self.folder_path = None
+        self.browse_btn = None
+        self.start_btn = None
+        self.stop_btn = None
+        self.continue_btn = None
+        self.settings_btn = None
+        self.art_checkbox = None
+        self.log_checkbox = None
+        self.log_btn = None
+        self.metadata_tool_combo = None
+        self.camera_editor_btn = None
+        self.progress_label = None
+        self.sequences_search_input = None
+        self.clear_sequences_search_btn = None
+
+    def setup_ui(self, central_widget):
+        """Настраивает пользовательский интерфейс"""
+        layout = QVBoxLayout()
+        
+        # Создаем элементы управления
+        self.setup_folder_controls(layout)
+        self.setup_main_controls(layout)
+        self.setup_splitter(layout)
+        self.setup_progress_label(layout)
+        
+        central_widget.setLayout(layout)
+
+         # Устанавливаем шрифт для меток
+        app_font = QApplication.font()
+    
+        # Устанавливаем шрифт для всех QLabel в центральном виджете
+        self.set_font_recursive(central_widget, app_font)
+
+        
+        # Настраиваем начальное состояние кнопок
+        self.stop_btn.setEnabled(False)
+        self.continue_btn.setEnabled(False)
+
+    def set_font_recursive(self, widget, font):
+        """Рекурсивно устанавливает шрифт для всех виджетов"""
+        if isinstance(widget, QLabel):
+            widget.setFont(font)
+        
+        if hasattr(widget, 'children'):
+            for child in widget.children():
+                if isinstance(child, QWidget):
+                    self.set_font_recursive(child, font)
+
+
+    def setup_folder_controls(self, layout):
+        """Настраивает элементы управления папкой"""
+        folder_layout = QHBoxLayout()
+        
+        self.folder_path = QLineEdit()
+        self.browse_btn = QPushButton("Обзор")
+        
+        folder_layout.addWidget(QLabel("Папка:"))
+        folder_layout.addWidget(self.folder_path)
+        folder_layout.addWidget(self.browse_btn)
+        
+        layout.addLayout(folder_layout)
+
+    def setup_main_controls(self, layout):
+        """Настраивает основные элементы управления"""
+        control_layout = QHBoxLayout()
+        
+        # Кнопки управления поиском
+        self.start_btn = QPushButton("СТАРТ")
+        self.stop_btn = QPushButton("СТОП")
+        self.continue_btn = QPushButton("ПРОДОЛЖИТЬ")
+        self.settings_btn = QPushButton("Настройки цветов")
+        
+        # Чекбоксы
+        self.art_checkbox = QCheckBox("Читать Arri и RED")
+        self.art_checkbox.setChecked(self.main_window.settings_manager.use_art_for_mxf)
+        
+        self.log_checkbox = QCheckBox("Логирование")
+        self.log_checkbox.setChecked(DEBUG)
+        
+        # Кнопка лога
+        self.log_btn = QPushButton("Лог")
+        
+        # Выбор инструмента метаданных
+        self.metadata_tool_label = QLabel("Инструмент метаданных:")
+        self.metadata_tool_combo = QComboBox()
+        
+        # Кнопка редактора камер
+        self.camera_editor_btn = QPushButton("Редактор камер")
+
+        self.analyze_res_btn = QPushButton("Анализ разрешений")
+        
+        
+        # Добавляем элементы в layout
+        control_layout.addWidget(self.start_btn)
+        control_layout.addWidget(self.stop_btn)
+        control_layout.addWidget(self.continue_btn)
+        control_layout.addWidget(self.settings_btn)
+        control_layout.addWidget(self.camera_editor_btn)
+        control_layout.addWidget(self.analyze_res_btn)
+        control_layout.addWidget(self.art_checkbox)
+        control_layout.addWidget(self.log_checkbox)
+        control_layout.addWidget(self.log_btn)
+        control_layout.addWidget(self.metadata_tool_label)
+        control_layout.addWidget(self.metadata_tool_combo)
+        control_layout.addStretch()
+        
+        layout.addLayout(control_layout)
+
+    def setup_splitter(self, layout):
+        """Настраивает разделитель с деревом и метаданными"""
+        splitter = QSplitter(Qt.Vertical)
+        
+        # Создаем виджеты для разделителя
+        sequences_widget = self.setup_sequences_widget()
+        metadata_widget = self.setup_metadata_widget()
+        
+        splitter.addWidget(sequences_widget)
+        splitter.addWidget(metadata_widget)
+        splitter.setSizes([400, 400])
+        
+        layout.addWidget(splitter)
+
+    def setup_sequences_widget(self):
+        """Настраивает виджет последовательностей"""
+        sequences_widget = QWidget()
+        sequences_layout = QVBoxLayout()
+        
+        sequences_layout.addWidget(QLabel("Структура папок и последовательностей:"))
+        
+        # Создаем дерево последовательностей
+        sequences_tree = QTreeWidget()
+        sequences_tree.setColumnCount(5)
+        sequences_tree.setHeaderLabels(["Имя", "Тип", "Диапазон", "Количество", "Путь"])
+        
+        # Настройка размеров столбцов
+        sequences_tree.setColumnWidth(0, 500)
+        sequences_tree.setColumnWidth(1, 200)
+        sequences_tree.setColumnWidth(2, 200)
+        sequences_tree.setColumnWidth(3, 100)
+        sequences_tree.setColumnWidth(4, 400)
+        
+        sequences_tree.setSelectionBehavior(QAbstractItemView.SelectRows)
+        sequences_tree.setSortingEnabled(True)
+        sequences_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        
+        sequences_layout.addWidget(sequences_tree)
+        
+        # Поиск по последовательностям
+        sequences_search_layout = QHBoxLayout()
+        sequences_search_layout.addWidget(QLabel("Поиск по последовательностям:"))
+        
+        self.sequences_search_input = QLineEdit()
+        self.sequences_search_input.setPlaceholderText("Введите текст для поиска...")
+        
+        self.clear_sequences_search_btn = QPushButton("Очистить")
+        
+        sequences_search_layout.addWidget(self.sequences_search_input)
+        sequences_search_layout.addWidget(self.clear_sequences_search_btn)
+        
+        sequences_layout.addLayout(sequences_search_layout)
+        sequences_widget.setLayout(sequences_layout)
+        
+        # Сохраняем ссылку на дерево в главном окне
+        self.main_window.sequences_tree = sequences_tree
+        
+        return sequences_widget
+
+    def setup_metadata_widget(self):
+        """Настраивает виджет метаданных с дополнительными полями справа"""
+        metadata_widget = QWidget()
+        main_layout = QHBoxLayout()  # Основной горизонтальный layout
+        
+        # Левая часть - таблица метаданных
+        left_widget = QWidget()
+        left_layout = QVBoxLayout()
+        
+        metadata_source_label = QLabel("Метаданные выбранного элемента:")
+        left_layout.addWidget(metadata_source_label)
+        
+        metadata_table = QTableWidget()
+        metadata_table.setColumnCount(2)
+        metadata_table.setHorizontalHeaderLabels(["Поле", "Значение"])
+        
+        # Настройка размеров колонок
+        for i, width in enumerate(DEFAULT_COLUMN_WIDTHS['metadata']):
+            metadata_table.setColumnWidth(i, width)
+        
+        metadata_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)
+        metadata_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        metadata_table.setColumnWidth(0, DEFAULT_COLUMN_WIDTHS['metadata'][0])
+        
+        metadata_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        metadata_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        
+        left_layout.addWidget(metadata_table)
+        
+        # Поиск по метаданным
+        search_layout = QHBoxLayout()
+        search_layout.addWidget(QLabel("Поиск по метаданным:"))
+        
+        search_input = QLineEdit()
+        search_input.setPlaceholderText("Введите текст для поиска...")
+        
+        clear_search_btn = QPushButton("Очистить")
+        
+        search_layout.addWidget(search_input)
+        search_layout.addWidget(clear_search_btn)
+        
+        left_layout.addLayout(search_layout)
+        left_widget.setLayout(left_layout)
+        
+        # Правая часть - дополнительная информация о камере и сенсоре
+        right_widget = QWidget()
+        right_layout = QVBoxLayout()
+        
+        # Верхнее поле - информация об определении
+        detection_info_label = QLabel("Информация об определении:")
+        self.detection_info_text = QTextEdit()
+        self.detection_info_text.setReadOnly(True)
+#        self.detection_info_text.setMaximumHeight(250)
+        self.detection_info_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #f0f0f0;
+                border: 1px solid #cccccc;
+            }
+        """)
+
+        # Нижнее поле - результаты определения
+        sensor_camera_label = QLabel("Результаты определения:")
+        self.sensor_camera_text = QTextEdit()
+        self.sensor_camera_text.setReadOnly(False)
+#        self.sensor_camera_text.setMaximumHeight(200)
+        self.sensor_camera_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #f8f8f8;
+                border: 1px solid #cccccc;
+            }
+        """)
+
+        # Устанавливаем шрифт после CSS
+        text_font = QFont()
+        text_font.setPointSize(DEFAULT_FONT_SIZE)
+        self.detection_info_text.setFont(text_font)
+
+        bold_font = QFont()
+        bold_font.setPointSize(DEFAULT_FONT_SIZE)
+        bold_font.setWeight(QFont.Bold)
+        self.sensor_camera_text.setFont(bold_font)
+        
+        right_layout.addWidget(detection_info_label)
+        right_layout.addWidget(self.detection_info_text, 1)
+        right_layout.addWidget(sensor_camera_label)
+        right_layout.addWidget(self.sensor_camera_text, 1)
+        right_layout.addStretch()
+        
+        right_widget.setLayout(right_layout)
+        
+        # Добавляем обе части в основной layout с соотношением 70/30
+        main_layout.addWidget(left_widget, 70)  # 70% ширины для таблицы
+        main_layout.addWidget(right_widget, 30)  # 30% ширины для дополнительной информации
+        
+        metadata_widget.setLayout(main_layout)
+        
+        # Сохраняем ссылки на элементы
+        self.main_window.metadata_table = metadata_table
+        self.main_window.metadata_source_label = metadata_source_label
+        self.main_window.search_input = search_input
+        self.main_window.clear_search_btn = clear_search_btn
+        self.main_window.detection_info_text = self.detection_info_text
+        self.main_window.sensor_camera_text = self.sensor_camera_text
+        
+        return metadata_widget
+
+    def setup_progress_label(self, layout):
+        """Настраивает метку прогресса"""
+        self.progress_label = QLabel("Готов к работе")
+        layout.addWidget(self.progress_label)
+
+    def update_metadata_tool_combo(self):
+        """Обновляет комбобокс выбора инструмента метаданных"""
+        if not hasattr(self.main_window, 'tool_manager'):
+            return
+            
+        try:
+            current_text = self.metadata_tool_combo.currentText()
+            current_data = self.metadata_tool_combo.currentData()
+            
+            self.metadata_tool_combo.clear()
+            
+            available_tools = self.main_window.tool_manager.get_available_tools()
+            
+            for tool_key, tool_name in available_tools.items():
+                self.metadata_tool_combo.addItem(tool_name, tool_key)
+            
+            # Восстанавливаем предыдущий выбор
+            restore_success = False
+            if current_data in available_tools:
+                self.metadata_tool_combo.setCurrentText(METADATA_TOOLS[current_data])
+                restore_success = True
+            elif self.main_window.settings_manager.default_metadata_tool in available_tools:
+                self.metadata_tool_combo.setCurrentText(METADATA_TOOLS[self.main_window.settings_manager.default_metadata_tool])
+                restore_success = True
+            
+            if not restore_success and available_tools:
+                first_tool = list(available_tools.keys())[0]
+                self.metadata_tool_combo.setCurrentText(available_tools[first_tool])
+                self.main_window.settings_manager.default_metadata_tool = first_tool
+            
+            if self.metadata_tool_combo.count() == 0:
+                self.metadata_tool_combo.addItem("Нет доступных инструментов", None)
+                self.metadata_tool_combo.setEnabled(False)
+            else:
+                self.metadata_tool_combo.setEnabled(True)
+                
+        except Exception as e:
+            self.debug_logger.log(f"Ошибка обновления UI инструментов: {str(e)}", "ERROR")
+
+    def connect_signals(self):
+        """Подключает сигналы к слотам главного окна"""
+        # Простые сигналы, которые можно обработать локально
+        self.browse_btn.clicked.connect(self.browse_folder)
+        self.log_checkbox.stateChanged.connect(self.toggle_logging)
+        self.art_checkbox.stateChanged.connect(self.toggle_art_usage)
+        self.clear_sequences_search_btn.clicked.connect(self.clear_sequences_search)
+        
+        # Сложные сигналы, которые требуют координации менеджеров
+        self.start_btn.clicked.connect(self.main_window.start_search)
+        self.stop_btn.clicked.connect(self.main_window.stop_search)
+        self.continue_btn.clicked.connect(self.main_window.continue_search)
+        self.settings_btn.clicked.connect(self.main_window.open_settings)
+        self.log_btn.clicked.connect(self.main_window.show_log)
+        self.camera_editor_btn.clicked.connect(self.main_window.open_camera_editor)
+        self.analyze_res_btn.clicked.connect(self.main_window.analyze_resolutions)
+        self.metadata_tool_combo.currentIndexChanged.connect(self.main_window.change_metadata_tool)
+        
+        # Сигналы поиска
+        self.sequences_search_input.textChanged.connect(self.main_window.filter_sequences)
+        self.main_window.search_input.textChanged.connect(self.main_window.filter_metadata)
+        self.main_window.clear_search_btn.clicked.connect(self.main_window.clear_search)
+        
+        # Сигналы дерева
+        self.main_window.sequences_tree.itemSelectionChanged.connect(self.main_window.on_tree_item_selected)
+        self.main_window.sequences_tree.customContextMenuRequested.connect(self.main_window.show_tree_context_menu)
+        
+        # Сигналы таблицы метаданных
+        self.main_window.metadata_table.customContextMenuRequested.connect(self.main_window.show_metadata_table_context_menu)
+
+    def browse_folder(self):
+        """Открывает диалог выбора папки"""
+        folder = QFileDialog.getExistingDirectory(self.main_window, "Выберите папку с файлами")
+        if folder:
+            self.folder_path.setText(folder)
+
+    def toggle_logging(self, state):
+        """Включает/выключает логирование"""
+        enabled = state == Qt.Checked
+        self.debug_logger.set_debug_enabled(enabled)
+        if enabled:
+            self.debug_logger.log("Логирование включено")
+        else:
+            self.debug_logger.log("Логирование выключено")
+
+    def toggle_art_usage(self, state):
+        """Включает/выключает использование ART для MXF файлов"""
+        self.main_window.settings_manager.use_art_for_mxf = state == Qt.Checked
+        self.main_window.settings_manager.save_settings()
+        if state == Qt.Checked:
+            self.debug_logger.log("Включено чтение MXF через ART")
+        else:
+            self.debug_logger.log("Выключено чтение MXF через ART")
+
+    def clear_sequences_search(self):
+        """Очищает поле поиска последовательностей"""
+        self.sequences_search_input.clear()
+        if hasattr(self.main_window, 'tree_manager'):
+            self.main_window.tree_manager.show_all_tree_items()
+
+    def update_progress(self, message):
+        """Обновляет метку прогресса"""
+        if self.progress_label:
+            self.progress_label.setText(message)
+
+    def set_search_controls_state(self, searching):
+        """Устанавливает состояние элементов управления поиском"""
+        self.start_btn.setEnabled(not searching)
+        self.stop_btn.setEnabled(searching)
+        self.continue_btn.setEnabled(False)  # По умолчанию отключена
+
+    def set_continue_enabled(self, enabled):
+        """Включает/выключает кнопку продолжения"""
+        self.continue_btn.setEnabled(enabled)
+
+
+
+
+
+
+class EXRMetadataViewer(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        
+        # Инициализация отладчика
+        self.debug_logger = DebugLogger(DEBUG)
+        
+        # Инициализация менеджеров
+        self.settings_manager = SettingsManager(self)
+        self.tool_manager = ToolManager(self)
+        self.camera_manager = CameraManager(self, self.settings_manager)
+        self.sequence_manager = SequenceManager(self, self.tool_manager)
+        self.metadata_manager = MetadataManager(self, self.camera_manager, self.tool_manager)
+        self.ui_manager = UIManager(self)
+        
+        self.detection_info_text = None
+        self.sensor_camera_text = None
+        # Инициализация UI
+        self.setup_ui()
+        
+        # Инициализация TreeManager после создания UI
+        self.tree_manager = TreeManager(self, self.sequence_manager)
+        
+        # Настройка менеджеров, требующих UI элементы
+        self.setup_managers()
+        
+        # Подключение сигналов
+        self.ui_manager.connect_signals()
+        
+        # Обновление UI инструментов
+        QTimer.singleShot(100, self.ui_manager.update_metadata_tool_combo)
+
+    def setup_ui(self):
+        """Настраивает пользовательский интерфейс"""
+        self.setWindowTitle("Universal File Sequence Metadata Viewer - Tree View")
+        self.setGeometry(100, 100, 1200, 800)
+        
+        # Установка шрифта приложения
+        app_font = QFont()
+        app_font.setPointSize(DEFAULT_FONT_SIZE)
+        app_font.setWeight(QFont.Bold)
+        QApplication.setFont(app_font)
+        
+        # Создание центрального виджета
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        
+        # Настройка UI через UIManager
+        self.ui_manager.setup_ui(central_widget)
+
+        # Дополнительно: устанавливаем тот же шрифт для всех виджетов
+        self.setFont(app_font)
+
+    def setup_managers(self):
+        """Настраивает менеджеры, требующие UI элементы"""
+        # Настройка TreeManager
+        if hasattr(self, 'sequences_tree'):
+            self.tree_manager.setup_ui(self.sequences_tree)
+        
+        # Настройка MetadataManager
+        if hasattr(self, 'metadata_table') and hasattr(self, 'metadata_source_label') and hasattr(self, 'search_input'):
+            self.metadata_manager.setup_ui(self.metadata_table, self.metadata_source_label, self.search_input)
+
+    # Основные методы, перенесенные из оригинального класса
+    # Эти методы теперь координируют работу менеджеров
+
+    def start_search(self):
+        """Начинает поиск последовательностей"""
+        # ИСПРАВЛЕНИЕ: Получаем folder_path через ui_manager
+        folder = self.ui_manager.folder_path.text()
+        if not folder or not os.path.exists(folder):
+            QMessageBox.warning(self, "Ошибка", "Укажите существующую папку")
             return
         
-        # Иначе скрываем строки, которые не содержат искомый текст
-        for row in range(self.metadata_table.rowCount()):
-            field_item = self.metadata_table.item(row, 0)
-            value_item = self.metadata_table.item(row, 1)
-            
-            field_text = field_item.text().lower() if field_item else ""
-            value_text = value_item.text().lower() if value_item else ""
-            
-            # Показываем строку, если текст найден в поле или значении
-            if search_text in field_text or search_text in value_text:
-                self.metadata_table.setRowHidden(row, False)
-            else:
-                self.metadata_table.setRowHidden(row, True)
+        # Очищаем дерево через TreeManager
+        self.tree_manager.clear_tree()
+        
+        # Инициализируем корневой элемент
+        self.tree_manager.initialize_root(folder)
+        
+        # Очищаем поиск
+        self.clear_search()
+        self.clear_sequences_search()
+        
+        # Обновляем UI
+        self.ui_manager.update_progress("Начинаем поиск...")
+        self.ui_manager.set_search_controls_state(True)
+        
+        # Запускаем поиск через SequenceManager
+        if not self.sequence_manager.start_search(folder):
+            QMessageBox.warning(self, "Ошибка", "Не удалось начать поиск")
+            return
 
-    def clear_search(self):
-        """Очищает поле поиска и показывает все строки"""
-        self.search_input.clear()
-        for row in range(self.metadata_table.rowCount()):
-            self.metadata_table.setRowHidden(row, False)
+    def stop_search(self):
+        """Останавливает поиск последовательностей"""
+        self.sequence_manager.stop_search()
+        self.ui_manager.set_search_controls_state(False)
+        self.ui_manager.set_continue_enabled(True)
+        self.ui_manager.update_progress("Поиск приостановлен")
 
-    def open_in_explorer(self, path):
-        """Открывает папку в проводнике"""
-        if os.path.exists(path):
-            try:
-                if platform.system() == "Windows":
-                    os.startfile(path)
-                elif platform.system() == "Darwin":
-                    subprocess.Popen(["open", path])
+    def continue_search(self):
+        """Продолжает приостановленный поиск"""
+        self.sequence_manager.continue_search()
+        self.ui_manager.set_search_controls_state(True)
+        self.ui_manager.set_continue_enabled(False)
+        self.ui_manager.update_progress("Продолжение поиска...")
+
+    def on_search_finished(self):
+        """Обрабатывает завершение поиска"""
+        try:
+            sequence_count = self.sequence_manager.get_sequence_count()
+            folder_count = len(self.tree_manager.folder_items)
+            
+            self.ui_manager.update_progress(f"Поиск завершен. Найдено {sequence_count} последовательностей в {folder_count} папках")
+            self.debug_logger.log(f"Поиск завершен. Найдено {sequence_count} последовательностей в {folder_count} папках")
+            
+            # Раскрываем все элементы дерева
+            self.tree_manager.expand_all_tree_items()
+            
+            # Очищаем поиск
+            self.clear_sequences_search()
+            
+        except Exception as e:
+            self.debug_logger.log(f"Ошибка при завершении поиска: {str(e)}", "ERROR")
+            self.ui_manager.update_progress(f"Ошибка при завершении поиска: {str(e)}")
+        
+        self.ui_manager.set_search_controls_state(False)
+        self.ui_manager.set_continue_enabled(False)
+
+    def on_tree_item_selected(self):
+        """Обрабатывает выбор элемента в дереве"""
+        item_data = self.tree_manager.get_selected_item_data()
+        
+        if not item_data:
+            return
+            
+        if item_data['type'] == 'sequence':
+            # Обработка последовательности
+            seq_info = item_data['info']
+            self.sequence_manager.set_current_sequence_files(seq_info['files'])
+            extension = seq_info['extension']
+            
+            if self.sequence_manager.current_sequence_files:
+                current_file = self.sequence_manager.current_sequence_files[0]
+                
+                # Сбрасываем принудительный инструмент, если файл изменился
+                if self.metadata_manager.forced_metadata_file != current_file:
+                    self.metadata_manager.forced_metadata_tool = None
+                    self.metadata_manager.forced_metadata_file = None
+                
+                # Читаем метаданные
+                if self.metadata_manager.forced_metadata_tool and self.metadata_manager.forced_metadata_file == current_file:
+                    self.metadata_manager.display_metadata(current_file, extension, forced_tool=self.metadata_manager.forced_metadata_tool)
                 else:
-                    subprocess.Popen(["xdg-open", path])
-            except Exception as e:
-                QMessageBox.warning(self, "Ошибка", f"Не удалось открыть папку: {str(e)}")
+                    self.metadata_manager.display_metadata(current_file, extension)
         else:
-            QMessageBox.warning(self, "Ошибка", f"Папка не существует: {path}")
-
-    def change_sequence_color(self, seq_type):
-        """Изменяет цвет типа последовательности через контекстное меню"""
-        current_color_data = self.sequence_colors.get(seq_type)
-        current_color = QColor(200, 200, 255)  # Цвет по умолчанию
-        
-        if current_color_data and isinstance(current_color_data, dict) and 'r' in current_color_data and 'g' in current_color_data and 'b' in current_color_data:
-            current_color = QColor(current_color_data['r'], current_color_data['g'], current_color_data['b'])
-        
-        color = QColorDialog.getColor(current_color, self, f"Выберите цвет для типа '{seq_type}'")
-        if color.isValid():
-            self.sequence_colors[seq_type] = {
-                'r': color.red(),
-                'g': color.green(),
-                'b': color.blue()
-            }
+            # Очищаем все поля при выборе папки
+            self.metadata_table.setRowCount(0)
+            self.sequence_manager.set_current_sequence_files([])
+            self.metadata_manager.current_metadata = {}
+            self.metadata_manager.forced_metadata_tool = None
+            self.metadata_manager.forced_metadata_file = None
+            self.metadata_source_label.setText("Метаданные выбранного элемента:")
             
-            self.save_settings()
-            self.update_sequences_colors()
+            # Очищаем дополнительные поля
+            if hasattr(self, 'detection_info_text'):
+                self.detection_info_text.clear()
+            if hasattr(self, 'sensor_camera_text'):
+                self.sensor_camera_text.clear()
 
-    def update_sequences_colors(self):
-        """Обновляет цвета в дереве последовательностей"""
-        # Проходим по всем элементам дерева и обновляем цвета
-        for i in range(self.sequences_tree.topLevelItemCount()):
-            top_item = self.sequences_tree.topLevelItem(i)
-            self.update_tree_item_colors(top_item)
-
-    def update_tree_item_colors(self, item):
-        """Рекурсивно обновляет цвета элементов дерева"""
-        item_data = item.data(0, Qt.UserRole)
-        if item_data and item_data['type'] == 'sequence':
-            seq_type = item_data['info']['type']
-            self.color_tree_item_by_type(item, seq_type)
+    def show_tree_context_menu(self, position):
+        """Показывает контекстное меню для дерева"""
+        self.tool_manager.wait_for_exiftool_check()
         
-        # Рекурсивно обрабатываем дочерние элементы
-        for i in range(item.childCount()):
-            self.update_tree_item_colors(item.child(i))
-
-    def apply_field_color(self, row, field_name):
-        """Применяет цвет к полю в таблице"""
-        color = self.get_field_color(field_name)
-        if color:
-            for col in range(2):
-                item = self.metadata_table.item(row, col)
-                if item:
-                    item.setBackground(color)
-
-    def get_field_color(self, field_name):
-        """Возвращает цвет для поля метаданных"""
-        if field_name in self.color_metadata:
-            color_data = self.color_metadata[field_name]
-            # Проверяем корректность структуры
-            if isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
-                if not color_data.get('removed', False):
-                    return QColor(color_data['r'], color_data['g'], color_data['b'])
-        return None
+        index = self.sequences_tree.indexAt(position)
+        if not index.isValid():
+            return
+            
+        item = self.sequences_tree.itemFromIndex(index)
+        item_data = item.data(0, Qt.UserRole)
+        
+        if not item_data:
+            return
+            
+        menu = QMenu(self)
+        
+        if item_data['type'] == 'folder':
+            open_action = menu.addAction("Открыть в проводнике")
+            expand_all_action = menu.addAction("Раскрыть все вложенные")
+            collapse_all_action = menu.addAction("Свернуть все вложенные")
+            
+            open_action.triggered.connect(lambda: self.open_in_explorer(item_data['path']))
+            expand_all_action.triggered.connect(lambda: self.tree_manager.expand_folder_recursive(item))
+            collapse_all_action.triggered.connect(lambda: self.tree_manager.collapse_folder_recursive(item))
+        else:
+            seq_info = item_data['info']
+            open_action = menu.addAction("Открыть в проводнике")
+            open_action.triggered.connect(lambda: self.open_in_explorer(seq_info['path']))
+            
+            menu.addSeparator()
+            
+            if len(seq_info['files']) > 0:
+                file_path = seq_info['files'][0]
+                extension = seq_info['extension'].lower()
+                
+                mediainfo_action = menu.addAction("Читать принудительно mediainfo")
+                ffprobe_action = menu.addAction("Читать принудительно ffprobe")
+                exiftool_action = menu.addAction("Читать принудительно ExifTool")
+                
+                if self.tool_manager.exiftool_available:
+                    exiftool_action.triggered.connect(lambda: self.metadata_manager.force_read_metadata(file_path, extension, 'exiftool'))
+                else:
+                    exiftool_action.setEnabled(False)
+                    exiftool_action.setToolTip(f"ExifTool недоступен. Проверка завершена: {self.tool_manager.exiftool_check_completed}")
+                
+                mediainfo_action.triggered.connect(lambda: self.metadata_manager.force_read_metadata(file_path, extension, 'mediainfo'))
+                ffprobe_action.triggered.connect(lambda: self.metadata_manager.force_read_metadata(file_path, extension, 'ffprobe'))
+                
+                menu.addSeparator()
+            
+            color_action = menu.addAction(f"Изменить цвет для '{seq_info['type']}'")
+            color_action.triggered.connect(lambda: self.change_sequence_color(seq_info['type']))
+        
+        menu.exec_(self.sequences_tree.viewport().mapToGlobal(position))
 
     def show_metadata_table_context_menu(self, position):
-        """Контекстное меню для таблицы метаданных"""
+        """Показывает контекстное меню для таблицы метаданных"""
         index = self.metadata_table.indexAt(position)
         selected_rows = self.metadata_table.selectionModel().selectedRows()
         
         menu = QMenu(self)
         
-        # Если есть выделенные строки, добавляем пункты для работы с выделением
         if selected_rows:
             copy_selected_values_action = menu.addAction("Копировать выделенное: значения")
             copy_selected_both_action = menu.addAction("Копировать выделенное: поля и значения")
@@ -4962,7 +5955,6 @@ class EXRMetadataViewer(QMainWindow):
             
             menu.addSeparator()
         
-        # Если кликнули на конкретную ячейку, добавляем пункты для этой ячейки
         if index.isValid():
             row = index.row()
             column = index.column()
@@ -4974,15 +5966,13 @@ class EXRMetadataViewer(QMainWindow):
                 field_name = field_name_item.text()
                 field_value = value_item.text()
                 
-                if column == 0:  # Клик по столбцу "Поле"
-                    # Копировать имя поля
+                if column == 0:
                     copy_name_action = menu.addAction("Копировать имя поля")
                     copy_name_action.triggered.connect(lambda: self.copy_field_name(field_name))
                     
                     menu.addSeparator()
                     
-                    # Проверяем, есть ли поле в цветных
-                    if field_name in self.color_metadata and not self.color_metadata[field_name].get('removed', False):
+                    if field_name in self.settings_manager.color_metadata and not self.settings_manager.color_metadata[field_name].get('removed', False):
                         color_action = menu.addAction("Изменить цвет")
                         remove_action = menu.addAction("Удалить из списка")
                         
@@ -4994,53 +5984,122 @@ class EXRMetadataViewer(QMainWindow):
                     
                     menu.addSeparator()
 
-                    # Добавляем пункты для правил камеры и разрешения
                     set_camera_action = menu.addAction("Задать камеру для этого поля")
                     set_resolution_action = menu.addAction("Задать разрешение для этого поля")
 
                     set_camera_action.triggered.connect(lambda: self.set_camera_rule(field_name, field_value))
                     set_resolution_action.triggered.connect(lambda: self.set_resolution_rule(field_name, field_value))
 
-                elif column == 1:  # Клик по столбцу "Значение"
-                    # Копировать значение поля
+                elif column == 1:
                     copy_value_action = menu.addAction("Копировать значение")
                     copy_value_action.triggered.connect(lambda: self.copy_field_value(field_value))
                     
-                    # Копировать имя и значение
                     copy_both_action = menu.addAction("Копировать имя и значение")
                     copy_both_action.triggered.connect(lambda: self.copy_field_name_and_value(field_name, field_value))
         
         menu.exec_(self.metadata_table.viewport().mapToGlobal(position))
 
-    def update_metadata_display(self):
-        """Обновляет отображение метаданных с учетом новых правил"""
-        if hasattr(self, 'current_metadata') and self.current_metadata:
-            # Сохраняем текущий выбор
-            current_items = self.sequences_tree.selectedItems()
-            if current_items:
-                item_data = current_items[0].data(0, Qt.UserRole)
-                if item_data and item_data['type'] == 'sequence':
-                    seq_info = item_data['info']
-                    if self.current_sequence_files:
-                        current_file = self.current_sequence_files[0]
-                        extension = seq_info['extension']
-                        self.display_metadata(current_file, extension)
+    def filter_sequences(self):
+        """Фильтрует дерево последовательностей"""
+        search_text = self.ui_manager.sequences_search_input.text()
+        self.tree_manager.filter_sequences(search_text)
 
+    def filter_metadata(self):
+        """Фильтрует таблицу метаданных"""
+        search_text = self.search_input.text()
+        self.metadata_manager.filter_metadata(search_text)
+
+    def clear_search(self):
+        """Очищает поиск по метаданным"""
+        self.metadata_manager.clear_search()
+
+    def clear_sequences_search(self):
+        """Очищает поиск по последовательностям"""
+        self.ui_manager.clear_sequences_search()
+
+    def change_metadata_tool(self, index):
+        """Изменяет инструмент для чтения метаданных"""
+        tool_key = self.ui_manager.metadata_tool_combo.currentData()
+        
+        if tool_key is None or tool_key not in METADATA_TOOLS:
+            self.debug_logger.log(f"Предупреждение: неверный ключ инструмента: {tool_key}", "WARNING")
+            return
+        
+        self.settings_manager.default_metadata_tool = tool_key
+        self.settings_manager.save_settings()
+        self.debug_logger.log(f"Изменен инструмент метаданных на: {METADATA_TOOLS[tool_key]}")
+
+    def open_settings(self):
+        """Открывает диалог настроек цветов"""
+        dialog = SettingsDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            # Обновляем цвета через менеджеры
+            if hasattr(self, 'tree_manager'):
+                self.tree_manager.update_sequences_colors()
+            if hasattr(self, 'metadata_manager') and hasattr(self.metadata_manager, 'update_metadata_colors'):
+                self.metadata_manager.update_metadata_colors()
+
+    def open_camera_editor(self):
+        """Открывает редактор камер"""
+        if not self.camera_manager.camera_data.get('cameras'):
+            reply = QMessageBox.information(self, "База камер пуста", 
+                                        "База данных камер пуста. Хотите добавить первую камеру?",
+                                        QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                dialog = CameraEditorDialog(self)
+                if dialog.exec_() == QDialog.Accepted:
+                    self.camera_manager.load_camera_data()
+        else:
+            dialog = CameraEditorDialog(self)
+            dialog.exec_()
+
+    def show_log(self):
+        """Безопасно показывает диалог с логами"""
+        try:
+            # Проверяем, не открыт ли уже диалог логов
+            if hasattr(self, 'log_dialog') and self.log_dialog:
+                try:
+                    self.log_dialog.raise_()
+                    self.log_dialog.activateWindow()
+                    return
+                except:
+                    # Если диалог был удален, создаем новый
+                    pass
+            
+            # Создаем немодальный диалог с отложенной инициализацией
+            QTimer.singleShot(100, lambda: self._create_log_dialog())
+            
+        except Exception as e:
+            print(f"Error showing log: {e}")
+
+    def _create_log_dialog(self):
+        """Создает диалог лога с защитой от ошибок"""
+        try:
+            self.log_dialog = LogViewerDialog(self.debug_logger, self)
+            self.log_dialog.setAttribute(Qt.WA_DeleteOnClose)
+            
+            # Подключаем сигнал закрытия диалога для очистки ссылки
+            self.log_dialog.destroyed.connect(lambda: setattr(self, 'log_dialog', None))
+            
+            self.log_dialog.show()
+        except Exception as e:
+            print(f"Error creating log dialog: {e}")
+            QMessageBox.warning(self, "Ошибка", f"Не удалось открыть окно логов: {str(e)}")
+
+    # Методы работы с буфером обмена (оставлены в главном классе для простоты)
     def copy_selected_values(self):
         """Копирует значения выделенных строк в буфер обмена"""
         selected_indexes = self.metadata_table.selectionModel().selectedIndexes()
         if not selected_indexes:
             return
         
-        # Собираем уникальные строки (может быть выделено несколько ячеек в разных строках)
         rows_values = {}
         for index in selected_indexes:
-            if index.column() == 1:  # Только столбец значений
+            if index.column() == 1:
                 value_item = self.metadata_table.item(index.row(), 1)
                 if value_item:
                     rows_values[index.row()] = value_item.text()
         
-        # Сортируем по номеру строки и копируем
         if rows_values:
             values = [rows_values[row] for row in sorted(rows_values.keys())]
             clipboard = QApplication.clipboard()
@@ -5053,7 +6112,6 @@ class EXRMetadataViewer(QMainWindow):
         if not selected_indexes:
             return
         
-        # Собираем уникальные строки
         rows_data = {}
         for index in selected_indexes:
             row = index.row()
@@ -5063,68 +6121,11 @@ class EXRMetadataViewer(QMainWindow):
                 if field_item and value_item:
                     rows_data[row] = f"{field_item.text()}: {value_item.text()}"
         
-        # Сортируем по номеру строки и копируем
         if rows_data:
             fields_and_values = [rows_data[row] for row in sorted(rows_data.keys())]
             clipboard = QApplication.clipboard()
             clipboard.setText("\n".join(fields_and_values))
             self.show_toast(f"Скопировано {len(fields_and_values)} полей и значений")
-
-    def set_camera_rule(self, field, value):
-        """Добавляет правило для камеры"""
-        # Проверяем, есть ли камеры в базе
-        cameras = list(self.camera_data.get('cameras', {}).keys())
-        if not cameras:
-            QMessageBox.warning(self, "Ошибка", 
-                            "Нет доступных камер. Сначала добавьте камеры в редакторе камер.")
-            return
-        
-        # Проверяем, нет ли уже такого правила
-        existing_rules = self.camera_detection_settings.get('camera_rules', [])
-        for rule in existing_rules:
-            if rule.get('field') == field and rule.get('value') == value:
-                QMessageBox.information(self, "Информация", "Такое правило уже существует")
-                return
-        
-        camera, ok = QInputDialog.getItem(self, "Выбор камеры", "Выберите камеру:", cameras, 0, False)
-        if ok and camera:
-            # Добавляем правило
-            new_rule = {
-                'field': field,
-                'value': value,
-                'camera': camera
-            }
-            self.camera_detection_settings.setdefault('camera_rules', []).append(new_rule)
-            self.save_settings()
-            
-            QMessageBox.information(self, "Успех", f"Правило добавлено: {field} = {value} → {camera}")
-            
-            # Обновляем отображение метаданных, если есть открытый файл
-            self.update_metadata_display()
-
-    def set_resolution_rule(self, field, value):
-        """Добавляет правило для разрешения"""
-        rule_types = ["range", "single_w", "single_h", "combined"]
-        rule_type, ok = QInputDialog.getItem(self, "Тип правила", "Выберите тип правила:", rule_types, 0, False)
-        if ok and rule_type:
-            # Проверяем, нет ли уже такого правила
-            existing_rules = self.camera_detection_settings.get('resolution_rules', [])
-            for rule in existing_rules:
-                if rule.get('field') == field and rule.get('type') == rule_type:
-                    QMessageBox.information(self, "Информация", "Такое правило уже существует")
-                    return
-            
-            new_rule = {
-                'field': field,
-                'type': rule_type
-            }
-            self.camera_detection_settings.setdefault('resolution_rules', []).append(new_rule)
-            self.save_settings()
-            
-            QMessageBox.information(self, "Успех", "Правило для разрешения добавлено")
-            
-            # Обновляем отображение метаданных, если есть открытый файл
-            self.update_metadata_display()
 
     def copy_field_name(self, field_name):
         """Копирует имя поля в буфер обмена"""
@@ -5148,193 +6149,173 @@ class EXRMetadataViewer(QMainWindow):
         """Добавляет поле с выбранным цветом"""
         color = QColorDialog.getColor(QColor(200, 200, 255), self, f"Выберите цвет для поля '{field_name}'")
         if color.isValid():
-            self.color_metadata[field_name] = {
-                'r': color.red(),
-                'g': color.green(),
-                'b': color.blue(),
-                'removed': False
-            }
-            
-            # Добавляем поле в конец списка порядка, если его там нет
-            if field_name not in self.ordered_metadata_fields:
-                self.ordered_metadata_fields.append(field_name)
-            
-            self.save_settings()
-            self.update_metadata_colors()
-            
+            self.settings_manager.add_field_with_color(field_name, color)
+            # ЗАМЕНИТЬ display_metadata на update_metadata_colors
+            self.metadata_manager.update_metadata_colors()
             QMessageBox.information(self, "Успех", f"Поле '{field_name}' добавлено с выбранным цветом")
 
     def change_field_color(self, field_name):
         """Изменяет цвет поля"""
-        if field_name in self.color_metadata:
-            current_color_data = self.color_metadata[field_name]
+        if field_name in self.settings_manager.color_metadata:
+            current_color_data = self.settings_manager.color_metadata[field_name]
             current_color = QColor(current_color_data['r'], current_color_data['g'], current_color_data['b'])
             
             color = QColorDialog.getColor(current_color, self, f"Выберите цвет для поля '{field_name}'")
             if color.isValid():
-                self.color_metadata[field_name] = {
-                    'r': color.red(),
-                    'g': color.green(),
-                    'b': color.blue(),
-                    'removed': False
-                }
-                
-                self.save_settings()
-                self.update_metadata_colors()
+                self.settings_manager.change_field_color(field_name, color)
+                # ЗАМЕНИТЬ display_metadata на update_metadata_colors
+                self.metadata_manager.update_metadata_colors()
 
     def remove_field_from_colors(self, field_name):
         """Удаляет поле из цветных в корзину"""
-        if field_name in self.color_metadata:
-            # Перемещаем в корзину
-            color_data = self.color_metadata[field_name]
-            self.removed_metadata[field_name] = color_data
-            
-            # Удаляем из активных
-            del self.color_metadata[field_name]
-            
-            # Удаляем из списка порядка
-            if field_name in self.ordered_metadata_fields:
-                self.ordered_metadata_fields.remove(field_name)
-            
-            self.save_settings()
-            self.update_metadata_colors()
-            
-            QMessageBox.information(self, "Успех", f"Поле '{field_name}' перемещено в корзину")
+        self.settings_manager.remove_field_from_colors(field_name)
+        # ЗАМЕНИТЬ display_metadata на update_metadata_colors
+        self.metadata_manager.update_metadata_colors()
+        QMessageBox.information(self, "Успех", f"Поле '{field_name}' перемещено в корзину")
 
-    def update_metadata_colors(self):
-        """Обновляет цвета в таблице метаданных"""
-        if not self.current_metadata:
+    def change_sequence_color(self, seq_type):
+        """Изменяет цвет типа последовательности"""
+        current_color_data = self.settings_manager.sequence_colors.get(seq_type)
+        current_color = QColor(200, 200, 255)
+        
+        if current_color_data and isinstance(current_color_data, dict) and 'r' in current_color_data and 'g' in current_color_data and 'b' in current_color_data:
+            current_color = QColor(current_color_data['r'], current_color_data['g'], current_color_data['b'])
+        
+        color = QColorDialog.getColor(current_color, self, f"Выберите цвет для типа '{seq_type}'")
+        if color.isValid():
+            self.settings_manager.change_sequence_color(seq_type, color)
+            self.tree_manager.update_sequences_colors()
+
+    def set_camera_rule(self, field, value):
+        """Добавляет правило для камеры"""
+        cameras = list(self.camera_manager.camera_data.get('cameras', {}).keys())
+        if not cameras:
+            QMessageBox.warning(self, "Ошибка", 
+                            "Нет доступных камер. Сначала добавьте камеры в редакторе камер.")
             return
         
-        # Полностью перерисовываем таблицу с новыми цветами
-        if self.sequences_tree.selectedItems():
-            self.on_tree_item_selected()
+        existing_rules = self.settings_manager.camera_detection_settings.get('camera_rules', [])
+        for rule in existing_rules:
+            if rule.get('field') == field and rule.get('value') == value:
+                QMessageBox.information(self, "Информация", "Такое правило уже существует")
+                return
+        
+        camera, ok = QInputDialog.getItem(self, "Выбор камеры", "Выберите камеру:", cameras, 0, False)
+        if ok and camera:
+            self.camera_manager.add_camera_rule(field, value, camera)
+            QMessageBox.information(self, "Успех", f"Правило добавлено: {field} = {value} → {camera}")
+            self.metadata_manager.display_metadata(
+                self.sequence_manager.current_sequence_files[0] if self.sequence_manager.current_sequence_files else "",
+                ""
+            )
 
-    def open_settings(self):
-        dialog = SettingsDialog(self)
-        if dialog.exec_() == QDialog.Accepted:
-            # Настройки сохраняются автоматически в диалоге
-            # Обновляем отображение метаданных с новыми цветами
-            self.update_metadata_colors()
-            self.update_sequences_colors()
-
-    def show_log(self):
-        """Показывает диалог с логами"""
-        dialog = LogViewerDialog(self.debug_logger, self)
-        dialog.exec_()
-
-    def load_settings(self):
-        """Загружает настройки из файла"""
-        try:
-            # Создаем директорию для настроек если ее нет (для жесткого пути)
-            if SETTINGS_FILE_HARD:
-                settings_dir = os.path.dirname(SETTINGS_FILE_HARD)
-                if settings_dir and not os.path.exists(settings_dir):
-                    os.makedirs(settings_dir, exist_ok=True)
-                    
-            if os.path.exists(self.settings_file):
-                with open(self.settings_file, 'r', encoding='utf-8') as f:
-                    settings = json.load(f)
-                    
-                    # Загружаем цвета метаданных
-                    self.color_metadata = settings.get('color_metadata', {})
-                    self.removed_metadata = settings.get('removed_metadata', {})
-                    
-                    # Загружаем цвета последовательностей
-                    self.sequence_colors = settings.get('sequence_colors', {})
-                    
-                    # Загружаем порядок полей метаданных
-                    self.ordered_metadata_fields = settings.get('ordered_metadata_fields', [])
-                    
-                    # Загружаем настройку использования ART для MXF
-                    self.use_art_for_mxf = settings.get('use_art_for_mxf', False)
-                    
-                    # Загружаем настройку инструмента по умолчанию для метаданных
-                    self.default_metadata_tool = settings.get('default_metadata_tool', 'mediainfo')
-                    
-                    # Если ordered_metadata_fields пуст, инициализируем его из color_metadata
-                    if not self.ordered_metadata_fields and self.color_metadata:
-                        self.ordered_metadata_fields = list(self.color_metadata.keys())
-
-                    # Загружаем настройки для камер
-                    self.camera_detection_settings = settings.get('camera_detection', {
-                        'camera_rules': [],
-                        'resolution_rules': [
-                            {'field': 'dataWindow', 'type': 'range'},
-                            {'field': 'displayWindow', 'type': 'range'},
-                            {'field': 'width', 'type': 'single_w'},
-                            {'field': 'height', 'type': 'single_h'}
-                        ]
-                    })
-                        
-        except Exception as e:
-            self.debug_logger.log(f"Ошибка загрузки настроек: {e}", "ERROR")
-            self.color_metadata = {}
-            self.removed_metadata = {}
-            self.sequence_colors = {}
-            self.ordered_metadata_fields = []
-            self.use_art_for_mxf = False
-            self.default_metadata_tool = 'mediainfo'
-            self.camera_detection_settings = {
-                'camera_rules': [],
-                'resolution_rules': [
-                    {'field': 'dataWindow', 'type': 'range'},
-                    {'field': 'displayWindow', 'type': 'range'},
-                    {'field': 'width', 'type': 'single_w'},
-                    {'field': 'height', 'type': 'single_h'}
-                ]
-            }
-
-    def save_settings(self):
-        """Сохраняет настройки в файл"""
-        try:
-            # Создаем директорию для настроек если ее нет (для жесткого пути)
-            if SETTINGS_FILE_HARD:
-                settings_dir = os.path.dirname(SETTINGS_FILE_HARD)
-                if settings_dir and not os.path.exists(settings_dir):
-                    os.makedirs(settings_dir, exist_ok=True)
-
-            # Убедимся, что все данные в правильном формате
-            cleaned_color_metadata = {}
-            for field_name, color_data in self.color_metadata.items():
-                if isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
-                    cleaned_color_metadata[field_name] = color_data
+    def set_resolution_rule(self, field, value):
+        """Добавляет правило для разрешения"""
+        rule_types = ["range", "single_w", "single_h", "combined"]
+        rule_type, ok = QInputDialog.getItem(self, "Тип правила", "Выберите тип правила:", rule_types, 0, False)
+        if ok and rule_type:
+            existing_rules = self.settings_manager.camera_detection_settings.get('resolution_rules', [])
+            for rule in existing_rules:
+                if rule.get('field') == field and rule.get('type') == rule_type:
+                    QMessageBox.information(self, "Информация", "Такое правило уже существует")
+                    return
             
-            cleaned_removed_metadata = {}
-            for field_name, color_data in self.removed_metadata.items():
-                if isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
-                    cleaned_removed_metadata[field_name] = color_data
-            
-            cleaned_sequence_colors = {}
-            for seq_type, color_data in self.sequence_colors.items():
-                if isinstance(color_data, dict) and 'r' in color_data and 'g' in color_data and 'b' in color_data:
-                    cleaned_sequence_colors[seq_type] = color_data
-            
-            settings = {
-                'color_metadata': cleaned_color_metadata,
-                'removed_metadata': cleaned_removed_metadata,
-                'sequence_colors': cleaned_sequence_colors,
-                'ordered_metadata_fields': self.ordered_metadata_fields,
-                'use_art_for_mxf': self.use_art_for_mxf,
-                'default_metadata_tool': self.default_metadata_tool,
-                'camera_detection': self.camera_detection_settings
-            }
-            
-            with open(self.settings_file, 'w', encoding='utf-8') as f:
-                json.dump(settings, f, ensure_ascii=False, indent=2)
-                
-        except Exception as e:
-            self.debug_logger.log(f"Ошибка сохранения настроек: {e}", "ERROR")
+            self.camera_manager.add_resolution_rule(field, rule_type)
+            QMessageBox.information(self, "Успех", "Правило для разрешения добавлено")
+            self.metadata_manager.display_metadata(
+                self.sequence_manager.current_sequence_files[0] if self.sequence_manager.current_sequence_files else "",
+                ""
+            )
+
+    def open_in_explorer(self, path):
+        """Открывает папку в проводнике"""
+        if os.path.exists(path):
+            try:
+                if platform.system() == "Windows":
+                    os.startfile(path)
+                elif platform.system() == "Darwin":
+                    subprocess.Popen(["open", path])
+                else:
+                    subprocess.Popen(["xdg-open", path])
+            except Exception as e:
+                QMessageBox.warning(self, "Ошибка", f"Не удалось открыть папку: {str(e)}")
+        else:
+            QMessageBox.warning(self, "Ошибка", f"Папка не существует: {path}")
+
+    def show_toast(self, message, duration=2000, opacity=0.5):
+        """Показывает toast сообщение"""
+        toast = ToastMessage(message, self, duration, opacity)
+        toast.show_toast()
+
+
+    def analyze_resolutions(self):
+        """Анализирует разрешения всех найденных последовательностей (асинхронно)"""
+        sequences = self.sequence_manager.get_all_sequences()
+        if not sequences:
+            QMessageBox.information(self, "Информация", "Нет последовательностей для анализа.")
+            return
+
+        # Фильтруем только настоящие последовательности (не одиночные видео и не группы)
+        filtered_seqs = []
+        for seq in sequences.values():
+            if seq.get('frame_count', 1) > 1 and 'sequence' in seq.get('type', ''):
+                filtered_seqs.append(seq)
+
+        if not filtered_seqs:
+            QMessageBox.information(self, "Информация", "Нет подходящих последовательностей (с несколькими кадрами).")
+            return
+
+        # Создаём диалог
+        dialog = ResolutionAnalysisDialog(self)
+
+        # Создаём копии данных для рабочего потока
+        camera_rules = self.settings_manager.camera_detection_settings.get('camera_rules', []).copy()
+        resolution_rules = self.settings_manager.camera_detection_settings.get('resolution_rules', []).copy()
+        cameras_data = self.camera_manager.camera_data.copy()
+
+        # Создаём рабочего и поток
+        self.worker_thread = QThread()
+        self.worker = ResolutionAnalyzerWorker(filtered_seqs, camera_rules, resolution_rules, cameras_data)
+        self.worker.moveToThread(self.worker_thread)
+
+        # Подключаем сигналы
+        self.worker.result_ready.connect(dialog.add_or_update_resolution)
+        self.worker.progress.connect(dialog.set_progress)
+        self.worker.finished.connect(self.worker_thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.worker_thread.finished.connect(self.worker_thread.deleteLater)
+        self.worker_thread.started.connect(self.worker.run)
+
+        # Сохраняем ссылки в диалоге для возможности остановки
+        dialog.worker = self.worker
+        dialog.thread = self.worker_thread
+
+        # Запускаем поток
+        self.worker_thread.start()
+
+        # Показываем диалог (немодально, чтобы можно было закрыть и остановить)
+        dialog.show()
+
+
+
+
+
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     
-    # Устанавливаем шрифт приложения
+    # Установка шрифта приложения
     app_font = QFont()
     app_font.setPointSize(DEFAULT_FONT_SIZE)
+    app_font.setWeight(QFont.Bold)
     app.setFont(app_font)
     
+    # Создание и отображение главного окна
     window = EXRMetadataViewer()
     window.show()
     sys.exit(app.exec_())
+
+
+    
+#f
