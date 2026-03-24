@@ -1505,6 +1505,7 @@ class MainWindow(QMainWindow):
         self.apply_log_settings()
         self.init_external_modules()
         self.headless = headless
+        self.auto_quit_on_finish = False
         self._apply_forced_path()
         self._disable_saving = False
         self.copied_model_data = None   # хранит (group_name, model_dict) для копирования
@@ -1540,9 +1541,9 @@ class MainWindow(QMainWindow):
                 self.path_edit.setText(path)
                 self.path_edit.setReadOnly(True)
                 self.btn_browse.setEnabled(False)
-                # Автозапуск только в GUI-режиме
                 if not self.headless:
-                    QTimer.singleShot(100, self.scan_shots)
+                    self.auto_quit_on_finish = True   # <--- добавить
+                QTimer.singleShot(100, self.scan_shots)
 
     def _reset_sorting_flag(self):
         self._sorting = False
@@ -2983,6 +2984,10 @@ class MainWindow(QMainWindow):
 
         self.tree.setSortingEnabled(True)
         self.btn_start.setEnabled(True)
+#        if self.auto_quit_on_finish:
+            # запускаем обработку после небольшой паузы, чтобы GUI успел отрисоваться
+#            QTimer.singleShot(500, self.start_processing)
+
         msg = f"Scan complete. Found shots: {len(self.shots)}"
         self.log_info(msg)
 
@@ -3103,6 +3108,8 @@ class MainWindow(QMainWindow):
         else:
             self.log_info("Processing finished. No projects created.")
         QMessageBox.information(self, "Done", "Processing finished.")
+        if self.auto_quit_on_finish:
+            QApplication.quit()
 
     def pause_processing(self):
         if self.worker:
@@ -3132,22 +3139,35 @@ class MainWindow(QMainWindow):
     def run_headless(self):
         """Безголовый режим: сканирование и создание проектов без GUI."""
         print("=== Запуск безголового режима ===")
-        self.scan_shots()  # заполняет self.shots
+        try:
+            self.scan_shots()
+        except Exception as e:
+            print(f"Ошибка при сканировании: {e}")
+            sys.exit(1)
+
         if not self.shots:
             print("Не найдено шотов для обработки.")
             sys.exit(1)
 
+        success_count = 0
         for shot in self.shots:
             if not shot.sequences:
                 continue
             print(f"\nОбработка шота: {shot.name}")
-            success, project_path = self.process_shot_headless(shot)
+            try:
+                success, project_path = self.process_shot_headless(shot)
+            except Exception as e:
+                print(f"  Критическая ошибка при обработке шота {shot.name}: {e}")
+                success = False
             if success:
                 print(f"  Проект создан: {project_path}")
+                success_count += 1
             else:
                 print(f"  ОШИБКА: не удалось создать проект для {shot.name}")
-        print("\n=== Обработка завершена ===")
-        sys.exit(0)
+
+        print(f"\n=== Обработка завершена. Успешно: {success_count} из {len(self.shots)} ===")
+        QApplication.quit()  # на случай, если есть активные события
+        sys.exit(0 if success_count == len(self.shots) else 1)
 
     def process_shot_headless(self, shot):
         """Синхронное создание проекта для одного шота без добавления моделей."""
@@ -3426,6 +3446,7 @@ class SettingsDialog(QDialog):
         self.settings = settings
         self._updating_tree = False
         
+        
         self.setWindowTitle("Settings")
         self.setModal(True)
         layout = QFormLayout()
@@ -3595,6 +3616,23 @@ class SettingsDialog(QDialog):
         layout.addRow(buttons)
 
         self.setLayout(layout)
+
+
+    def _apply_forced_path(self):
+        if self.forced_path:
+            path = self.forced_path
+            if not os.path.exists(path):
+                self.log_error(f"Provided path does not exist: {path}")
+            elif not os.path.isdir(path):
+                self.log_error(f"Provided path is not a directory: {path}")
+            else:
+                self.root_path = path
+                self.path_edit.setText(path)
+                self.path_edit.setReadOnly(True)
+                self.btn_browse.setEnabled(False)
+                if not self.headless:
+                    self.auto_quit_on_finish = True   # <-- добавить
+                QTimer.singleShot(100, self.scan_shots)
 
     def set_color_label(self, label, color_rgb):
         """Устанавливает фон QLabel в заданный цвет."""
