@@ -697,20 +697,26 @@ class Shot:
             self.user_sensor_width = data.get("user_sensor_width", None)
             self.user_sensor_height = data.get("user_sensor_height", None)
             self.user_focal = data.get("user_focal", None)
-            # Загрузка point_groups (без изменений)
             loaded_groups = data.get("point_groups", {})
             self.point_groups = {}
             for group_name, items in loaded_groups.items():
+                # Поддержка старого формата (только пути)
                 if items and isinstance(items[0], str):
                     new_items = []
                     for path in items:
+                        name = os.path.splitext(os.path.basename(path))[0]
                         new_items.append({
+                            "name": name,
                             "path": path,
                             "enabled": True,
                             "texture": {"path": "", "enabled": False}
                         })
                     self.point_groups[group_name] = new_items
                 else:
+                    # Для нового формата убеждаемся, что поле name присутствует
+                    for m in items:
+                        if "name" not in m:
+                            m["name"] = os.path.splitext(os.path.basename(m["path"]))[0]
                     self.point_groups[group_name] = items
             if "CAMERA" not in self.point_groups:
                 self.point_groups["CAMERA"] = []
@@ -718,8 +724,12 @@ class Shot:
             print(f"Error loading config for {self.name}: {e}")
 
     # New methods for model management
-    def add_model_to_group(self, group_name, model_path, enabled=True, texture_path=None, texture_enabled=False):
+    def add_model_to_group(self, group_name, model_path, enabled=True, texture_path=None, texture_enabled=False, name=None):
+        """Добавляет модель в группу. Если name не указан, берёт имя из пути."""
+        if name is None:
+            name = os.path.splitext(os.path.basename(model_path))[0]
         model_dict = {
+            "name": name,
             "path": model_path,
             "enabled": enabled,
             "texture": {
@@ -1381,16 +1391,22 @@ class LogWindow(QDialog):
         self.text_edit.append(msg)
 
 # ================== Edit Model Dialog ==================
+
+
+
 class EditModelDialog(QDialog):
     def __init__(self, model_dict=None, parent=None, project_resources=None):
         super().__init__(parent)
-
         self.setWindowTitle("Edit Model")
-        self.resize(1000, 300)   # ширина 600, высота 300
-# или self.setMinimumSize(500, 250)
-        self.model_dict = model_dict or {"path": "", "enabled": True, "texture": {"path": "", "enabled": False}}
+        self.resize(500, 300)
+        self.model_dict = model_dict or {"name": "", "path": "", "enabled": True, "texture": {"path": "", "enabled": False}}
         self.project_resources = project_resources
         layout = QVBoxLayout()
+
+        # Name
+        layout.addWidget(QLabel("Model name:"))
+        self.name_edit = QLineEdit(self.model_dict.get("name", ""))
+        layout.addWidget(self.name_edit)
 
         # Model section
         model_group = QWidget()
@@ -1439,6 +1455,7 @@ class EditModelDialog(QDialog):
 
     def get_model_dict(self):
         return {
+            "name": self.name_edit.text(),
             "path": self.model_path_edit.text(),
             "enabled": self.model_enabled_cb.isChecked(),
             "texture": {
@@ -1446,15 +1463,13 @@ class EditModelDialog(QDialog):
                 "enabled": self.texture_enabled_cb.isChecked() if self.texture_path_edit.text() else False
             }
         }
-    
+
     def accept(self):
         model_dict = self.get_model_dict()
-        # Если проект существует и модель имеет путь, добавляем в ресурсы (если новой)
         if self.project_resources and model_dict["path"]:
             exists = any(m["model_path"] == model_dict["path"] for m in self.project_resources.models)
             if not exists:
-                name = os.path.splitext(os.path.basename(model_dict["path"]))[0]
-                self.project_resources.add_model(model_dict["path"], model_dict["texture"]["path"], name)
+                self.project_resources.add_model(model_dict["path"], model_dict["texture"]["path"], model_dict["name"])
         super().accept()
 
 # ================== Main Window ==================
@@ -1910,7 +1925,6 @@ class MainWindow(QMainWindow):
         current = self.resources_tree.currentItem()
         if not current or not self.project_resources:
             return
-        # Поднимаемся до корня модели
         while current.parent():
             current = current.parent()
         data = current.data(0, Qt.UserRole)
@@ -1919,6 +1933,7 @@ class MainWindow(QMainWindow):
         idx = data[1]
         m = self.project_resources.models[idx]
         model_dict = {
+            "name": m["name"],                     # <-- добавлено
             "path": m["model_path"],
             "enabled": True,
             "texture": {
@@ -2268,35 +2283,28 @@ class MainWindow(QMainWindow):
                     stack.append(child)
 
     def copy_selected_model(self):
-        """Копировать выбранную модель (если выделена модель или текстура)."""
+        """Копировать выбранную модель (корневой элемент модели)."""
         selected = self.tree.selectedItems()
         if not selected:
             return
         item = selected[0]
         data = item.data(0, Qt.UserRole)
-        # Если выделена текстура, поднимаемся к модели
-        if isinstance(data, tuple) and data[0] == "texture":
-            # ищем родительскую модель
-            model_item = item.parent()
-            if model_item:
-                data = model_item.data(0, Qt.UserRole)
-        if isinstance(data, tuple) and data[0] == "model":
+        # Если выбран model_path или texture_path, поднимаемся к model_root
+        if isinstance(data, tuple) and data[0] in ("model_path", "texture_path"):
+            item = item.parent()
+            data = item.data(0, Qt.UserRole)
+        if isinstance(data, tuple) and data[0] == "model_root":
             group_name = data[1]
             model_path = data[2]
-            # находим шот
-            shot_item = item
-            while shot_item.parent():
-                shot_item = shot_item.parent()
+            shot_item = item.parent().parent().parent()
             shot = shot_item.data(0, Qt.UserRole)
             if not shot:
                 return
-            # ищем модель в shot.point_groups
             for m in shot.point_groups.get(group_name, []):
                 if m["path"] == model_path:
-                    # делаем глубокую копию словаря
                     import copy
                     self.copied_model_data = (group_name, copy.deepcopy(m))
-                    self.log_info(f"Copied model '{model_path}' from group '{group_name}'")
+                    self.log_info(f"Copied model '{m['name']}' from group '{group_name}'")
                     return
         self.log_info("No model selected to copy")
 
@@ -2305,7 +2313,7 @@ class MainWindow(QMainWindow):
         if not self.copied_model_data:
             self.log_info("Nothing to paste")
             return
-        
+
         src_group_name, model_dict = self.copied_model_data
         if src_group_name is None:
             src_group_name = "CAMERA"
@@ -2323,20 +2331,15 @@ class MainWindow(QMainWindow):
         if item.parent() is None:
             target_shot = item.data(0, Qt.UserRole)
             if target_shot:
-                # Логика выбора группы по правилам
                 groups = target_shot.point_groups
                 if len(groups) == 1:
-                    # одна группа – в неё
                     target_group_name = next(iter(groups.keys()))
                 elif src_group_name in groups:
-                    # есть группа с таким же именем
                     target_group_name = src_group_name
                 else:
-                    # иначе в CAMERA
                     target_group_name = "CAMERA"
         else:
             # Ищем родительский шот и группу
-            # Поднимаемся до уровня шота
             shot_item = item
             while shot_item.parent():
                 shot_item = shot_item.parent()
@@ -2347,23 +2350,23 @@ class MainWindow(QMainWindow):
             data = item.data(0, Qt.UserRole)
             if isinstance(data, tuple) and data[0] == "group":
                 target_group_name = data[1]
-            elif isinstance(data, tuple) and data[0] in ("model", "texture"):
+            elif isinstance(data, tuple) and data[0] in ("model_root", "model_path", "texture_path"):
                 # поднимаемся к группе
-                group_item = item.parent()
+                group_item = item
+                while group_item and group_item.parent() and group_item.parent().text(0) != "Point Groups":
+                    group_item = group_item.parent()
                 if group_item and group_item.parent() and group_item.parent().text(0) == "Point Groups":
                     group_data = group_item.data(0, Qt.UserRole)
                     if isinstance(group_data, tuple) and group_data[0] == "group":
                         target_group_name = group_data[1]
             else:
                 # Если выбран "Point Groups" или другой элемент, ищем первую группу?
-                # Можно просто вставить в CAMERA
                 target_group_name = "CAMERA"
 
         if not target_shot:
             self.log_info("Could not determine target shot")
             return
         if not target_group_name:
-            # Если группа не определена, используем CAMERA
             target_group_name = "CAMERA"
 
         # Проверяем существование группы в целевом шоте, создаём если нужно
@@ -2374,10 +2377,14 @@ class MainWindow(QMainWindow):
         # Добавляем модель (глубокую копию)
         import copy
         new_model = copy.deepcopy(model_dict)
+        # Если у модели нет имени, создаём из пути
+        if "name" not in new_model:
+            new_model["name"] = os.path.splitext(os.path.basename(new_model["path"]))[0]
+
         target_shot.point_groups[target_group_name].append(new_model)
         target_shot._dirty = True
         target_shot.schedule_save()
-        self.log_info(f"Pasted model '{new_model['path']}' into group '{target_group_name}' of shot '{target_shot.name}'")
+        self.log_info(f"Pasted model '{new_model['name']}' into group '{target_group_name}' of shot '{target_shot.name}'")
 
         # Обновляем дерево
         self.populate_tree()
@@ -2392,7 +2399,6 @@ class MainWindow(QMainWindow):
 
             main_seq = next((s for s in shot.sequences if s.is_main), shot.sequences[0] if shot.sequences else None)
             if main_seq:
-                # Приоритет: пользовательские настройки > найденные метаданные > пусто
                 sensor_w = str(shot.user_sensor_width if shot.user_sensor_width is not None else main_seq.sensor_width if main_seq.sensor_width is not None else '')
                 sensor_h = str(shot.user_sensor_height if shot.user_sensor_height is not None else main_seq.sensor_height if main_seq.sensor_height is not None else '')
                 focal_val = str(shot.user_focal if shot.user_focal is not None else main_seq.focal if main_seq.focal is not None else '')
@@ -2402,9 +2408,7 @@ class MainWindow(QMainWindow):
                 focal_val = str(shot.user_focal if shot.user_focal is not None else '')
 
             shot_item = QTreeWidgetItem([shot.name, sensor_w, sensor_h, focal_val, f"Frames: {shot.frame_count}"])
-
-            # Устанавливаем шрифт для всех колонок шота
-            font = shot_item.font(0)  # берём текущий шрифт
+            font = shot_item.font(0)
             font.setBold(True)
             font.setPointSize(font.pointSize() + SHOT_FONT_SIZE_OFFSET)
             for col in range(self.tree.columnCount()):
@@ -2415,7 +2419,6 @@ class MainWindow(QMainWindow):
             shot_item.setData(0, Qt.UserRole, shot)
             self.tree.addTopLevelItem(shot_item)
             shot_item.setExpanded(False)
-
 
             # Layers
             layers_item = QTreeWidgetItem(["Layers", "", "", "", ""])
@@ -2444,22 +2447,39 @@ class MainWindow(QMainWindow):
                 group_item.setData(0, Qt.UserRole, ("group", group_name))
                 self._set_child_font(group_item)
                 groups_item.addChild(group_item)
-                for model_dict in models:
-                    model_path = model_dict["path"]
-                    model_item = QTreeWidgetItem([model_path, "", "", "", ""])
-                    model_item.setFlags(model_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
-                    model_item.setCheckState(0, Qt.Checked if model_dict["enabled"] else Qt.Unchecked)
-                    model_item.setData(0, Qt.UserRole, ("model", group_name, model_path))
-                    self._set_child_font(model_item)
-                    group_item.addChild(model_item)
-                    texture_item = QTreeWidgetItem([model_dict["texture"]["path"], "", "", "", ""])
-                    texture_item.setFlags(texture_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
-                    texture_item.setCheckState(0, Qt.Checked if model_dict["texture"]["enabled"] else Qt.Unchecked)
-                    texture_item.setData(0, Qt.UserRole, ("texture", group_name, model_path))
-                    self._set_child_font(texture_item)
-                    model_item.addChild(texture_item)
 
-            groups_item.setExpanded(True)
+                for model in models:
+                    # Корневой элемент модели (имя)
+                    model_root_item = QTreeWidgetItem([model["name"], "", "", "", ""])
+                    model_root_item.setFlags(model_root_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
+                    model_root_item.setCheckState(0, Qt.Checked if model["enabled"] else Qt.Unchecked)
+                    model_root_item.setData(0, Qt.UserRole, ("model_root", group_name, model["path"]))
+                    self._set_child_font(model_root_item)
+                    group_item.addChild(model_root_item)
+
+                    # Путь модели (без текстового префикса)
+                    model_path_item = QTreeWidgetItem([model["path"], "", ""])
+                    model_path_item.setFlags(model_path_item.flags() | Qt.ItemIsEditable)
+                    model_path_item.setData(0, Qt.UserRole, ("model_path", group_name, model["path"]))
+                    self._set_child_font(model_path_item)
+                    model_root_item.addChild(model_path_item)
+                    btn_model_browse = QPushButton("Browse")
+                    btn_model_browse.clicked.connect(lambda checked, g=group_name, m=model: self.browse_model_for_model(g, m))
+                    self.tree.setItemWidget(model_path_item, 2, btn_model_browse)
+
+                    # Текстура (без текстового префикса)
+                    texture_item = QTreeWidgetItem([model["texture"]["path"], "", ""])
+                    texture_item.setFlags(texture_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
+                    texture_item.setCheckState(0, Qt.Checked if model["texture"]["enabled"] else Qt.Unchecked)
+                    texture_item.setData(0, Qt.UserRole, ("texture_path", group_name, model["path"]))
+                    self._set_child_font(texture_item)
+                    model_root_item.addChild(texture_item)
+                    btn_texture_browse = QPushButton("Browse")
+                    btn_texture_browse.clicked.connect(lambda checked, g=group_name, m=model: self.browse_texture_for_model(g, m))
+                    self.tree.setItemWidget(texture_item, 2, btn_texture_browse)
+
+                group_item.setExpanded(True)
+
         self.restore_tree_expansion_state(state)
         self.recolor_shots()
         self._updating_tree = False
@@ -2479,10 +2499,9 @@ class MainWindow(QMainWindow):
             if shot:
                 if column == 0:  # чекбокс
                     shot.selected = item.checkState(0) == Qt.Checked
-#                    shot.save_config()
-                    if not shot.processed:  # Только для необработанных шотов меняем цвет
-                        self.recolor_shots()          # перекрасить все шоты
-                elif column == 1:                   # sensor W
+                    if not shot.processed:
+                        self.recolor_shots()
+                elif column == 1:  # sensor W
                     text = item.text(1).strip()
                     try:
                         shot.user_sensor_width = float(text) if text else None
@@ -2490,12 +2509,11 @@ class MainWindow(QMainWindow):
                         shot.user_sensor_width = None
                     shot._dirty = True
                     shot.schedule_save()
-                    # Обновляем текст, чтобы он был в правильном формате
                     if shot.user_sensor_width is not None:
                         item.setText(1, str(shot.user_sensor_width))
                     else:
                         item.setText(1, "")
-                elif column == 2:                   # sensor H
+                elif column == 2:  # sensor H
                     text = item.text(2).strip()
                     try:
                         shot.user_sensor_height = float(text) if text else None
@@ -2507,7 +2525,7 @@ class MainWindow(QMainWindow):
                         item.setText(2, str(shot.user_sensor_height))
                     else:
                         item.setText(2, "")
-                elif column == 3:                   # focal
+                elif column == 3:  # focal
                     text = item.text(3).strip()
                     try:
                         shot.user_focal = float(text) if text else None
@@ -2520,14 +2538,14 @@ class MainWindow(QMainWindow):
                     else:
                         item.setText(3, "")
             return
-       
+
         # Слой (Layers)
         parent = item.parent()
         if parent and parent.text(0) == "Layers":
             shot_item = parent.parent()
             if shot_item:
                 shot = shot_item.data(0, Qt.UserRole)
-                if shot and column == 0:            # чекбокс
+                if shot and column == 0:
                     seq_name = item.text(0)
                     selected = item.checkState(0) == Qt.Checked
                     shot.sequence_selected[seq_name] = selected
@@ -2538,7 +2556,8 @@ class MainWindow(QMainWindow):
         # Группа, модель, текстура
         data = item.data(0, Qt.UserRole)
         if isinstance(data, tuple):
-            if data[0] == "group" and column == 0:   # переименование группы
+            if data[0] == "group" and column == 0:
+                # Переименование группы
                 group_name = data[1]
                 new_name = item.text(0)
                 if new_name != group_name:
@@ -2551,69 +2570,107 @@ class MainWindow(QMainWindow):
                             shot._dirty = True
                             shot.schedule_save()
                             item.setData(0, Qt.UserRole, ("group", new_name))
-            elif data[0] == "model":
-                group_name, model_path = data[1], data[2]
+            elif data[0] == "model_root":
+                # Корневой элемент модели: чекбокс включения или редактирование имени
+                group_name = data[1]
+                model_path = data[2]
                 shot_item = item.parent().parent().parent()
-                if shot_item:
-                    shot = shot_item.data(0, Qt.UserRole)
-                    if shot:
-                        if column == 0:
-                            new_text = item.text(0)
-                            # Проверяем, изменился ли путь
-                            model_found = None
-                            for m in shot.point_groups.get(group_name, []):
-                                if m["path"] == model_path:
-                                    model_found = m
-                                    break
-                            if model_found and model_found["path"] != new_text:
-                                # Изменился путь
-                                model_found["path"] = new_text
+                shot = shot_item.data(0, Qt.UserRole)
+                if shot:
+                    if column == 0:
+                        enabled = item.checkState(0) == Qt.Checked
+                        shot.set_model_enabled(group_name, model_path, enabled)
+                    elif column == 0 and item.isSelected():
+                        new_name = item.text(0)
+                        for m in shot.point_groups.get(group_name, []):
+                            if m["path"] == model_path:
+                                m["name"] = new_name
                                 shot._dirty = True
                                 shot.schedule_save()
-                                # Обновляем UserRole, чтобы путь был актуальным
-                                item.setData(0, Qt.UserRole, ("model", group_name, new_text))
-                                if self.project_resources and new_text:
-                                    exists = any(m["model_path"] == new_text for m in self.project_resources.models)
-                                    if not exists:
-                                        name = os.path.splitext(os.path.basename(new_text))[0]
-                                        # Найти текстуру из модели
-                                        texture_path = model_found["texture"]["path"] if model_found else ""
-                                        self.project_resources.add_model(new_text, texture_path, name)
-                                        self.populate_resources_tree()
-                            else:
-                                # Изменился чекбокс
-                                enabled = item.checkState(0) == Qt.Checked
-                                shot.set_model_enabled(group_name, model_path, enabled)
-                                if self.project_resources and new_text:
-                                    exists = any(m["model_path"] == new_text for m in self.project_resources.models)
-                                    if not exists:
-                                        name = os.path.splitext(os.path.basename(new_text))[0]
-                                        # Найти текстуру из модели
-                                        texture_path = model_found["texture"]["path"] if model_found else ""
-                                        self.project_resources.add_model(new_text, texture_path, name)
-                                        self.populate_resources_tree()
-            elif data[0] == "texture":
-                group_name, model_path = data[1], data[2]
+                                break
+            elif data[0] == "model_path":
+                # Путь модели (колонка 0 редактируется)
+                group_name = data[1]
+                model_path = data[2]
                 shot_item = item.parent().parent().parent().parent()
-                if shot_item:
-                    shot = shot_item.data(0, Qt.UserRole)
-                    if shot:
-                        if column == 0:
-                            new_text = item.text(0)
-                            model_found = None
-                            for m in shot.point_groups.get(group_name, []):
-                                if m["path"] == model_path:
-                                    model_found = m
-                                    break
-                            if model_found and model_found["texture"]["path"] != new_text:
-                                model_found["texture"]["path"] = new_text
-                                if not new_text:
-                                    model_found["texture"]["enabled"] = False
+                shot = shot_item.data(0, Qt.UserRole)
+                if shot and column == 0:
+                    new_path = item.text(0)
+                    for m in shot.point_groups.get(group_name, []):
+                        if m["path"] == model_path:
+                            m["path"] = new_path
+                            # Обновляем имя, если оно совпадало со старым именем файла
+                            old_name = m["name"]
+                            old_base = os.path.splitext(os.path.basename(old_name))[0]
+                            new_base = os.path.splitext(os.path.basename(new_path))[0]
+                            if old_name == old_base or old_name == "":
+                                m["name"] = new_base
+                            shot._dirty = True
+                            shot.schedule_save()
+                            break
+            elif data[0] == "texture_path":
+                # Текстура: чекбокс включения (колонка 0) или редактирование пути (колонка 0)
+                group_name = data[1]
+                model_path = data[2]
+                shot_item = item.parent().parent().parent().parent()
+                shot = shot_item.data(0, Qt.UserRole)
+                if shot:
+                    # Для различения: если изменился текст пути, то item.text(0) не равен текущему пути в модели
+                    new_path = item.text(0)
+                    for m in shot.point_groups.get(group_name, []):
+                        if m["path"] == model_path:
+                            if new_path != m["texture"]["path"]:
+                                # Редактирование пути
+                                m["texture"]["path"] = new_path
+                                m["texture"]["enabled"] = bool(new_path)
                                 shot._dirty = True
                                 shot.schedule_save()
                             else:
+                                # Изменение чекбокса
                                 enabled = item.checkState(0) == Qt.Checked
-                                shot.set_texture_enabled(group_name, model_path, enabled)
+                                m["texture"]["enabled"] = enabled
+                                shot._dirty = True
+                                shot.schedule_save()
+                            break
+
+    def browse_model_for_model(self, group_name, model):
+        """Обработчик кнопки Browse для пути модели."""
+        path, _ = QFileDialog.getOpenFileName(self, "Select OBJ model", "", "OBJ files (*.obj)")
+        if path:
+            model["path"] = path
+            # Если имя модели не задано или равно старому имени файла, обновляем
+            old_name = model["name"]
+            old_base = os.path.splitext(os.path.basename(old_name))[0]
+            new_base = os.path.splitext(os.path.basename(path))[0]
+            if old_name == old_base or old_name == "":
+                model["name"] = new_base
+            shot = self.find_shot_for_model(group_name, model["path"])
+            if shot:
+                shot._dirty = True
+                shot.schedule_save()
+                self.populate_tree()
+
+    def browse_texture_for_model(self, group_name, model):
+        """Обработчик кнопки Browse для текстуры."""
+        path, _ = QFileDialog.getOpenFileName(self, "Select texture", "", "Image files (*.jpg *.png *.tif *.exr)")
+        if path:
+            model["texture"]["path"] = path
+            model["texture"]["enabled"] = True
+            shot = self.find_shot_for_model(group_name, model["path"])
+            if shot:
+                shot._dirty = True
+                shot.schedule_save()
+                self.populate_tree()
+
+    def find_shot_for_model(self, group_name, model_path):
+        """Находит шот, содержащий данную модель в указанной группе."""
+        for shot in self.shots:
+            if group_name in shot.point_groups:
+                for m in shot.point_groups[group_name]:
+                    if m["path"] == model_path:
+                        return shot
+        return None
+
 
     def update_resources_panel(self):
         """Обновить панель ресурсов (перестроить дерево)."""
@@ -2649,51 +2706,48 @@ class MainWindow(QMainWindow):
         if not item:
             return
         data = item.data(0, Qt.UserRole)
-        if isinstance(data, tuple) and data[0] == "group":
-            group_name = data[1]
-            menu = QMenu()
-            add_model_action = menu.addAction("Add 3D model")
-            rename_action = menu.addAction("Rename group")
-            delete_action = menu.addAction("Delete group")
-            paste_action = menu.addAction("Paste model")
-            action = menu.exec_(self.tree.viewport().mapToGlobal(position))
-            if action == add_model_action:
-                self.add_model_to_group(item, group_name)
-            elif action == rename_action:
-                self.rename_group(item, group_name)
-            elif action == delete_action:
-                self.delete_group(item, group_name)
-            elif action == paste_action:
-                self.paste_model_to_selected()
-        elif isinstance(data, tuple) and data[0] == "model":
-            group_item = item.parent()
-            if group_item:
-                group_data = group_item.data(0, Qt.UserRole)
-                if isinstance(group_data, tuple) and group_data[0] == "group":
-                    group_name = group_data[1]
-                    model_path = data[2]
-                    menu = QMenu()
-                    edit_action = menu.addAction("Edit model")
-                    remove_action = menu.addAction("Remove model")
-                    copy_action = menu.addAction("Copy model")
-                    paste_action = menu.addAction("Paste model")
-                    action = menu.exec_(self.tree.viewport().mapToGlobal(position))
-                    if action == edit_action:
-                        self.edit_model(group_item, group_name, model_path)
-                    elif action == remove_action:
-                        self.remove_model_from_group(group_item, group_name, model_path, item)
-                    elif action == copy_action:
-                        self.copy_selected_model()
-                    elif action == paste_action:
-                        self.paste_model_to_selected()
-        elif isinstance(data, tuple) and data[0] == "texture":
-            # Для текстуры можно копировать родительскую модель
-            model_item = item.parent()
-            if model_item:
-                self.tree.setCurrentItem(model_item)
-                self.copy_selected_model()
-            # Вставка также возможна
-            self.paste_model_to_selected()
+        if isinstance(data, tuple):
+            # Обработка группы
+            if data[0] == "group":
+                group_name = data[1]
+                menu = QMenu()
+                add_model_action = menu.addAction("Add 3D model")
+                rename_action = menu.addAction("Rename group")
+                delete_action = menu.addAction("Delete group")
+                paste_action = menu.addAction("Paste model")
+                action = menu.exec_(self.tree.viewport().mapToGlobal(position))
+                if action == add_model_action:
+                    self.add_model_to_group(item, group_name)
+                elif action == rename_action:
+                    self.rename_group(item, group_name)
+                elif action == delete_action:
+                    self.delete_group(item, group_name)
+                elif action == paste_action:
+                    self.paste_model_to_selected()
+            # Обработка элементов модели (корневой, путь, текстура)
+            elif data[0] in ("model_root", "model_path", "texture_path"):
+                group_name = data[1]
+                model_path = data[2]
+                # Определяем родительский элемент группы (для model_root это элемент самого model_root, для других – parent)
+                if data[0] == "model_root":
+                    group_item = item.parent()
+                else:
+                    group_item = item.parent().parent()  # для model_path/texture_path
+                # Создаём меню
+                menu = QMenu()
+                edit_action = menu.addAction("Edit model")
+                remove_action = menu.addAction("Remove model")
+                copy_action = menu.addAction("Copy model")
+                paste_action = menu.addAction("Paste model")
+                action = menu.exec_(self.tree.viewport().mapToGlobal(position))
+                if action == edit_action:
+                    self.edit_model(group_item, group_name, model_path)
+                elif action == remove_action:
+                    self.remove_model_from_group(group_item, group_name, model_path, item)
+                elif action == copy_action:
+                    self.copy_selected_model()
+                elif action == paste_action:
+                    self.paste_model_to_selected()
         else:
             # Шот или Point Groups
             if item.parent() is None:
@@ -2747,15 +2801,18 @@ class MainWindow(QMainWindow):
         shot = shot_item.data(0, Qt.UserRole)
         if not shot:
             return
-        # Open dialog to add model
         dialog = EditModelDialog(parent=self, project_resources=self.project_resources)
         if dialog.exec_():
             model_dict = dialog.get_model_dict()
             if model_dict["path"]:
-                shot.add_model_to_group(group_name, model_dict["path"],
-                                        model_dict["enabled"],
-                                        model_dict["texture"]["path"],
-                                        model_dict["texture"]["enabled"])
+                shot.add_model_to_group(
+                    group_name,
+                    model_dict["path"],
+                    model_dict["enabled"],
+                    model_dict["texture"]["path"],
+                    model_dict["texture"]["enabled"],
+                    name=model_dict["name"] if model_dict["name"] else None
+                )
                 self.populate_tree()
 
     def edit_model(self, group_item, group_name, model_path):
@@ -2763,7 +2820,7 @@ class MainWindow(QMainWindow):
         shot = shot_item.data(0, Qt.UserRole)
         if not shot:
             return
-        # Find model_dict
+        # Находим model_dict
         model_dict = None
         for m in shot.point_groups.get(group_name, []):
             if m["path"] == model_path:
@@ -2773,7 +2830,6 @@ class MainWindow(QMainWindow):
             dialog = EditModelDialog(model_dict, self, project_resources=self.project_resources)
             if dialog.exec_():
                 new_dict = dialog.get_model_dict()
-                # Update the model in the group
                 idx = shot.point_groups[group_name].index(model_dict)
                 shot.point_groups[group_name][idx] = new_dict
                 shot._dirty = True
@@ -2819,7 +2875,7 @@ class MainWindow(QMainWindow):
         if isinstance(data, tuple):
             if data[0] == "group" and column == 0:
                 self.tree.editItem(item, 0)
-            elif data[0] in ("model", "texture") and column == 0:
+            elif data[0] in ("model_root", "model_path", "texture_path") and column == 0:
                 self.tree.editItem(item, 0)
 
     def add_point_group_to_shot(self, shot):
