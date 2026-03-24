@@ -25,7 +25,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout
                              QHeaderView, QAbstractItemView, QMenu, QAction, QTabWidget,
                              QSplitter, QTextBrowser, QScrollArea, QCheckBox, QInputDialog, QProgressBar)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSettings, QTimer, QPropertyAnimation, QObject
-from PyQt5.QtGui import QTextCursor, QColor, QTextCharFormat, QFont, QBrush, QPainter, QColor, QPen
+from PyQt5.QtGui import QTextCursor, QColor, QTextCharFormat, QFont, QBrush, QPainter, QColor, QPen, QIntValidator
 from PyQt5.QtWidgets import QTreeWidget, QTreeWidgetItem, QPlainTextEdit
 
 # ==================== НАСТРОЙКИ ====================
@@ -99,8 +99,8 @@ except ImportError:
 
 class ResolutionAnalyzerWorker(QObject):
     """Рабочий объект для анализа разрешений в отдельном потоке"""
-    result_ready = pyqtSignal(str, str, str, int)  # resolution, reformat, aspect, total_count
-    progress = pyqtSignal(int, int)  # current, total
+    result_ready = pyqtSignal(str, int)  # resolution, total_count
+    progress = pyqtSignal(int, int)      # current, total
     finished = pyqtSignal()
     error = pyqtSignal(str)
 
@@ -116,32 +116,26 @@ class ResolutionAnalyzerWorker(QObject):
         self._is_running = False
 
     def run(self):
-        """Основная функция, вызываемая из потока"""
         resolution_counts = {}
         total = len(self.sequences)
         for idx, seq in enumerate(self.sequences):
             if not self._is_running:
                 break
-            # Прогресс
             self.progress.emit(idx + 1, total)
 
             file_path = seq['files'][0]
             extension = seq['extension']
 
-            # Читаем метаданные первого файла
             metadata = self._read_metadata(file_path, extension)
             if metadata:
-                # Определяем разрешение
                 resolution_str = self._detect_resolution(metadata)
                 if resolution_str:
-                    # Увеличиваем счётчик
                     resolution_counts[resolution_str] = resolution_counts.get(resolution_str, 0) + 1
-                    # Вычисляем реформат и аспект
-                    reformat, aspect = self._compute_reformat_and_aspect(resolution_str)
-                    # Отправляем сигнал с текущим счётчиком для этого разрешения
-                    self.result_ready.emit(resolution_str, reformat, aspect, resolution_counts[resolution_str])
+                    self.result_ready.emit(resolution_str, resolution_counts[resolution_str])
 
         self.finished.emit()
+
+
 
     def _read_metadata(self, file_path, extension):
         """Читает метаданные файла (упрощённая копия методов из MetadataManager)"""
@@ -345,20 +339,32 @@ class ResolutionAnalysisDialog(QDialog):
         self.setGeometry(200, 200, 800, 500)
         layout = QVBoxLayout()
 
-        # Таблица
+        # --- Панель параметров реформата ---
+        param_layout = QHBoxLayout()
+        param_layout.addWidget(QLabel("Реформат по:"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["горизонтали (ширина)", "вертикали (высота)"])
+        param_layout.addWidget(self.mode_combo)
+        param_layout.addWidget(QLabel("до:"))
+        self.target_size_input = QLineEdit()
+        self.target_size_input.setText("2048")
+        self.target_size_input.setValidator(QIntValidator(1, 100000, self))
+        param_layout.addWidget(self.target_size_input)
+        param_layout.addStretch()
+
+        # --- Таблица ---
         self.table = QTableWidget()
         self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["Разрешение", "Реформат (2048)", "Аспект", "Количество файлов"])
+        self.table.setHorizontalHeaderLabels(["Разрешение", "Реформат", "Аспект", "Количество файлов"])
         self.table.setSortingEnabled(True)
         self.table.setAlternatingRowColors(True)
-        # Сохраняем соответствие разрешение -> строка для быстрого обновления
         self.row_map = {}  # resolution -> row index
 
-        # Прогресс-бар
+        # --- Прогресс-бар ---
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
 
-        # Кнопки
+        # --- Кнопки ---
         button_layout = QHBoxLayout()
         self.stop_btn = QPushButton("Остановить")
         self.stop_btn.clicked.connect(self.stop_analysis)
@@ -375,22 +381,66 @@ class ResolutionAnalysisDialog(QDialog):
         button_layout.addWidget(self.save_btn)
         button_layout.addWidget(self.close_btn)
 
+        # Собираем layout
+        layout.addLayout(param_layout)
         layout.addWidget(self.table)
         layout.addWidget(self.progress_bar)
         layout.addLayout(button_layout)
 
         self.setLayout(layout)
 
-        # Ссылка на рабочий поток (будет установлена извне)
+        # Подключаем сигналы изменения параметров
+        self.mode_combo.currentIndexChanged.connect(self.recalculate)
+        self.target_size_input.editingFinished.connect(self.recalculate)
+
+        # Ссылки на рабочий поток (будут установлены извне)
         self.worker = None
         self.thread = None
 
-    def add_or_update_resolution(self, resolution, reformat, aspect, count):
+    # ------------------------------------------------------------------
+    def compute_reformat_and_aspect(self, resolution_str, target_size, mode):
+        """Вычисляет реформат и аспект для заданного разрешения"""
+        try:
+            if 'x' in resolution_str:
+                parts = resolution_str.split('x')
+                w_str = parts[0].strip()
+                h_str = parts[1].strip()
+                if w_str == '?' or h_str == '?':
+                    return "?", "?"
+                w = int(w_str)
+                h = int(h_str)
+                aspect = w / h
+                aspect_str = f"{aspect:.3f}"
+                if mode == 0:  # по горизонтали
+                    new_w = target_size
+                    new_h = int(round(new_w / aspect))
+                else:  # по вертикали
+                    new_h = target_size
+                    new_w = int(round(new_h * aspect))
+                return f"{new_w}x{new_h}", aspect_str
+            else:
+                return "?", "?"
+        except:
+            return "?", "?"
+
+    # ------------------------------------------------------------------
+    def add_or_update_resolution(self, resolution, count):
         """Добавляет новую строку или обновляет существующую"""
+        # Берём текущие настройки
+        try:
+            target_size = int(self.target_size_input.text())
+        except ValueError:
+            target_size = 2048
+        mode = self.mode_combo.currentIndex()
+        reformat, aspect = self.compute_reformat_and_aspect(resolution, target_size, mode)
+
         if resolution in self.row_map:
             # Обновляем существующую строку
             row = self.row_map[resolution]
             self.table.item(row, 3).setText(str(count))
+            # Также обновляем reformat/aspect (на случай, если настройки изменились)
+            self.table.item(row, 1).setText(reformat)
+            self.table.item(row, 2).setText(aspect)
         else:
             # Добавляем новую строку
             row = self.table.rowCount()
@@ -400,31 +450,46 @@ class ResolutionAnalysisDialog(QDialog):
             self.table.setItem(row, 2, QTableWidgetItem(aspect))
             self.table.setItem(row, 3, QTableWidgetItem(str(count)))
             self.row_map[resolution] = row
-        # Прокручиваем до новой строки
         self.table.scrollToBottom()
 
+    # ------------------------------------------------------------------
+    def recalculate(self):
+        """Пересчитывает reformat и aspect для всех строк на основе текущих настроек"""
+        try:
+            target_size = int(self.target_size_input.text())
+        except ValueError:
+            return
+        mode = self.mode_combo.currentIndex()
+
+        for row in range(self.table.rowCount()):
+            res_item = self.table.item(row, 0)
+            if res_item:
+                resolution = res_item.text()
+                reformat, aspect = self.compute_reformat_and_aspect(resolution, target_size, mode)
+                self.table.item(row, 1).setText(reformat)
+                self.table.item(row, 2).setText(aspect)
+
+    # ------------------------------------------------------------------
     def set_progress(self, current, total):
-        """Обновляет прогресс-бар"""
         self.progress_bar.setVisible(True)
         self.progress_bar.setMaximum(total)
         self.progress_bar.setValue(current)
 
+    # ------------------------------------------------------------------
     def stop_analysis(self):
-        """Останавливает анализ"""
         if self.worker:
             self.worker.stop()
         self.stop_btn.setEnabled(False)
         self.stop_btn.setText("Остановлен")
 
+    # ------------------------------------------------------------------
     def copy_to_clipboard(self):
-        """Копирует таблицу в буфер обмена (табуляция)"""
         rows = self.table.rowCount()
         cols = self.table.columnCount()
         if rows == 0:
             QMessageBox.information(self, "Информация", "Нет данных для копирования.")
             return
 
-        # Заголовки
         headers = [self.table.horizontalHeaderItem(i).text() for i in range(cols)]
         lines = ["\t".join(headers)]
 
@@ -439,8 +504,8 @@ class ResolutionAnalysisDialog(QDialog):
         clipboard.setText("\n".join(lines))
         QMessageBox.information(self, "Успех", "Таблица скопирована в буфер обмена (разделитель табуляция).")
 
+    # ------------------------------------------------------------------
     def save_to_csv(self):
-        """Сохраняет таблицу в CSV-файл"""
         rows = self.table.rowCount()
         cols = self.table.columnCount()
         if rows == 0:
@@ -454,28 +519,38 @@ class ResolutionAnalysisDialog(QDialog):
             return
 
         with open(filename, 'w', encoding='utf-8-sig') as f:
-            # Заголовки
             headers = [self.table.horizontalHeaderItem(i).text() for i in range(cols)]
             f.write(",".join(headers) + "\n")
             for r in range(rows):
                 row_data = []
                 for c in range(cols):
                     item = self.table.item(r, c)
-                    # Экранируем запятые (заменяем на точку с запятой для Excel)
                     text = item.text() if item else ""
-                    text = text.replace(',', ';')
+                    text = text.replace(',', ';')  # заменяем запятые на точку с запятой для CSV
                     row_data.append(text)
                 f.write(",".join(row_data) + "\n")
 
         QMessageBox.information(self, "Успех", f"Данные сохранены в {filename}")
 
+    # ------------------------------------------------------------------
     def closeEvent(self, event):
-        """При закрытии диалога останавливаем поток, если он ещё работает"""
-        if self.worker and hasattr(self.worker, '_is_running') and self.worker._is_running:
-            self.worker.stop()
-            if self.thread and self.thread.isRunning():
-                self.thread.quit()
-                self.thread.wait(2000)
+        if self.worker is not None:
+            try:
+                if hasattr(self.worker, '_is_running') and self.worker._is_running:
+                    self.worker.stop()
+            except RuntimeError:
+                pass
+        if self.thread is not None:
+            try:
+                if self.thread.isRunning():
+                    self.thread.quit()
+                    if not self.thread.wait(2000):
+                        self.thread.terminate()
+                        self.thread.wait()
+            except RuntimeError:
+                pass
+        self.worker = None
+        self.thread = None
         event.accept()
 
 
@@ -4604,13 +4679,13 @@ class MetadataManager:
 
         # Новый формат текста
         result_text = f"FOCAL LENGTH:\n"
-        result_text += "\n"
+        result_text += " \n"
         result_text += f"FILMBACK: {camera_name if camera_name else 'не определена'}\n"
-        result_text += "\n"
+        result_text += " \n"
         result_text += f"DETECTED SENSOR {sensor_size}\n"
-        result_text += "\n"
+        result_text += " \n"
         result_text += f"SOURCE FRAMES: {frame_count}\n"
-        result_text += "\n"  # пустая строка перед блоком разрешений
+        result_text += " \n"  # пустая строка перед блоком разрешений
         result_text += f"Source Resolution: {source_res}\n"
         result_text += f"Reformat Resolution: {reformat_res}\n"
         result_text += f"Aspect: {aspect_str}"
@@ -6268,7 +6343,7 @@ class EXRMetadataViewer(QMainWindow):
         # Создаём диалог
         dialog = ResolutionAnalysisDialog(self)
 
-        # Создаём копии данных для рабочего потока
+        # Копии данных для рабочего потока
         camera_rules = self.settings_manager.camera_detection_settings.get('camera_rules', []).copy()
         resolution_rules = self.settings_manager.camera_detection_settings.get('resolution_rules', []).copy()
         cameras_data = self.camera_manager.camera_data.copy()
@@ -6286,6 +6361,15 @@ class EXRMetadataViewer(QMainWindow):
         self.worker_thread.finished.connect(self.worker_thread.deleteLater)
         self.worker_thread.started.connect(self.worker.run)
 
+        # Функция, вызываемая при завершении анализа
+        def on_analysis_finished():
+            dialog.worker = None
+            dialog.thread = None
+            dialog.stop_btn.setEnabled(False)
+            dialog.stop_btn.setText("Завершено")
+
+        self.worker.finished.connect(on_analysis_finished)
+
         # Сохраняем ссылки в диалоге для возможности остановки
         dialog.worker = self.worker
         dialog.thread = self.worker_thread
@@ -6293,7 +6377,7 @@ class EXRMetadataViewer(QMainWindow):
         # Запускаем поток
         self.worker_thread.start()
 
-        # Показываем диалог (немодально, чтобы можно было закрыть и остановить)
+        # Показываем диалог
         dialog.show()
 
 
