@@ -48,6 +48,8 @@ except ImportError:
     print("OpenEXR not installed. EXR metadata reading will be limited. Install: pip install openexr")
 
 
+BUTTONS_IN_TREE = False
+
 RESOURCES_FONT_SIZE = 9   # размер шрифта панели ресурсов
 
 TIMER_DELAY_TO_SAVE = 5000
@@ -1513,6 +1515,8 @@ class MainWindow(QMainWindow):
         self.current_project_name = None
         self.project_resources = None
         self.resources_dock = None
+        self._saved_scroll_value = 0
+        self._saved_selected_path = None
 
 
         self.apply_ui_font()
@@ -1531,6 +1535,51 @@ class MainWindow(QMainWindow):
             state_str = self.settings.data["splitter_state"]
             state = QByteArray.fromBase64(state_str.encode())
             self.splitter.restoreState(state)
+
+
+    def _store_tree_state(self):
+        """Сохраняет состояние дерева: позицию скролла и выделенный элемент."""
+        self._saved_scroll_value = self.tree.verticalScrollBar().value()
+        self._saved_selected_path = None
+        current = self.tree.currentItem()
+        if current:
+            # Строим путь из текстов элементов, разделённых '|'
+            path_parts = []
+            item = current
+            while item:
+                path_parts.append(item.text(0))
+                item = item.parent()
+            self._saved_selected_path = '|'.join(reversed(path_parts))
+
+    def _restore_tree_state(self):
+        """Восстанавливает состояние дерева после обновления."""
+        if hasattr(self, '_saved_scroll_value'):
+            self.tree.verticalScrollBar().setValue(self._saved_scroll_value)
+        if hasattr(self, '_saved_selected_path') and self._saved_selected_path:
+            path_parts = self._saved_selected_path.split('|')
+            parent = None
+            found = None
+            for i, part in enumerate(path_parts):
+                if i == 0:
+                    # Ищем среди корневых элементов
+                    for j in range(self.tree.topLevelItemCount()):
+                        if self.tree.topLevelItem(j).text(0) == part:
+                            parent = self.tree.topLevelItem(j)
+                            found = parent
+                            break
+                else:
+                    # Ищем среди детей текущего parent
+                    found = None
+                    for j in range(parent.childCount()):
+                        if parent.child(j).text(0) == part:
+                            found = parent.child(j)
+                            break
+                    if not found:
+                        break
+                    parent = found
+            if found:
+                self.tree.setCurrentItem(found)
+                self.tree.scrollToItem(found)
 
 
     def get_shot_color(self, idx, selected):
@@ -2390,6 +2439,7 @@ class MainWindow(QMainWindow):
         self.populate_tree()
 
     def populate_tree(self):
+        self._store_tree_state()                     
         self._sorting = False
         self._updating_tree = True
         state = self.save_tree_expansion_state()
@@ -2463,9 +2513,10 @@ class MainWindow(QMainWindow):
                     model_path_item.setData(0, Qt.UserRole, ("model_path", group_name, model["path"]))
                     self._set_child_font(model_path_item)
                     model_root_item.addChild(model_path_item)
-                    btn_model_browse = QPushButton("Browse")
-                    btn_model_browse.clicked.connect(lambda checked, g=group_name, m=model: self.browse_model_for_model(g, m))
-                    self.tree.setItemWidget(model_path_item, 2, btn_model_browse)
+                    if BUTTONS_IN_TREE:
+                        btn_model_browse = QPushButton("Browse")
+                        btn_model_browse.clicked.connect(lambda checked, g=group_name, m=model: self.browse_model_for_model(g, m))
+                        self.tree.setItemWidget(model_path_item, 2, btn_model_browse)
 
                     # Текстура (без текстового префикса)
                     texture_item = QTreeWidgetItem([model["texture"]["path"], "", ""])
@@ -2474,9 +2525,10 @@ class MainWindow(QMainWindow):
                     texture_item.setData(0, Qt.UserRole, ("texture_path", group_name, model["path"]))
                     self._set_child_font(texture_item)
                     model_root_item.addChild(texture_item)
-                    btn_texture_browse = QPushButton("Browse")
-                    btn_texture_browse.clicked.connect(lambda checked, g=group_name, m=model: self.browse_texture_for_model(g, m))
-                    self.tree.setItemWidget(texture_item, 2, btn_texture_browse)
+                    if BUTTONS_IN_TREE:
+                        btn_texture_browse = QPushButton("Browse")
+                        btn_texture_browse.clicked.connect(lambda checked, g=group_name, m=model: self.browse_texture_for_model(g, m))
+                        self.tree.setItemWidget(texture_item, 2, btn_texture_browse)
 
                 group_item.setExpanded(True)
 
@@ -2485,6 +2537,7 @@ class MainWindow(QMainWindow):
         self._updating_tree = False
         self.tree.update()
         self.tree.viewport().update()
+        QTimer.singleShot(0, self._restore_tree_state)
 
     def on_tree_item_changed(self, item, column):
         if self._disable_saving:
