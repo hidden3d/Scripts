@@ -887,7 +887,7 @@ class Shot:
 class Settings:
     def __init__(self, config_path=None):
         if config_path is None:
-            self.config_path = os.path.join(os.path.dirname(__file__), "config.json")
+            self.config_path = os.path.join(os.path.dirname(__file__), "3de_shot_craetor_config.json")
         else:
             self.config_path = config_path
         self.data = {
