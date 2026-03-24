@@ -3490,6 +3490,7 @@ class MainWindow(QMainWindow):
         lines.append(f"tde4.setLensFBackHeight(lens, {sensor_height / 10:.2f})")
         lines.append(f"tde4.setLensFocalLength(lens, {focal / 10:.2f})")
         lines.append("tde4.setLensPixelAspect(lens, 1.0)")
+        lines.append(f"tde4.setLensFBackHeight(lens, {sensor_height / 10:.2f})")
         lines.append("tde4.setParameterAdjustFlag(lens, 'ADJUST_LENS_FOCAL_LENGTH', '', 1)")
         lines.append("tde4.setParameterAdjustFlag(lens, 'ADJUST_LENS_DISTORTION_PARAMETER', 'Distortion - Degree 2', 1)")
         lines.append("tde4.setParameterAdjustFlag(lens, 'ADJUST_LENS_DISTORTION_PARAMETER', 'Quartic Distortion - Degree 4', 1)")
