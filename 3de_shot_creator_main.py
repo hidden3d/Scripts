@@ -1581,6 +1581,17 @@ class MainWindow(QMainWindow):
                 self.tree.setCurrentItem(found)
                 self.tree.scrollToItem(found)
 
+    def fix_permissions(self, file_list):
+        """Установка прав на файлы (для головного режима)."""
+        try:
+            file_perm = int(self.settings.data.get("file_permissions", "664"), 8)
+            for file_path in file_list:
+                if os.path.exists(file_path):
+                    os.chmod(file_path, file_perm)
+            self.log_info(f"Permissions set for {len(file_list)} files (mode: {oct(file_perm)})")
+        except Exception as e:
+            self.log_error(f"Error setting permissions: {e}")
+
 
     def get_shot_color(self, idx, selected):
         """Возвращает цвет для шота с индексом idx и состоянием выбора."""
