@@ -1,0 +1,48 @@
+{
+    "path_makeBCFile": "",
+    "path_tde4": "",
+    "sensor_width": 35.0,
+    "sensor_height": 24.0,
+    "focal": 24.0,
+    "bc_quality": 90,
+    "bc_black": 0,
+    "bc_white": 255,
+    "bc_gamma": 1.0,
+    "bc_softclip": 0.0,
+    "import_exr_display_window": false,
+    "import_sxr_right_eye": false,
+    "start_frame": 1001,
+    "logging_enabled": true,
+    "log_lines": 5,
+    "font_size": 12,
+    "ui_font_size": 10,
+    "ui_font_bold": false,
+    "log_font_bold": false,
+    "log_highlight_important": false,
+    "camera_sensor_json_path": "",
+    "exr_metadata_reader_path": "",
+    "exr_viewer_settings_path": "",
+    "file_permissions": "664",
+    "dir_permissions": "775",
+    "color_processing": [
+        173,
+        216,
+        230
+    ],
+    "color_success": [
+        144,
+        238,
+        144
+    ],
+    "color_failure": [
+        255,
+        182,
+        193
+    ],
+    "color_mismatch": [
+        255,
+        165,
+        0
+    ],
+    "splitter_state": "AAAA/wAAAAEAAAACAAACvAAAASwB/////wEAAAACAA=="
+}
