@@ -11,6 +11,7 @@ import importlib.util
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from datetime import datetime
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QFileDialog, QTreeWidget,
@@ -47,6 +48,14 @@ except ImportError:
     OPENEXR_AVAILABLE = False
     print("OpenEXR not installed. EXR metadata reading will be limited. Install: pip install openexr")
 
+
+
+# Цвета панели ресурсов
+RESOURCES_BG_COLOR = "rgb(243, 237, 229)"          # светло-жёлтый (бежевый)
+RESOURCES_MODEL_BG_COLOR = QColor(173, 216, 230)   # светло-голубой
+RESOURCES_PATH_BG_COLOR = QColor(229, 230, 168)    # светло-фиолетовый
+
+DARKEN_FACTOR = 70   # на сколько пунктов темнее делать цвет при снятой галочке
 
 BUTTONS_IN_TREE = False
 
@@ -629,6 +638,10 @@ class Shot:
         self._save_timer = None
         self.log_func = log_func
         self._dirty = False
+        self.project_path = None          # путь к созданному проекту .3de
+        self.script_path = None           # путь к временному Python-скрипту
+        self.error_log = None             # текст ошибок, если обработка не удалась
+        self.processing_timestamp = None  # временная метка обработки
 
         # New attributes for point groups and layer selection
         self.sequence_selected = {}       # seq.full_name -> bool
@@ -664,9 +677,14 @@ class Shot:
                 "user_sensor_width": self.user_sensor_width,
                 "user_sensor_height": self.user_sensor_height,
                 "user_focal": self.user_focal,
+                "project_path": self.project_path,
+                "script_path": self.script_path,
+                "error_log": self.error_log,
+                "processing_timestamp": self.processing_timestamp,
             }
             # Удаляем None-значения, чтобы не хранить лишнее
-            for key in ["user_sensor_width", "user_sensor_height", "user_focal"]:
+            for key in ["user_sensor_width", "user_sensor_height", "user_focal",
+                        "project_path", "script_path", "error_log", "processing_timestamp"]:
                 if config[key] is None:
                     del config[key]
             class SafeEncoder(json.JSONEncoder):
@@ -722,6 +740,10 @@ class Shot:
                     self.point_groups[group_name] = items
             if "CAMERA" not in self.point_groups:
                 self.point_groups["CAMERA"] = []
+            self.project_path = data.get("project_path", None)
+            self.script_path = data.get("script_path", None)
+            self.error_log = data.get("error_log", None)
+            self.processing_timestamp = data.get("processing_timestamp", None)
         except Exception as e:
             print(f"Error loading config for {self.name}: {e}")
 
@@ -920,6 +942,7 @@ class Settings:
             "color_success": (144, 238, 144),     # светло-зелёный
             "color_failure": (255, 182, 193),     # светло-красный
             "color_mismatch": (255, 165, 0),   # оранжевый
+            "color_not_processed": (173, 216, 230),   # светло-голубой (новый)
         }
         self.load()
 
@@ -1015,9 +1038,11 @@ class ProcessingWorker(QThread):
         self.log_signal.emit(msg, level)
 
     def process_shot(self, shot):
+        error_messages = []  # список для сбора ошибок
         self.emit_log(f"Point groups for {shot.name}: {shot.point_groups}", "info")
         if shot.has_gaps:
             self.emit_log(f"Warning: shot {shot.name} has frame number gaps", "error")
+            error_messages.append("Warning: shot has frame number gaps")
 
         tracking_dir = os.path.join(shot.path, "tracking")
         if not os.path.exists(tracking_dir):
@@ -1040,6 +1065,7 @@ class ProcessingWorker(QThread):
                 bc_files_paths.append(bc_path)
             else:
                 self.emit_log(f"  Failed to generate bc for {seq.full_name}", "error")
+                error_messages.append(f"Failed to generate bc for {seq.full_name}")
 
         main_seq = next((s for s in shot.sequences if s.is_main), None)
         if main_seq is None and shot.sequences:
@@ -1052,14 +1078,26 @@ class ProcessingWorker(QThread):
         proxy_seqs = [seq for seq in selected_seqs if seq != main_seq]
 
         self.emit_log(f"  Creating project {project_filename}...", "info")
-        created_files = self.create_3de_project(shot, main_seq, proxy_seqs, bc_files, project_path)
+        created_files = self.create_3de_project(shot, main_seq, proxy_seqs, bc_files, project_path, version)
+
+
         if created_files is not None:
+            if error_messages:
+                shot.error_log = "\n".join(error_messages)  # сохраняем предупреждения
+            else:
+                shot.error_log = None
+            
+            shot._dirty = True
+
             self.emit_log(f"  Project created: {project_path}", "success")
             all_files = bc_files_paths + created_files
             self.fix_permissions(all_files)
             return True, project_path
         else:
             self.emit_log(f"  Failed to create project", "error")
+            error_messages.append("Failed to create project")
+            shot.error_log = "\n".join(error_messages)
+            shot._dirty = True
             return False, None
         
         
@@ -1144,7 +1182,7 @@ class ProcessingWorker(QThread):
                 self.emit_log(f"  File {expected_path} not found after generation", "error")
                 return None
 
-    def create_3de_project(self, shot, main_seq, proxy_seqs, bc_files, project_path):
+    def create_3de_project(self, shot, main_seq, proxy_seqs, bc_files, project_path, version):
         tde4_path = self.settings.data["path_tde4"]
         if not os.path.isfile(tde4_path):
             self.emit_log(f"3DE4 not found: {tde4_path}", "error")
@@ -1157,7 +1195,7 @@ class ProcessingWorker(QThread):
         if script_content is None:
             self.emit_log(f"Failed to generate script for {shot.name}", "error")
             return None
-        script_filename = f"_temp_{shot.name}_create_project.py"
+        script_filename = f"_temp_{shot.name}_v{version:03d}_create_project.py"
         script_file = os.path.join(shot.path, "tracking", script_filename)
         with open(script_file, 'w', encoding='utf-8') as f:
             f.write(script_content)
@@ -1185,6 +1223,12 @@ class ProcessingWorker(QThread):
             proc.wait()
             self.emit_log(f"  3DE4 finished with code {proc.returncode}", "info")
             if proc.returncode == 0:
+                # Успех
+                shot.project_path = project_path
+                shot.script_path = script_file
+                shot.error_log = None
+                shot.processing_timestamp = datetime.now().isoformat()
+                shot._dirty = True
                 self.emit_log(f"  Project successfully created: {project_path}", "success")
                 # Собираем файлы, созданные этим методом
                 created_files = [script_file, project_path]
@@ -1499,7 +1543,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.forced_path = forced_path
         self.setWindowTitle("3DE Shot Processor")
-        self.resize(1800, 1200)
+        self.resize(1200, 800)
 
         self.settings = Settings()
         self.root_path = ""
@@ -1536,6 +1580,40 @@ class MainWindow(QMainWindow):
             state = QByteArray.fromBase64(state_str.encode())
             self.splitter.restoreState(state)
 
+
+
+    def update_shot_tooltip(self, shot_item, shot):
+        """Обновляет всплывающую подсказку для элемента шота."""
+        tooltip_lines = [f"Shot: {shot.name}"]
+        if shot.processed:
+            status = "Success" if shot.processed_success else "Failed"
+            tooltip_lines.append(f"Status: {status}")
+            if shot.processing_timestamp:
+                tooltip_lines.append(f"Processed: {shot.processing_timestamp}")
+            if shot.project_path:
+                tooltip_lines.append(f"Project: {os.path.basename(shot.project_path)}")
+            if shot.script_path:
+                tooltip_lines.append(f"Script: {os.path.basename(shot.script_path)}")
+            if shot.error_log:
+                tooltip_lines.append(f"Errors:\n{shot.error_log}")
+        else:
+            tooltip_lines.append("Status: Not processed")
+        
+        # Пользовательские настройки сенсора и фокусного
+        if shot.user_sensor_width is not None or shot.user_sensor_height is not None:
+            tooltip_lines.append(f"User sensor: {shot.user_sensor_width or '?'} x {shot.user_sensor_height or '?'} mm")
+        if shot.user_focal is not None:
+            tooltip_lines.append(f"User focal: {shot.user_focal} mm")
+        
+        # Информация о группах и моделях
+        tooltip_lines.append(f"Point groups: {len(shot.point_groups)}")
+        total_models = sum(len(models) for models in shot.point_groups.values())
+        tooltip_lines.append(f"Models: {total_models}")
+        
+        tooltip_text = "\n".join(tooltip_lines)
+        # Устанавливаем tooltip для всех колонок
+        for col in range(self.tree.columnCount()):
+            shot_item.setToolTip(col, tooltip_text)
 
     def _store_tree_state(self):
         """Сохраняет состояние дерева: позицию скролла и выделенный элемент."""
@@ -1762,30 +1840,28 @@ class MainWindow(QMainWindow):
         btn_layout.addStretch()
         resources_layout.addLayout(btn_layout)
 
-        # Дерево ресурсов (3 колонки: имя/тип, путь, кнопка)
+        # Дерево ресурсов (2 колонки: путь, кнопка)
         self.resources_tree = QTreeWidget()
-        self.resources_tree.setColumnCount(3)
-        self.resources_tree.setHeaderLabels(["", "Path", ""])
+        self.resources_tree.setColumnCount(2)
+        self.resources_tree.setHeaderLabels(["", ""])
         self.resources_tree.setIndentation(20)
 
         # Настройка ширины колонок
-        self.resources_tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)   # имя модели по содержимому
-        self.resources_tree.header().setSectionResizeMode(1, QHeaderView.Stretch)           # путь растягивается
-        self.resources_tree.header().setSectionResizeMode(2, QHeaderView.Fixed)             # фиксированная ширина для кнопки
-        self.resources_tree.setColumnWidth(2, 70)  # ширина колонки с кнопкой
-        self.resources_tree.header().setStretchLastSection(False)  # важно для фиксации последней колонки
+        self.resources_tree.header().setSectionResizeMode(0, QHeaderView.Stretch)   # путь растягивается
+        self.resources_tree.header().setSectionResizeMode(1, QHeaderView.Fixed)     # кнопка фиксирована
+        self.resources_tree.setColumnWidth(1, 10)                                   # ширина колонки с кнопкой
+        self.resources_tree.header().setStretchLastSection(False)
 
         self.resources_tree.setEditTriggers(QTreeWidget.DoubleClicked | QTreeWidget.EditKeyPressed)
         self.resources_tree.itemChanged.connect(self.on_resource_item_changed)
-
         self.resources_tree.installEventFilter(self)
+        self.resources_tree.setAlternatingRowColors(False)
 
-        self.resources_tree.setAlternatingRowColors(True)
-
-        # Устанавливаем шрифт для дерева ресурсов
         resources_font = QFont()
         resources_font.setPointSize(RESOURCES_FONT_SIZE)
         self.resources_tree.setFont(resources_font)
+
+        resources_widget.setStyleSheet(f"background-color: {RESOURCES_BG_COLOR};")
 
         resources_layout.addWidget(self.resources_tree)
 
@@ -1793,6 +1869,8 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, self.resources_dock)
         self.resources_dock.hide()  # по умолчанию скрыта
 
+        self.resources_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.resources_tree.customContextMenuRequested.connect(self.show_resources_context_menu)
 
 #======================панель==================
         
@@ -1860,6 +1938,102 @@ class MainWindow(QMainWindow):
         control_layout.addWidget(self.cb_logging)
         main_layout.addLayout(control_layout)
 
+        # Скрыть кнопки, если передан путь через --path
+        if self.forced_path:
+            self.btn_settings.setVisible(False)
+            self.btn_logs.setVisible(False)
+            self.btn_select_all.setVisible(False)
+            self.btn_deselect_all.setVisible(False)
+
+
+    def show_resources_context_menu(self, position):
+        item = self.resources_tree.itemAt(position)
+        if not item:
+            return
+
+        # Определяем, является ли элемент корневым (моделью)
+        while item.parent():
+            item = item.parent()
+        data = item.data(0, Qt.UserRole)
+        if not data or not isinstance(data, tuple) or data[0] != "model":
+            return
+
+        menu = QMenu()
+        copy_action = menu.addAction("Copy model")
+        edit_action = menu.addAction("Edit model")
+        remove_action = menu.addAction("Remove model")
+        
+        action = menu.exec_(self.resources_tree.viewport().mapToGlobal(position))
+        if action == copy_action:
+            self.copy_resource_model()  # уже есть
+        elif action == edit_action:
+            self.edit_resource_model(item, data[1])  # data[1] = индекс модели
+        elif action == remove_action:
+            self.remove_resource_model()  # уже есть
+
+    def edit_resource_model(self, model_item, idx):
+        """Открыть диалог редактирования модели в ресурсах."""
+        if not self.project_resources or idx >= len(self.project_resources.models):
+            return
+        m = self.project_resources.models[idx]
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Edit Resource Model")
+        layout = QVBoxLayout(dialog)
+
+        # Имя
+        layout.addWidget(QLabel("Name:"))
+        name_edit = QLineEdit(m["name"])
+        layout.addWidget(name_edit)
+
+        # Путь модели
+        layout.addWidget(QLabel("Model path:"))
+        model_path_edit = QLineEdit(m["model_path"])
+        model_path_layout = QHBoxLayout()
+        model_path_layout.addWidget(model_path_edit)
+        btn_browse_model = QPushButton("Browse...")
+        btn_browse_model.clicked.connect(lambda: self._browse_model_for_edit(model_path_edit))
+        model_path_layout.addWidget(btn_browse_model)
+        layout.addLayout(model_path_layout)
+
+        # Путь текстуры
+        layout.addWidget(QLabel("Texture path:"))
+        tex_path_edit = QLineEdit(m["texture_path"])
+        tex_path_layout = QHBoxLayout()
+        tex_path_layout.addWidget(tex_path_edit)
+        btn_browse_tex = QPushButton("Browse...")
+        btn_browse_tex.clicked.connect(lambda: self._browse_texture_for_edit(tex_path_edit))
+        tex_path_layout.addWidget(btn_browse_tex)
+        layout.addLayout(tex_path_layout)
+
+        # Кнопки
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec_():
+            new_name = name_edit.text().strip()
+            new_model_path = model_path_edit.text().strip()
+            new_tex_path = tex_path_edit.text().strip()
+            if new_name:
+                m["name"] = new_name
+            if new_model_path:
+                m["model_path"] = new_model_path
+            m["texture_path"] = new_tex_path
+            self.project_resources.save()
+            self.populate_resources_tree()
+
+    def _browse_model_for_edit(self, line_edit):
+        path, _ = QFileDialog.getOpenFileName(self, "Select OBJ model", "", "OBJ files (*.obj)")
+        if path:
+            line_edit.setText(path)
+
+    def _browse_texture_for_edit(self, line_edit):
+        path, _ = QFileDialog.getOpenFileName(self, "Select texture", "", "Image files (*.jpg *.png *.tif *.exr)")
+        if path:
+            line_edit.setText(path)
+
     def setup_project_resources(self, root_path):
         project_name = self.determine_project_name(root_path)
         if not project_name:
@@ -1876,64 +2050,58 @@ class MainWindow(QMainWindow):
 
 
     def populate_resources_tree(self):
-        """Заполнить дерево ресурсов из self.project_resources.models."""
         self.resources_tree.blockSignals(True)
         self.resources_tree.clear()
         if not self.project_resources:
             self.resources_tree.blockSignals(False)
             return
 
-        # Получаем базовый шрифт дерева
         base_font = self.resources_tree.font()
         base_size = base_font.pointSize()
-        # Увеличиваем размер шрифта для корневых элементов
         model_font = QFont(base_font)
-        model_font.setPointSize(base_size + 2)   # на 2 больше
+        model_font.setPointSize(base_size + 2)
 
         for idx, m in enumerate(self.project_resources.models):
-            # Корневой элемент – модель
-            model_item = QTreeWidgetItem([m["name"], "", ""])
+            # Корневой элемент – модель (имя)
+            model_item = QTreeWidgetItem([m["name"]])
             model_item.setFlags(model_item.flags() | Qt.ItemIsEditable)
             model_item.setData(0, Qt.UserRole, ("model", idx))
-            # Устанавливаем увеличенный шрифт для всех колонок модели
-            for col in range(3):
+
+            for col in range(self.resources_tree.columnCount()):
+                model_item.setBackground(col, RESOURCES_MODEL_BG_COLOR)
                 model_item.setFont(col, model_font)
+
             self.resources_tree.addTopLevelItem(model_item)
 
             # Дочерний элемент – путь модели
-            path_item = QTreeWidgetItem(["Model path:", m["model_path"], ""])
+            path_item = QTreeWidgetItem([m["model_path"]])
             path_item.setFlags(path_item.flags() | Qt.ItemIsEditable)
             path_item.setData(0, Qt.UserRole, ("model_path", idx))
-            # Для дочерних элементов шрифт не меняем (остаётся базовым)
+            for col in range(self.resources_tree.columnCount()):
+                path_item.setBackground(col, RESOURCES_PATH_BG_COLOR)
             model_item.addChild(path_item)
-            # Кнопка для выбора файла модели
-            btn_model = QPushButton("Browse")
+
+            btn_model = QPushButton("...")
+            btn_model.setFixedWidth(20)
             btn_model.clicked.connect(lambda checked, i=idx: self.browse_model_for_resource(i))
-            self.resources_tree.setItemWidget(path_item, 2, btn_model)
+            self.resources_tree.setItemWidget(path_item, 1, btn_model)
 
             # Дочерний элемент – путь текстуры
-            tex_item = QTreeWidgetItem(["Texture path:", m["texture_path"], ""])
+            tex_item = QTreeWidgetItem([m["texture_path"]])
             tex_item.setFlags(tex_item.flags() | Qt.ItemIsEditable)
             tex_item.setData(0, Qt.UserRole, ("texture_path", idx))
+            for col in range(self.resources_tree.columnCount()):
+                tex_item.setBackground(col, RESOURCES_PATH_BG_COLOR)
             model_item.addChild(tex_item)
-            # Кнопка для выбора текстуры
-            btn_tex = QPushButton("Browse")
-            btn_tex.clicked.connect(lambda checked, i=idx: self.browse_texture_for_resource(i))
-            self.resources_tree.setItemWidget(tex_item, 2, btn_tex)
 
-            # Визуальное отделение моделей: устанавливаем фон корневого элемента
-            if idx % 2 == 0:
-                brush = QBrush(QColor(245, 245, 245))
-            else:
-                brush = QBrush(QColor(235, 235, 235))
-            model_item.setBackground(0, brush)
-            model_item.setBackground(1, brush)
-            model_item.setBackground(2, brush)
+            btn_tex = QPushButton("...")
+            btn_tex.setFixedWidth(20)
+            btn_tex.clicked.connect(lambda checked, i=idx: self.browse_texture_for_resource(i))
+            self.resources_tree.setItemWidget(tex_item, 1, btn_tex)
 
         self.resources_tree.expandAll()
-        # Принудительно устанавливаем фиксированную ширину для колонки с кнопками
-        self.resources_tree.header().setSectionResizeMode(2, QHeaderView.Fixed)
-        self.resources_tree.setColumnWidth(2, 70)
+        self.resources_tree.header().setSectionResizeMode(1, QHeaderView.Fixed)
+        self.resources_tree.setColumnWidth(1, 10)
         self.resources_tree.blockSignals(False)
 
     def on_resource_item_changed(self, item, column):
@@ -1946,10 +2114,10 @@ class MainWindow(QMainWindow):
         m = self.project_resources.models[idx]
         if data_type == "model" and column == 0:
             m["name"] = item.text(0)
-        elif data_type == "model_path" and column == 1:
-            m["model_path"] = item.text(1)
-        elif data_type == "texture_path" and column == 1:
-            m["texture_path"] = item.text(1)
+        elif data_type == "model_path" and column == 0:   # было column == 1
+            m["model_path"] = item.text(0)
+        elif data_type == "texture_path" and column == 0: # было column == 1
+            m["texture_path"] = item.text(0)
         self.project_resources.save()
 
 
@@ -2110,31 +2278,42 @@ class MainWindow(QMainWindow):
     def recolor_shots(self):
         self._disable_saving = True
         
+        # Получаем цвета из настроек
+        mismatch_color = QColor(*self.settings.data.get("color_mismatch", (255, 165, 0)))
+        success_color = QColor(*self.settings.data.get("color_success", (144, 238, 144)))
+        failure_color = QColor(*self.settings.data.get("color_failure", (255, 182, 193)))
+        not_processed_color = QColor(*self.settings.data.get("color_not_processed", (173, 216, 230)))
         
-        mismatch_color_rgb = self.settings.data.get("color_mismatch", (255, 165, 0))
-        mismatch_color = QColor(*mismatch_color_rgb)
         for idx in range(self.tree.topLevelItemCount()):
             shot_item = self.tree.topLevelItem(idx)
             shot = shot_item.data(0, Qt.UserRole)
-            if shot:
-                if self.current_processing_shot_name == shot.name:
-                    proc_color = self.settings.data.get("color_processing", (173, 216, 230))
-                    color = QColor(*proc_color)
-                elif shot.processed:
-                    if shot.processed_success:
-                        color_rgb = self.settings.data.get("color_success", (144, 238, 144))
-                    else:
-                        color_rgb = self.settings.data.get("color_failure", (255, 182, 193))
-                    color = QColor(*color_rgb)
+            if not shot:
+                continue
+            
+            # Определяем базовый цвет в зависимости от состояния шота
+            if shot.processed:
+                base_color = success_color if shot.processed_success else failure_color
+            else:
+                # Необработанный шот
+                if shot.mismatched_frame_count or shot.has_gaps:
+                    base_color = mismatch_color
                 else:
-                    if shot.selected:
-                        color = self.get_shot_color(idx, True)
-                    else:
-                        if shot.mismatched_frame_count:
-                            color = mismatch_color
-                        else:
-                            color = self.get_shot_color(idx, False)
-                self._set_item_background_recursive(shot_item, color)
+                    base_color = not_processed_color
+            
+            # Применяем затемнение, если галочка снята
+            if not shot.selected:
+                darken = DARKEN_FACTOR
+                r = max(base_color.red() - darken, 0)
+                g = max(base_color.green() - darken, 0)
+                b = max(base_color.blue() - darken, 0)
+                color = QColor(r, g, b)
+            else:
+                color = base_color
+            
+            self._set_item_background_recursive(shot_item, color)
+        
+        
+        self.tree.viewport().update()
         self._disable_saving = False
 
 
@@ -2475,6 +2654,9 @@ class MainWindow(QMainWindow):
             for col in range(self.tree.columnCount()):
                 shot_item.setFont(col, font)
 
+            self.update_shot_tooltip(shot_item, shot)
+            self.tree.addTopLevelItem(shot_item)
+
             shot_item.setFlags(shot_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
             shot_item.setCheckState(0, Qt.Checked if shot.selected else Qt.Unchecked)
             shot_item.setData(0, Qt.UserRole, shot)
@@ -2563,8 +2745,8 @@ class MainWindow(QMainWindow):
             if shot:
                 if column == 0:  # чекбокс
                     shot.selected = item.checkState(0) == Qt.Checked
-                    if not shot.processed:
-                        self.recolor_shots()
+                    self.recolor_shots()   # всегда перекрашиваем, не только для необработанных
+                    self.update_shot_tooltip(item, shot)
                 elif column == 1:  # sensor W
                     text = item.text(1).strip()
                     try:
@@ -2577,6 +2759,7 @@ class MainWindow(QMainWindow):
                         item.setText(1, str(shot.user_sensor_width))
                     else:
                         item.setText(1, "")
+                    self.update_shot_tooltip(item, shot)
                 elif column == 2:  # sensor H
                     text = item.text(2).strip()
                     try:
@@ -2589,6 +2772,7 @@ class MainWindow(QMainWindow):
                         item.setText(2, str(shot.user_sensor_height))
                     else:
                         item.setText(2, "")
+                    self.update_shot_tooltip(item, shot)
                 elif column == 3:  # focal
                     text = item.text(3).strip()
                     try:
@@ -2601,6 +2785,7 @@ class MainWindow(QMainWindow):
                         item.setText(3, str(shot.user_focal))
                     else:
                         item.setText(3, "")
+                    self.update_shot_tooltip(item, shot)
             return
 
         # Слой (Layers)
@@ -3143,6 +3328,7 @@ class MainWindow(QMainWindow):
                 else:
                     color_rgb = self.settings.data.get("color_failure", (255, 182, 193))
                 color = QColor(*color_rgb)
+                self.update_shot_tooltip(item, shot)   # <-- добавить
                 self._set_item_background_recursive(item, color)
 
     def open_settings(self):
@@ -3153,6 +3339,7 @@ class MainWindow(QMainWindow):
             self.cb_logging.setChecked(self.settings.data.get("logging_enabled", True))
             self.apply_ui_font()
             self.init_external_modules()
+            self.recolor_shots()
 
     def show_logs(self):
         if not self.log_window:
@@ -3172,6 +3359,17 @@ class MainWindow(QMainWindow):
         self.btn_abort.setEnabled(True)
         self.btn_scan.setEnabled(False)
         self.btn_browse.setEnabled(False)
+        self.tree.setEnabled(False)                     # запрет на изменения в дереве
+        self.resources_tree.setEnabled(False)           # запрет на панель ресурсов
+        self.btn_add_group.setEnabled(False)
+        self.btn_add_model.setEnabled(False)
+        self.btn_remove.setEnabled(False)
+        self.btn_resources.setEnabled(False)
+        self.btn_select_all.setEnabled(False)
+        self.btn_deselect_all.setEnabled(False)
+        self.btn_settings.setEnabled(False)
+        self.btn_logs.setEnabled(False)
+
         self.worker = ProcessingWorker(selected_shots, self.settings)
         self.worker_thread = QThread()
         self.worker.moveToThread(self.worker_thread)
@@ -3218,6 +3416,17 @@ class MainWindow(QMainWindow):
         self.btn_abort.setEnabled(False)
         self.btn_scan.setEnabled(True)
         self.btn_browse.setEnabled(True)
+        self.tree.setEnabled(True)
+        self.resources_tree.setEnabled(True)
+        self.btn_add_group.setEnabled(True)
+        self.btn_add_model.setEnabled(True)
+        self.btn_remove.setEnabled(True)
+        self.btn_resources.setEnabled(True)
+        self.btn_select_all.setEnabled(True)
+        self.btn_deselect_all.setEnabled(True)
+        self.btn_settings.setEnabled(True)
+        self.btn_logs.setEnabled(True)
+
         self.global_progress.reset()
         self.shot_progress.reset()
         self.seq_progress.reset()
@@ -3335,7 +3544,7 @@ class MainWindow(QMainWindow):
             print(f"  Ошибка: не удалось сгенерировать скрипт для {shot.name}")
             return False, None
 
-        script_filename = f"_temp_{shot.name}_create_project.py"
+        script_filename = f"_temp_{shot.name}_v000_create_project.py"
         script_file = os.path.join(tracking_dir, script_filename)
         with open(script_file, 'w', encoding='utf-8') as f:
             f.write(script_content)
@@ -3501,7 +3710,7 @@ class MainWindow(QMainWindow):
         lines.append(f"tde4.setLensFBackHeight(lens, {sensor_height / 10:.2f})")
         lines.append(f"tde4.setLensFocalLength(lens, {focal / 10:.2f})")
         lines.append("tde4.setLensPixelAspect(lens, 1.0)")
-        lines.append(f"tde4.setLensFBackHeight(lens, {sensor_height / 10:.2f})")
+        lines.append(f"tde4.setLensFBackWidth(lens, {sensor_width / 10:.2f})")
         lines.append("tde4.setParameterAdjustFlag(lens, 'ADJUST_LENS_FOCAL_LENGTH', '', 1)")
         lines.append("tde4.setParameterAdjustFlag(lens, 'ADJUST_LENS_DISTORTION_PARAMETER', 'Distortion - Degree 2', 1)")
         lines.append("tde4.setParameterAdjustFlag(lens, 'ADJUST_LENS_DISTORTION_PARAMETER', 'Quartic Distortion - Degree 4', 1)")
@@ -3604,34 +3813,34 @@ class SettingsDialog(QDialog):
         self.spin_quality.setValue(settings.data["bc_quality"])
         layout.addRow("BC quality:", self.spin_quality)
 
-        self.spin_black = QSpinBox()
-        self.spin_black.setRange(0, 255)
-        self.spin_black.setValue(settings.data["bc_black"])
-        layout.addRow("Black point:", self.spin_black)
+        # self.spin_black = QSpinBox()
+        # self.spin_black.setRange(0, 255)
+        # self.spin_black.setValue(settings.data["bc_black"])
+        # layout.addRow("Black point:", self.spin_black)
 
-        self.spin_white = QSpinBox()
-        self.spin_white.setRange(0, 255)
-        self.spin_white.setValue(settings.data["bc_white"])
-        layout.addRow("White point:", self.spin_white)
+        # self.spin_white = QSpinBox()
+        # self.spin_white.setRange(0, 255)
+        # self.spin_white.setValue(settings.data["bc_white"])
+        # layout.addRow("White point:", self.spin_white)
 
-        self.spin_gamma = QDoubleSpinBox()
-        self.spin_gamma.setRange(0.1, 10.0)
-        self.spin_gamma.setValue(settings.data["bc_gamma"])
-        layout.addRow("Gamma:", self.spin_gamma)
+        # self.spin_gamma = QDoubleSpinBox()
+        # self.spin_gamma.setRange(0.1, 10.0)
+        # self.spin_gamma.setValue(settings.data["bc_gamma"])
+        # layout.addRow("Gamma:", self.spin_gamma)
 
-        self.spin_softclip = QDoubleSpinBox()
-        self.spin_softclip.setRange(0.0, 1.0)
-        self.spin_softclip.setSingleStep(0.01)
-        self.spin_softclip.setValue(settings.data["bc_softclip"])
-        layout.addRow("Softclip:", self.spin_softclip)
+        # self.spin_softclip = QDoubleSpinBox()
+        # self.spin_softclip.setRange(0.0, 1.0)
+        # self.spin_softclip.setSingleStep(0.01)
+        # self.spin_softclip.setValue(settings.data["bc_softclip"])
+        # layout.addRow("Softclip:", self.spin_softclip)
 
-        self.chk_exr_disp = QCheckBox()
-        self.chk_exr_disp.setChecked(settings.data["import_exr_display_window"])
-        layout.addRow("Import EXR display window:", self.chk_exr_disp)
+        # self.chk_exr_disp = QCheckBox()
+        # self.chk_exr_disp.setChecked(settings.data["import_exr_display_window"])
+        # layout.addRow("Import EXR display window:", self.chk_exr_disp)
 
-        self.chk_sxr = QCheckBox()
-        self.chk_sxr.setChecked(settings.data["import_sxr_right_eye"])
-        layout.addRow("Import SXR right eye:", self.chk_sxr)
+        # self.chk_sxr = QCheckBox()
+        # self.chk_sxr.setChecked(settings.data["import_sxr_right_eye"])
+        # layout.addRow("Import SXR right eye:", self.chk_sxr)
 
         self.spin_start_frame = QSpinBox()
         self.spin_start_frame.setRange(1, 99999)
@@ -3642,10 +3851,10 @@ class SettingsDialog(QDialog):
         self.chk_logging.setChecked(settings.data.get("logging_enabled", True))
         layout.addRow("Enable logging by default:", self.chk_logging)
 
-        self.spin_log_lines = QSpinBox()
-        self.spin_log_lines.setRange(1, 100)
-        self.spin_log_lines.setValue(settings.data.get("log_lines", 5))
-        layout.addRow("Number of log lines (minimum):", self.spin_log_lines)
+        # self.spin_log_lines = QSpinBox()
+        # self.spin_log_lines.setRange(1, 100)
+        # self.spin_log_lines.setValue(settings.data.get("log_lines", 5))
+        # layout.addRow("Number of log lines (minimum):", self.spin_log_lines)
 
         self.spin_font_size = QSpinBox()
         self.spin_font_size.setRange(6, 72)
@@ -3731,6 +3940,15 @@ class SettingsDialog(QDialog):
         layout.addRow("Mismatched frame count color:", self.btn_mismatch_color)
         layout.addRow("", self.lbl_mismatch_color)
 
+        self.btn_not_processed_color = QPushButton("Choose...")
+        self.lbl_not_processed_color = QLabel()
+        self.lbl_not_processed_color.setFixedSize(50, 20)
+        self.lbl_not_processed_color.setAutoFillBackground(True)
+        self.set_color_label(self.lbl_not_processed_color, settings.data.get("color_not_processed", (173, 216, 230)))
+        self.btn_not_processed_color.clicked.connect(lambda: self.choose_color(self.lbl_not_processed_color, "color_not_processed"))
+        layout.addRow("Not processed (selected) color:", self.btn_not_processed_color)
+        layout.addRow("", self.lbl_not_processed_color)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -3783,15 +4001,15 @@ class SettingsDialog(QDialog):
         self.settings.data["sensor_height"] = self.spin_sensorh.value()
         self.settings.data["focal"] = self.spin_focal.value()
         self.settings.data["bc_quality"] = self.spin_quality.value()
-        self.settings.data["bc_black"] = self.spin_black.value()
-        self.settings.data["bc_white"] = self.spin_white.value()
-        self.settings.data["bc_gamma"] = self.spin_gamma.value()
-        self.settings.data["bc_softclip"] = self.spin_softclip.value()
-        self.settings.data["import_exr_display_window"] = self.chk_exr_disp.isChecked()
-        self.settings.data["import_sxr_right_eye"] = self.chk_sxr.isChecked()
+        # self.settings.data["bc_black"] = self.spin_black.value()
+        # self.settings.data["bc_white"] = self.spin_white.value()
+        # self.settings.data["bc_gamma"] = self.spin_gamma.value()
+        # self.settings.data["bc_softclip"] = self.spin_softclip.value()
+        # self.settings.data["import_exr_display_window"] = self.chk_exr_disp.isChecked()
+        # self.settings.data["import_sxr_right_eye"] = self.chk_sxr.isChecked()
         self.settings.data["start_frame"] = self.spin_start_frame.value()
         self.settings.data["logging_enabled"] = self.chk_logging.isChecked()
-        self.settings.data["log_lines"] = self.spin_log_lines.value()
+        # self.settings.data["log_lines"] = self.spin_log_lines.value()
         self.settings.data["font_size"] = self.spin_font_size.value()
         self.settings.data["ui_font_size"] = self.spin_ui_font_size.value()
         self.settings.data["ui_font_bold"] = self.chk_ui_bold.isChecked()
@@ -3803,6 +4021,7 @@ class SettingsDialog(QDialog):
         self.settings.data["dir_permissions"] = self.edit_dir_perm.text()
         self.settings.data["log_highlight_important"] = self.chk_highlight.isChecked()
         self.settings.data["color_mismatch"] = self.lbl_mismatch_color.palette().color(self.lbl_mismatch_color.backgroundRole()).getRgb()[:3]
+        self.settings.data["color_not_processed"] = self.lbl_not_processed_color.palette().color(self.lbl_not_processed_color.backgroundRole()).getRgb()[:3]
         super().accept()
 
 if __name__ == "__main__":
