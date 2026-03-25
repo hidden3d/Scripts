@@ -1813,6 +1813,9 @@ class MainWindow(QMainWindow):
 
         self.tree.setItemDelegate(MainTreeDelegate(self))
 
+        self.tree.setSortingEnabled(True)
+        self.tree.sortByColumn(0, Qt.AscendingOrder)
+
 #==========================================панель==================================
 
         # ========== Панель ресурсов ==========
@@ -2067,7 +2070,7 @@ class MainWindow(QMainWindow):
             model_item.setFlags(model_item.flags() | Qt.ItemIsEditable)
             model_item.setData(0, Qt.UserRole, ("model", idx))
 
-            for col in range(self.resources_tree.columnCount()):
+            for col in range(self.resources_tree.columnCount()-1):
                 model_item.setBackground(col, RESOURCES_MODEL_BG_COLOR)
                 model_item.setFont(col, model_font)
 
