@@ -4077,6 +4077,69 @@ class MetadataManager:
         self.metadata_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.metadata_table.setContextMenuPolicy(Qt.CustomContextMenu)
 
+
+    def _extract_shoot_datetime(self, metadata):
+        """Извлекает самую раннюю дату/время съёмки из метаданных."""
+        import datetime
+        import re
+
+        excluded_keys = ["Дата изменения", "Дата создания"]
+        candidate_datetimes = []
+
+        for key, value in metadata.items():
+            if key in excluded_keys:
+                continue
+
+            value_str = str(value)
+
+            # 1) ISO формат: YYYY-MM-DD HH:MM:SS или YYYY-MM-DD
+            iso_match = re.search(r'(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}:\d{2}))?', value_str)
+            if iso_match:
+                date_part = iso_match.group(1)
+                time_part = iso_match.group(2)
+                try:
+                    if time_part:
+                        dt = datetime.datetime.strptime(f"{date_part} {time_part}", "%Y-%m-%d %H:%M:%S")
+                    else:
+                        dt = datetime.datetime.strptime(date_part, "%Y-%m-%d")
+                    candidate_datetimes.append(dt)
+                    continue
+                except Exception:
+                    pass
+
+            # 2) Поиск 6-значных групп: YYMMDD и, возможно, HHMMSS
+            six_digit_matches = re.findall(r'\b(\d{6})\b', value_str)
+            if six_digit_matches:
+                # Первая группа — дата (YYMMDD)
+                date_match = six_digit_matches[0]
+                try:
+                    y = int(date_match[0:2])
+                    m = int(date_match[2:4])
+                    d = int(date_match[4:6])
+                    year = 2000 + y   # предположим год 20xx
+                    dt = datetime.datetime(year, m, d)
+
+                    # Вторая группа, если есть — время (HHMMSS)
+                    if len(six_digit_matches) > 1:
+                        time_match = six_digit_matches[1]
+                        h = int(time_match[0:2])
+                        mn = int(time_match[2:4])
+                        s = int(time_match[4:6])
+                        if 0 <= h < 24 and 0 <= mn < 60 and 0 <= s < 60:
+                            dt = dt.replace(hour=h, minute=mn, second=s)
+                    candidate_datetimes.append(dt)
+                except Exception:
+                    pass
+
+        if candidate_datetimes:
+            earliest = min(candidate_datetimes)
+            if earliest.time() == datetime.time(0, 0, 0):
+                return earliest.strftime("%d.%m.%Y")
+            else:
+                return earliest.strftime("%d.%m.%Y %H:%M:%S")
+        return None
+
+
     def display_metadata(self, file_path, extension, forced_tool=None):
         """Отображает метаданные для файла"""
         try:
@@ -4686,6 +4749,11 @@ class MetadataManager:
         result_text += " \n"
         result_text += f"SOURCE FRAMES: {frame_count}\n"
         result_text += " \n"  # пустая строка перед блоком разрешений
+                # Получаем дату съёмки
+        shoot_datetime = self._extract_shoot_datetime(self.current_metadata)
+        if shoot_datetime:
+            result_text += f"Shoot Date: {shoot_datetime}\n"
+        result_text += " \n"   # пустая строка перед блоком разрешений
         result_text += f"Source Resolution: {source_res}\n"
         result_text += f"Reformat Resolution: {reformat_res}\n"
         result_text += f"Aspect: {aspect_str}"

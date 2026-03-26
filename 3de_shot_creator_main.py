@@ -21,7 +21,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QSizePolicy, QStyledItemDelegate, QInputDialog, QColorDialog, QSplitter, QMenu,
                              QTableWidget, QTableWidgetItem, QDockWidget, QShortcut)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QMutex, QWaitCondition, QByteArray, QTimer
-from PyQt5.QtGui import QColor, QFont, QBrush, QKeySequence
+from PyQt5.QtGui import QColor, QFont, QBrush, QKeySequence, QPalette
 
 # Попытка импорта exifread
 try:
@@ -1543,7 +1543,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.forced_path = forced_path
         self.setWindowTitle("3DE Shot Processor")
-        self.resize(1200, 800)
+        self.resize(1400, 800)
 
         self.settings = Settings()
         self.root_path = ""
@@ -1581,6 +1581,15 @@ class MainWindow(QMainWindow):
             self.splitter.restoreState(state)
 
 
+
+    def set_disabled_text_color(self, widget):
+        """Устанавливает для виджета чёрный цвет текста в отключённом состоянии."""
+        palette = widget.palette()
+        disabled_text = palette.color(QPalette.Disabled, QPalette.Text)
+        normal_text = palette.color(QPalette.Normal, QPalette.Text)
+        if disabled_text != normal_text:
+            palette.setColor(QPalette.Disabled, QPalette.Text, normal_text)
+            widget.setPalette(palette)
 
     def update_shot_tooltip(self, shot_item, shot):
         """Обновляет всплывающую подсказку для элемента шота."""
@@ -4034,6 +4043,18 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
+
+    # --- Исправление цвета текста у отключённых виджетов ---
+    palette = app.palette()
+    # Сохраняем нормальные цвета текста
+    normal_text = palette.color(QPalette.Normal, QPalette.Text)
+    normal_button_text = palette.color(QPalette.Normal, QPalette.ButtonText)
+    # Применяем их к disabled-состоянию
+    palette.setColor(QPalette.Disabled, QPalette.Text, normal_text)
+    palette.setColor(QPalette.Disabled, QPalette.ButtonText, normal_button_text)
+    app.setPalette(palette)
+
+
 
     forced_path = args.path if args.path else None
     headless = args.nosetup
