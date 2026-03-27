@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QLabel, QMessageBox, QTextEdit, QDialog, QFormLayout,
                              QLineEdit, QDoubleSpinBox, QSpinBox, QDialogButtonBox, 
                              QSizePolicy, QStyledItemDelegate, QInputDialog, QColorDialog, QSplitter, QMenu,
-                             QTableWidget, QTableWidgetItem, QDockWidget, QShortcut)
+                             QTableWidget, QTableWidgetItem, QDockWidget, QShortcut, QComboBox, QListWidget, QListWidgetItem)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QMutex, QWaitCondition, QByteArray, QTimer
 from PyQt5.QtGui import QColor, QFont, QBrush, QKeySequence, QPalette
 
@@ -48,8 +48,9 @@ except ImportError:
     OPENEXR_AVAILABLE = False
     print("OpenEXR not installed. EXR metadata reading will be limited. Install: pip install openexr")
 
-
-
+PROJECTS_FONT_SIZE = 9   # размер шрифта для списка существующих проектов
+PROJECTS_PANEL_NAME = "Existing Projects"
+CHECK_OPEN_EQ = True
 # Цвета панели ресурсов
 RESOURCES_BG_COLOR = "rgb(243, 237, 229)"          # светло-жёлтый (бежевый)
 RESOURCES_MODEL_BG_COLOR = QColor(173, 216, 230)   # светло-голубой
@@ -80,6 +81,266 @@ STOP_WORDS = {
 }
 
 # ================== Helper functions ==================
+
+# ================== Общие утилиты ==================
+
+# ================== Общие утилиты ==================
+
+def get_next_version(tracking_dir, shot_name):
+    """Определить следующий номер версии для проекта шота."""
+    pattern = os.path.join(tracking_dir, f"{shot_name}_track_v*.3de")
+    files = glob.glob(pattern)
+    max_v = 0
+    for f in files:
+        base = os.path.basename(f)
+        match = re.search(r'_v(\d+)\.3de$', base)
+        if match:
+            v = int(match.group(1))
+            if v > max_v:
+                max_v = v
+    return max_v + 1
+
+
+def generate_bc_file(seq, out_dir, settings, log_func=None, progress_callback=None):
+    """
+    Генерирует bc-файл для последовательности.
+    :param seq: объект Sequence
+    :param out_dir: директория для сохранения
+    :param settings: объект Settings (или словарь с настройками)
+    :param log_func: функция для логирования (msg, level=None)
+    :param progress_callback: функция для обновления прогресса (current, total)
+    :return: путь к сгенерированному bc-файлу или None
+    """
+    makebc = settings.data.get("path_makeBCFile", "")
+    if not os.path.isfile(makebc):
+        if log_func:
+            log_func(f"makeBCFile not found: {makebc}", "error")
+        return None
+
+    if not seq.files:
+        if log_func:
+            log_func(f"No files for {seq.full_name}", "error")
+        return None
+
+    pattern = make_pattern_from_file(seq.files[0])
+    if not pattern:
+        if log_func:
+            log_func(f"Could not create pattern from {seq.files[0]}", "error")
+        return None
+
+    cmd = [
+        makebc,
+        "-source", pattern,
+        "-start", str(seq.first_frame),
+        "-end", str(seq.last_frame),
+        "-out", out_dir,
+        "-quality", str(settings.data.get("bc_quality", 90)),
+        "-black", str(settings.data.get("bc_black", 0)),
+        "-white", str(settings.data.get("bc_white", 255)),
+        "-gamma", str(settings.data.get("bc_gamma", 1.0)),
+        "-softclip", str(settings.data.get("bc_softclip", 0.0))
+    ]
+    if settings.data.get("import_exr_display_window", False):
+        cmd.append("-import_exr_display_window")
+    if settings.data.get("import_sxr_right_eye", False):
+        cmd.append("-import_sxr_right_eye")
+
+    if log_func:
+        log_func(f"Running: {' '.join(cmd)}", "info")
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                universal_newlines=True, bufsize=1)
+        for line in iter(proc.stdout.readline, ''):
+            line = line.strip()
+            if line and log_func:
+                log_func(f"  {line}", "info")
+            if progress_callback:
+                match = re.search(r'(\d+)/(\d+) image files processed', line)
+                if match:
+                    current = int(match.group(1))
+                    total = int(match.group(2))
+                    progress_callback(current, total)
+        proc.wait()
+        if proc.returncode != 0:
+            if log_func:
+                log_func(f"makeBCFile finished with error (code {proc.returncode})", "error")
+            return None
+    except Exception as e:
+        if log_func:
+            log_func(f"Error running makeBCFile: {e}", "error")
+        return None
+
+    expected_name = expected_bc_name(seq.files[0])
+    expected_path = os.path.join(out_dir, expected_name)
+    if os.path.isfile(expected_path):
+        return expected_path
+    else:
+        bc_files = glob.glob(os.path.join(out_dir, "*.3de_bcompress"))
+        if bc_files:
+            latest = max(bc_files, key=os.path.getmtime)
+            if log_func:
+                log_func(f"Found bc file: {os.path.basename(latest)}", "success")
+            return latest
+        else:
+            if log_func:
+                log_func(f"File {expected_path} not found after generation", "error")
+            return None
+
+
+def generate_tde4_script(shot, main_seq, proxy_seqs, bc_files, project_path, settings, exit_at_end=True):
+    """
+    Генерирует Python-скрипт для 3DE4.
+    :param shot: объект Shot
+    :param main_seq: основная последовательность
+    :param proxy_seqs: список прокси-последовательностей
+    :param bc_files: не используется в текущей реализации (оставлен для совместимости)
+    :param project_path: путь для сохранения проекта
+    :param settings: объект Settings
+    :param exit_at_end: добавлять ли raise SystemExit(0) в конце
+    :return: текст скрипта или None при ошибке
+    """
+    if not main_seq.files:
+        return None
+    if main_seq.first_frame is None or main_seq.last_frame is None:
+        return None
+
+    main_pattern = make_pattern_from_file(main_seq.files[0])
+    if not main_pattern:
+        return None
+
+    default_sensor_width = settings.data.get("sensor_width", 35.0)
+    default_sensor_height = settings.data.get("sensor_height", 24.0)
+    default_focal = settings.data.get("focal", 24.0)
+
+    sensor_width = shot.user_sensor_width if shot.user_sensor_width is not None else (
+        main_seq.sensor_width if main_seq.sensor_width is not None else default_sensor_width)
+    sensor_height = shot.user_sensor_height if shot.user_sensor_height is not None else (
+        main_seq.sensor_height if main_seq.sensor_height is not None else default_sensor_height)
+    focal = shot.user_focal if shot.user_focal is not None else (
+        main_seq.focal if main_seq.focal is not None else default_focal)
+
+    lines = []
+    lines.append("import tde4")
+    lines.append("import os")
+    lines.append("print('=== 3DE Project Setup ===')")
+    lines.append("")
+
+    # Линза
+    lines.append("lens = tde4.getFirstLens()")
+    lines.append(f"print('Setting lens: sensor {sensor_width:.1f} x {sensor_height:.1f} mm, focal {focal:.1f} mm')")
+    lines.append(f"tde4.setLensFBackWidth(lens, {sensor_width / 10:.2f})")
+    lines.append(f"tde4.setLensFBackHeight(lens, {sensor_height / 10:.2f})")
+    lines.append(f"tde4.setLensFocalLength(lens, {focal / 10:.2f})")
+    lines.append("tde4.setLensPixelAspect(lens, 1.0)")
+    lines.append(f"tde4.setLensFBackWidth(lens, {sensor_width / 10:.2f})")
+    lines.append("tde4.setParameterAdjustFlag(lens, 'ADJUST_LENS_FOCAL_LENGTH', '', 1)")
+    lines.append("tde4.setParameterAdjustFlag(lens, 'ADJUST_LENS_DISTORTION_PARAMETER', 'Distortion - Degree 2', 1)")
+    lines.append("tde4.setParameterAdjustFlag(lens, 'ADJUST_LENS_DISTORTION_PARAMETER', 'Quartic Distortion - Degree 4', 1)")
+    lines.append("")
+
+    # Камера
+    lines.append("cam = tde4.getFirstCamera()")
+    lines.append(f"tde4.setCameraName(cam, '{main_seq.full_name}')")
+    lines.append("tde4.setCameraLens(cam, lens)")
+    lines.append(f"tde4.setCameraPath(cam, r'{main_pattern}')")
+    lines.append(f"tde4.setCameraSequenceAttr(cam, {main_seq.first_frame}, {main_seq.last_frame}, 1)")
+    offset = settings.data.get("start_frame", 1001)
+    lines.append(f"tde4.setCameraFrameOffset(cam, {offset})")
+    lines.append(f"tde4.setCamera8BitColorBlackWhite(cam, {settings.data['bc_black']}, {settings.data['bc_white']})")
+    lines.append(f"tde4.setCamera8BitColorGamma(cam, {settings.data['bc_gamma']})")
+    lines.append(f"tde4.setCamera8BitColorSoftclip(cam, {settings.data['bc_softclip']})")
+    lines.append("")
+
+    # Ближняя плоскость отсечения
+    lines.append("tde4.setNearClippingPlane(0.1)")
+    lines.append("tde4.setNearClippingPlaneF6(0.1)")
+    lines.append("")
+
+    # Прокси-последовательности
+    if proxy_seqs:
+        lines.append("# Прокси-последовательности")
+        for idx, seq in enumerate(proxy_seqs, start=1):
+            if not seq.files:
+                continue
+            proxy_pattern = make_pattern_from_file(seq.files[0])
+            if not proxy_pattern:
+                continue
+            lines.append(f"tde4.setCameraProxyFootage(cam, {idx})")
+            lines.append(f"tde4.setCameraPath(cam, r'{proxy_pattern}')")
+            lines.append(f"tde4.setCameraSequenceAttr(cam, {seq.first_frame}, {seq.last_frame}, 1)")
+            lines.append(f"print('Added proxy slot {idx}: {seq.full_name}')")
+        lines.append("tde4.setCameraProxyFootage(cam, 0)")
+        lines.append("")
+
+    # Группы точек и 3D-модели
+    lines.append("# === ГРУППЫ ТОЧЕК И 3D-МОДЕЛИ ===")
+    lines.append("first_group = tde4.getFirstPGroup()")
+    lines.append("tde4.setPGroupName(first_group, 'CAMERA')")
+    lines.append("print('Group CAMERA ready')")
+    lines.append("")
+
+    for group_name, models in shot.point_groups.items():
+        if group_name == "CAMERA":
+            pgroup_line = "first_group"
+        else:
+            pgroup_line = f"pgroup_{group_name.replace(' ', '_')}"
+            lines.append(f"{pgroup_line} = tde4.createPGroup('OBJECT')")
+            lines.append(f"tde4.setPGroupName({pgroup_line}, '{group_name}')")
+            lines.append(f"print('Created group {group_name}')")
+        for model_dict in models:
+            if not model_dict["enabled"]:
+                continue
+            model_path = model_dict["path"]
+            safe_path = repr(model_path.replace('\\', '/'))
+            model_name = os.path.splitext(os.path.basename(model_path))[0]
+            lines.append(f'print("  Importing model: {model_name} from " + {safe_path})')
+            lines.append(f"model = tde4.create3DModel({pgroup_line}, 0)")
+            lines.append(f"tde4.set3DModelSurveyFlag({pgroup_line}, model, 1)")
+            lines.append(f"tde4.set3DModelReferenceFlag({pgroup_line}, model, 1)")
+            lines.append(f"tde4.set3DModelPerformanceRenderingFlag({pgroup_line}, model, 1)")
+            lines.append(f"tde4.importOBJ3DModel({pgroup_line}, model, {safe_path})")
+            lines.append("tde4.flushEventQueue()")
+            lines.append(f"tde4.set3DModelName({pgroup_line}, model, '{model_name}')")
+            lines.append(f"tde4.set3DModelColor({pgroup_line}, model, 0.22, 0.45, 0.65, 0.05)")
+            lines.append(f"tde4.set3DModelRenderingFlags({pgroup_line}, model, 1, 0, 1)")
+            if model_dict["texture"]["enabled"] and model_dict["texture"]["path"]:
+                texture_path = model_dict["texture"]["path"]
+                safe_texture = repr(texture_path.replace('\\', '/'))
+                lines.append(f'print("    Texture: " + {safe_texture})')
+                lines.append(f"tde4.set3DModelTextureMapMode({pgroup_line}, model, 'TEXMAP_UV')")
+                lines.append(f"tde4.set3DModelUVTextureMap({pgroup_line}, model, {safe_texture})")
+                lines.append("tde4.flushEventQueue()")
+            else:
+                lines.append(f'print("    No texture set for model {model_name}")')
+            lines.append(f"tde4.set3DModelVisibleFlag({pgroup_line}, model, 1)")
+        if group_name != "CAMERA":
+            lines.append("")
+
+    # Сохранение и скриншот
+    lines.append("print('Saving project...')")
+    lines.append(f"tde4.saveProject(r'{project_path}')")
+    lines.append("tde4.flushEventQueue()")
+    lines.append("print('Project saved')")
+    lines.append("tde4.updateGUI()")
+    screenshot_path = project_path + ".jpg"
+    lines.append("resx, resy = tde4.getMainWindowResolution()")
+    lines.append(f"tde4.saveMainWindowScreenShot(r'{screenshot_path}', 'IMAGE_JPEG', 0, 0, resx, resy)")
+    lines.append("tde4.flushEventQueue()")
+    lines.append("print('Screenshot saved')")
+    lines.append("tde4.updateGUI()")
+    # Импорт буферного файла (если есть)
+    lines.append("print('Importing buffer compression file...')")
+    lines.append("cam = tde4.getFirstCamera()")
+    lines.append("tde4.importBufferCompressionFile(cam)")
+    lines.append("print('Buffer compression file imported (if existed)')")
+    lines.append("")
+    lines.append("print('=== Done ===')")
+    if exit_at_end:
+        lines.append("raise SystemExit(0)")
+
+    return "\n".join(lines)
+
+
 def make_pattern_from_file(filepath):
     """Convert file path .../name.0001.jpg to .../name.####.jpg for makeBCFile."""
     dirname = os.path.dirname(filepath)
@@ -1046,9 +1307,10 @@ class ProcessingWorker(QThread):
 
         tracking_dir = os.path.join(shot.path, "tracking")
         if not os.path.exists(tracking_dir):
-            os.makedirs(tracking_dir)
+#            os.makedirs(tracking_dir)
+            pass
 
-        version = self.get_next_version(tracking_dir, shot.name)
+        version = get_next_version(tracking_dir, shot.name)
         project_filename = f"{shot.name}_track_v{version:03d}.3de"
         project_path = os.path.join(tracking_dir, project_filename)
 
@@ -1059,7 +1321,11 @@ class ProcessingWorker(QThread):
         for seq_idx, seq in enumerate(selected_seqs):
             self.progress_shot.emit(seq_idx, total_seqs)
             self.emit_log(f"  Generating bc for {seq.full_name}...", "info")
-            bc_path = self.generate_bc(seq, tracking_dir)
+            bc_path = generate_bc_file(
+                seq, tracking_dir, self.settings,
+                log_func=self.emit_log,
+                progress_callback=lambda cur, tot: self.progress_sequence.emit(cur, tot)
+            )
             if bc_path:
                 bc_files.append((seq, bc_path))
                 bc_files_paths.append(bc_path)
@@ -1080,13 +1346,12 @@ class ProcessingWorker(QThread):
         self.emit_log(f"  Creating project {project_filename}...", "info")
         created_files = self.create_3de_project(shot, main_seq, proxy_seqs, bc_files, project_path, version)
 
-
         if created_files is not None:
             if error_messages:
                 shot.error_log = "\n".join(error_messages)  # сохраняем предупреждения
             else:
                 shot.error_log = None
-            
+
             shot._dirty = True
 
             self.emit_log(f"  Project created: {project_path}", "success")
@@ -1102,146 +1367,11 @@ class ProcessingWorker(QThread):
         
         
 
-    def get_next_version(self, tracking_dir, shot_name):
-        pattern = os.path.join(tracking_dir, f"{shot_name}_track_v*.3de")
-        files = glob.glob(pattern)
-        max_v = 0
-        for f in files:
-            base = os.path.basename(f)
-            match = re.search(r'_v(\d+)\.3de$', base)
-            if match:
-                v = int(match.group(1))
-                if v > max_v:
-                    max_v = v
-        return max_v + 1
 
-    def generate_bc(self, seq, out_dir):
-        makebc = self.settings.data["path_makeBCFile"]
-        if not os.path.isfile(makebc):
-            self.emit_log(f"makeBCFile not found: {makebc}", "error")
-            return None
 
-        if not seq.files:
-            self.emit_log(f"  No files for {seq.full_name}", "error")
-            return None
 
-        pattern = make_pattern_from_file(seq.files[0])
-        if not pattern:
-            self.emit_log(f"  Could not create pattern from {seq.files[0]}", "error")
-            return None
 
-        cmd = [
-            makebc,
-            "-source", pattern,
-            "-start", str(seq.first_frame),
-            "-end", str(seq.last_frame),
-            "-out", out_dir,
-            "-quality", str(self.settings.data["bc_quality"]),
-            "-black", str(self.settings.data["bc_black"]),
-            "-white", str(self.settings.data["bc_white"]),
-            "-gamma", str(self.settings.data["bc_gamma"]),
-            "-softclip", str(self.settings.data["bc_softclip"])
-        ]
-        if self.settings.data["import_exr_display_window"]:
-            cmd.append("-import_exr_display_window")
-        if self.settings.data["import_sxr_right_eye"]:
-            cmd.append("-import_sxr_right_eye")
 
-        self.emit_log(f"  Running: {' '.join(cmd)}", "info")
-        try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    universal_newlines=True, bufsize=1)
-            for line in iter(proc.stdout.readline, ''):
-                line = line.strip()
-                if line:
-                    self.emit_log(f"    {line}", "info")
-                    match = re.search(r'(\d+)/(\d+) image files processed', line)
-                    if match:
-                        current = int(match.group(1))
-                        total = int(match.group(2))
-                        self.progress_sequence.emit(current, total)
-            proc.wait()
-            if proc.returncode != 0:
-                self.emit_log(f"  makeBCFile finished with error (code {proc.returncode})", "error")
-                return None
-        except Exception as e:
-            self.emit_log(f"  Error running makeBCFile: {e}", "error")
-            return None
-
-        expected_name = expected_bc_name(seq.files[0])
-        expected_path = os.path.join(out_dir, expected_name)
-        if os.path.isfile(expected_path):
-            return expected_path
-        else:
-            bc_files = glob.glob(os.path.join(out_dir, "*.3de_bcompress"))
-            if bc_files:
-                latest = max(bc_files, key=os.path.getmtime)
-                self.emit_log(f"  Found bc file: {os.path.basename(latest)}", "success")
-                return latest
-            else:
-                self.emit_log(f"  File {expected_path} not found after generation", "error")
-                return None
-
-    def create_3de_project(self, shot, main_seq, proxy_seqs, bc_files, project_path, version):
-        tde4_path = self.settings.data["path_tde4"]
-        if not os.path.isfile(tde4_path):
-            self.emit_log(f"3DE4 not found: {tde4_path}", "error")
-            return None
-        if not os.access(tde4_path, os.X_OK):
-            self.emit_log(f"3DE4 not executable: {tde4_path}", "error")
-            return None
-
-        script_content = self.generate_tde4_script(shot, main_seq, proxy_seqs, bc_files, project_path)
-        if script_content is None:
-            self.emit_log(f"Failed to generate script for {shot.name}", "error")
-            return None
-        script_filename = f"_temp_{shot.name}_v{version:03d}_create_project.py"
-        script_file = os.path.join(shot.path, "tracking", script_filename)
-        with open(script_file, 'w', encoding='utf-8') as f:
-            f.write(script_content)
-        os.chmod(script_file, int(self.settings.data.get("file_permissions", "664"), 8))
-
-        self.emit_log(f"  Temporary script saved: {script_file}", "info")
-
-        cmd = [tde4_path, "-run_script", script_file]
-        self.emit_log(f"  Launching 3DE4: {' '.join(cmd)}", "info")
-
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                bufsize=1,
-                env=os.environ,
-                encoding='utf-8',
-                text=True
-            )
-            for line in iter(proc.stdout.readline, ''):
-                line = line.strip()
-                if line:
-                    self.emit_log(f"    3DE4: {line}", "info")
-            proc.wait()
-            self.emit_log(f"  3DE4 finished with code {proc.returncode}", "info")
-            if proc.returncode == 0:
-                # Успех
-                shot.project_path = project_path
-                shot.script_path = script_file
-                shot.error_log = None
-                shot.processing_timestamp = datetime.now().isoformat()
-                shot._dirty = True
-                self.emit_log(f"  Project successfully created: {project_path}", "success")
-                # Собираем файлы, созданные этим методом
-                created_files = [script_file, project_path]
-                screenshot_path = project_path + ".jpg"
-                if os.path.exists(screenshot_path):
-                    created_files.append(screenshot_path)
-                return created_files
-            else:
-                self.emit_log(f"  Project creation failed (exit code {proc.returncode})", "error")
-                return None
-        except Exception as e:
-            self.emit_log(f"  Error running 3DE4: {e}", "error")
-            return None
 
     def find_texture_for_model(self, obj_path):
         """Ищет текстуру для OBJ-модели по правилу:
@@ -1264,152 +1394,7 @@ class ProcessingWorker(QThread):
             return texture_path2
         return None
 
-    def generate_tde4_script(self, shot, main_seq, proxy_seqs, bc_files, project_path):
-        """Генерирует Python-скрипт для 3DE4 как последовательность команд без проверок."""
-        if not main_seq.files:
-            self.emit_log(f"Error: main sequence {main_seq.full_name} has no files", "error")
-            return None
-        if main_seq.first_frame is None or main_seq.last_frame is None:
-            self.emit_log(f"Error: main sequence {main_seq.full_name} has invalid frame range", "error")
-            return None
 
-        main_pattern = make_pattern_from_file(main_seq.files[0])
-        if not main_pattern:
-            self.emit_log(f"Error: could not create pattern from {main_seq.files[0]}", "error")
-            return None
-
-        default_sensor_width = self.settings.data.get("sensor_width", 35.0)
-        default_sensor_height = self.settings.data.get("sensor_height", 24.0)
-        default_focal = self.settings.data.get("focal", 24.0)
-
-        sensor_width = shot.user_sensor_width if shot.user_sensor_width is not None else (
-            main_seq.sensor_width if main_seq.sensor_width is not None else default_sensor_width)
-        sensor_height = shot.user_sensor_height if shot.user_sensor_height is not None else (
-            main_seq.sensor_height if main_seq.sensor_height is not None else default_sensor_height)
-        focal = shot.user_focal if shot.user_focal is not None else (
-            main_seq.focal if main_seq.focal is not None else default_focal)
-
-        lines = []
-        lines.append("import tde4")
-        lines.append("import os")
-        lines.append("print('=== 3DE Project Setup ===')")
-        lines.append("")
-
-        # 1. Линза
-        lines.append("lens = tde4.getFirstLens()")
-        lines.append(f"print('Setting lens: sensor {sensor_width:.1f} x {sensor_height:.1f} mm, focal {focal:.1f} mm')")
-        lines.append(f"tde4.setLensFBackWidth(lens, {sensor_width / 10:.2f})")
-        lines.append(f"tde4.setLensFBackHeight(lens, {sensor_height / 10:.2f})")
-        lines.append(f"tde4.setLensFocalLength(lens, {focal / 10:.2f})")
-        lines.append("tde4.setLensPixelAspect(lens, 1.0)")
-        lines.append(f"tde4.setLensFBackWidth(lens, {sensor_width / 10:.2f})")
-
-        lines.append("tde4.setParameterAdjustFlag(lens, 'ADJUST_LENS_FOCAL_LENGTH', '', 1)")
-        lines.append("tde4.setParameterAdjustFlag(lens, 'ADJUST_LENS_DISTORTION_PARAMETER', 'Distortion - Degree 2', 1)")
-        lines.append("tde4.setParameterAdjustFlag(lens, 'ADJUST_LENS_DISTORTION_PARAMETER', 'Quartic Distortion - Degree 4', 1)")
-        lines.append("")
-
-        # 2. Камера
-        lines.append("cam = tde4.getFirstCamera()")
-        lines.append(f"tde4.setCameraName(cam, '{main_seq.full_name}')")
-        lines.append("tde4.setCameraLens(cam, lens)")
-        lines.append(f"tde4.setCameraPath(cam, r'{main_pattern}')")
-        lines.append(f"tde4.setCameraSequenceAttr(cam, {main_seq.first_frame}, {main_seq.last_frame}, 1)")
-        offset = self.settings.data["start_frame"]
-        lines.append(f"tde4.setCameraFrameOffset(cam, {offset})")
-        lines.append(f"tde4.setCamera8BitColorBlackWhite(cam, {self.settings.data['bc_black']}, {self.settings.data['bc_white']})")
-        lines.append(f"tde4.setCamera8BitColorGamma(cam, {self.settings.data['bc_gamma']})")
-        lines.append(f"tde4.setCamera8BitColorSoftclip(cam, {self.settings.data['bc_softclip']})")
-        lines.append("")
-
-        # 3. Установка ближней плоскости отсечения
-        lines.append("tde4.setNearClippingPlane(0.1)")
-        lines.append("tde4.setNearClippingPlaneF6(0.1)")
-        lines.append("")
-
-        # 4. Прокси-последовательности
-        if proxy_seqs:
-            lines.append("# Прокси-последовательности")
-            for idx, seq in enumerate(proxy_seqs, start=1):
-                if not seq.files:
-                    continue
-                proxy_pattern = make_pattern_from_file(seq.files[0])
-                if not proxy_pattern:
-                    continue
-                lines.append(f"tde4.setCameraProxyFootage(cam, {idx})")
-                lines.append(f"tde4.setCameraPath(cam, r'{proxy_pattern}')")
-                lines.append(f"tde4.setCameraSequenceAttr(cam, {seq.first_frame}, {seq.last_frame}, 1)")
-                lines.append(f"print('Added proxy slot {idx}: {seq.full_name}')")
-            lines.append("tde4.setCameraProxyFootage(cam, 0)")
-            lines.append("")
-
-        # 5. Группы точек и 3D-модели
-        lines.append("# === ГРУППЫ ТОЧЕК И 3D-МОДЕЛИ ===")
-
-        # 5.1 Основная группа CAMERA
-        lines.append("first_group = tde4.getFirstPGroup()")
-        lines.append("tde4.setPGroupName(first_group, 'CAMERA')")
-        lines.append("print('Group CAMERA ready')")
-        lines.append("")
-
-        # Import models only if enabled
-        for group_name, models in shot.point_groups.items():
-            # Determine which pgroup to use
-            if group_name == "CAMERA":
-                pgroup_line = "first_group"
-            else:
-                pgroup_line = f"pgroup_{group_name.replace(' ', '_')}"
-                lines.append(f"{pgroup_line} = tde4.createPGroup('OBJECT')")
-                lines.append(f"tde4.setPGroupName({pgroup_line}, '{group_name}')")
-                lines.append(f"print('Created group {group_name}')")
-            for model_dict in models:
-                if not model_dict["enabled"]:
-                    continue
-                model_path = model_dict["path"]
-                safe_path = repr(model_path.replace('\\', '/'))
-                model_name = os.path.splitext(os.path.basename(model_path))[0]
-                lines.append(f'print("  Importing model: {model_name} from " + {safe_path})')
-                lines.append(f"model = tde4.create3DModel({pgroup_line}, 0)")
-                # Set flags
-                lines.append(f"tde4.set3DModelSurveyFlag({pgroup_line}, model, 1)")
-                lines.append(f"tde4.set3DModelReferenceFlag({pgroup_line}, model, 1)")
-                lines.append(f"tde4.set3DModelPerformanceRenderingFlag({pgroup_line}, model, 1)")
-                lines.append(f"tde4.importOBJ3DModel({pgroup_line}, model, {safe_path})")
-                lines.append("tde4.flushEventQueue()")
-                
-                lines.append(f"tde4.set3DModelName({pgroup_line}, model, '{model_name}')")
-                lines.append(f"tde4.set3DModelColor({pgroup_line}, model, 0.22, 0.45, 0.65, 0.05)")
-                lines.append(f"tde4.set3DModelRenderingFlags({pgroup_line}, model, 1, 0, 1)")
-                # Texture
-                if model_dict["texture"]["enabled"] and model_dict["texture"]["path"]:
-                    texture_path = model_dict["texture"]["path"]
-                    safe_texture = repr(texture_path.replace('\\', '/'))
-                    lines.append(f'print("    Texture: " + {safe_texture})')
-                    lines.append(f"tde4.set3DModelTextureMapMode({pgroup_line}, model, 'TEXMAP_UV')")
-                    lines.append(f"tde4.set3DModelUVTextureMap({pgroup_line}, model, {safe_texture})")
-                    lines.append("tde4.flushEventQueue()")
-                else:
-                    lines.append(f'print("    No texture set for model {model_name}")')
-                lines.append(f"tde4.set3DModelVisibleFlag({pgroup_line}, model, 1)")
-            if group_name != "CAMERA":
-                lines.append("")
-
-        # 6. Сохранение и скриншот
-        lines.append("print('Saving project...')")
-        lines.append(f"tde4.saveProject(r'{project_path}')")
-        lines.append("tde4.flushEventQueue()")
-        lines.append("print('Project saved')")
-        lines.append("tde4.updateGUI()")
-        screenshot_path = project_path + ".jpg"
-        lines.append("resx, resy = tde4.getMainWindowResolution()")
-        lines.append(f"tde4.saveMainWindowScreenShot(r'{screenshot_path}', 'IMAGE_JPEG', 0, 0, resx, resy)")
-        lines.append("tde4.flushEventQueue()")
-        lines.append("print('Screenshot saved')")
-        lines.append("tde4.updateGUI()")
-        lines.append("print('=== Done ===')")
-        lines.append("raise SystemExit(0)")
-
-        return "\n".join(lines)
 
     def fix_permissions(self, file_list):
         try:
@@ -1580,7 +1565,191 @@ class MainWindow(QMainWindow):
             state = QByteArray.fromBase64(state_str.encode())
             self.splitter.restoreState(state)
 
+    def _log_adapter(self, msg, level=None):
+        if level == 'error':
+            self.log_error(msg)
+        elif level == 'success':
+            self.log_success(msg)
+        else:
+            self.log_info(msg)
 
+    def _open_existing_shot(self, shot, project_path):
+        """Открывает существующий проект в 3DE4, автоматически загружает BC-файл и завершает приложение через 60 секунд."""
+        self.log_info(f"Opening existing project: {os.path.basename(project_path)}")
+        self.log_info(f"Full path: {project_path}")
+
+        tracking_dir = os.path.join(shot.path, "tracking")
+        os.makedirs(tracking_dir, exist_ok=True)
+
+        # Поиск BC-файла для логирования (необязательно)
+        bc_files = glob.glob(os.path.join(tracking_dir, f"{shot.name}_track_v*_track.3de_bcompress"))
+        if bc_files:
+            self.log_info(f"Found BC file: {os.path.basename(bc_files[0])}")
+        else:
+            self.log_info("No BC file found for automatic import (will still try)")
+
+        # Генерируем скрипт, который загрузит проект и импортирует BC
+        import textwrap
+        script_content = textwrap.dedent(f"""\
+            import tde4
+            print('Loading project: {project_path}')
+            tde4.loadProject(r'{project_path}')
+            cam = tde4.getFirstCamera()
+            tde4.importBufferCompressionFile(cam)
+            print('Buffer compression file imported (if existed)')
+        """)
+        script_filename = f"_temp_{shot.name}_open_project.py"
+        script_file = os.path.join(tracking_dir, script_filename)
+        with open(script_file, 'w', encoding='utf-8') as f:
+            f.write(script_content)
+        os.chmod(script_file, int(self.settings.data.get("file_permissions", "664"), 8))
+
+        tde4_path = self.settings.data["path_tde4"]
+        if not os.path.isfile(tde4_path) or not os.access(tde4_path, os.X_OK):
+            self.log_error(f"3DE4 not found or not executable: {tde4_path}")
+            return
+
+        cmd = [tde4_path, "-run_script", script_file]
+        self.log_info(f"Launching 3DE4: {' '.join(cmd)}")
+
+        subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        bufsize=1, env=os.environ, encoding='utf-8', text=True)
+
+        self.log_info("3DE4 launched. Application will exit in 20 seconds.")
+        QTimer.singleShot(20000, QApplication.quit)
+
+    def _open_shot(self, shot, existing_project_path=None):
+        """
+        Запускает 3DE4 для шота.
+        Если existing_project_path не None, открывает существующий проект.
+        Иначе создаёт новый проект (с генерацией bc и скрипта) и затем открывает.
+        """
+        self.log_info(f"Opening shot: {shot.name}")
+
+        if not shot.sequences:
+            self.log_error(f"Shot {shot.name} has no sequences")
+            return
+
+        tracking_dir = os.path.join(shot.path, "tracking")
+        os.makedirs(tracking_dir, exist_ok=True)
+
+        if existing_project_path:
+            self._open_existing_shot(shot, existing_project_path)
+            return
+
+        # Создание нового проекта
+        # Инициализация прогресс-баров
+        self.global_progress.setMaximum(1)
+        self.global_progress.setValue(0)
+        self.shot_progress.setMaximum(1)
+        self.shot_progress.setValue(0)
+        self.seq_progress.setMaximum(0)
+
+        version = get_next_version(tracking_dir, shot.name)
+        project_filename = f"{shot.name}_track_v{version:03d}.3de"
+        project_path = os.path.join(tracking_dir, project_filename)
+
+        bc_files = []
+        bc_files_paths = []
+        total_seqs = len(shot.sequences)
+        self.shot_progress.setMaximum(total_seqs)
+
+        for seq_idx, seq in enumerate(shot.sequences):
+            self.update_shot_progress(seq_idx, total_seqs)
+            self.log_info(f"Generating bc for {seq.full_name}...")
+            bc_path = generate_bc_file(
+                seq, tracking_dir, self.settings,
+                log_func=self._log_adapter,
+                progress_callback=lambda cur, tot: self.update_seq_progress(cur, tot)
+            )
+            if bc_path:
+                bc_files.append((seq, bc_path))
+                bc_files_paths.append(bc_path)
+            else:
+                self.log_error(f"Failed to generate bc for {seq.full_name}")
+
+        main_seq = next((s for s in shot.sequences if s.is_main), None)
+        if main_seq is None and shot.sequences:
+            main_seq = shot.sequences[0]
+            self.log_info(f"No exact main sequence, using {main_seq.full_name}")
+        if main_seq is None:
+            self.log_error(f"No sequences for shot {shot.name}")
+            return
+
+        proxy_seqs = [seq for seq in shot.sequences if seq != main_seq]
+
+        script_content = generate_tde4_script(
+            shot, main_seq, proxy_seqs, bc_files, project_path, self.settings,
+            exit_at_end=False
+        )
+        if script_content is None:
+            self.log_error(f"Failed to generate script for {shot.name}")
+            return
+
+        script_filename = f"_temp_{shot.name}_v{version:03d}_create_project.py"
+        script_file = os.path.join(tracking_dir, script_filename)
+        with open(script_file, 'w', encoding='utf-8') as f:
+            f.write(script_content)
+        os.chmod(script_file, int(self.settings.data.get("file_permissions", "664"), 8))
+
+        # Сохраняем информацию в шоте
+        shot.project_path = project_path
+        shot.script_path = script_file
+        shot.processing_timestamp = datetime.now().isoformat()
+        shot.processed = True
+        shot.processed_success = False
+        shot._dirty = True
+        shot.save_config()
+
+        tde4_path = self.settings.data["path_tde4"]
+        if not os.path.isfile(tde4_path) or not os.access(tde4_path, os.X_OK):
+            self.log_error(f"3DE4 not found or not executable: {tde4_path}")
+            return
+
+        # Запуск с созданным скриптом (который сам создаст проект и затем закроется)
+        cmd = [tde4_path, "-run_script", script_file]
+        self.log_info(f"Launching 3DE4: {' '.join(cmd)}")
+        subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        bufsize=1, env=os.environ, encoding='utf-8', text=True)
+
+        # Устанавливаем права на bc-файлы и скрипт
+        all_files = bc_files_paths + [script_file]
+        self.fix_permissions(all_files)
+
+        # Завершаем прогресс-бары
+        self.update_global_progress(1, 1)
+        self.update_shot_progress(total_seqs, total_seqs)
+        self.seq_progress.setValue(0)
+
+        # Завершаем приложение (или ждём, если CHECK_OPEN_EQ)
+        if CHECK_OPEN_EQ:
+            self._wait_for_project(shot, project_path)
+        else:
+            self.log_info("3DE4 launched, exiting application.")
+            QApplication.quit()
+
+    def _wait_for_project(self, shot, project_path):
+        """Запускает таймер для проверки появления проекта (бесконечное ожидание)."""
+        self._project_check_timer = QTimer()
+        self._project_check_timer.timeout.connect(self._check_project)
+        self._project_check_shot = shot
+        self._project_check_path = project_path
+        self._project_check_timer.start(5000)  # проверяем каждую секунду
+
+    def _check_project(self):
+        if os.path.exists(self._project_check_path):
+            self._project_check_timer.stop()
+            self.fix_permissions([self._project_check_path])
+            screenshot = self._project_check_path + ".jpg"
+            if os.path.exists(screenshot):
+                self.fix_permissions([screenshot])
+            self._project_check_shot.processed_success = True
+            self._project_check_shot._dirty = True
+            self._project_check_shot.save_config()
+            self.log_info(f"Project created successfully: {self._project_check_path}")
+            QApplication.quit()
+        else:
+            self.log_info(f"Waiting for project: {self._project_check_path} (not yet created)")
 
     def set_disabled_text_color(self, widget):
         """Устанавливает для виджета чёрный цвет текста в отключённом состоянии."""
@@ -1879,13 +2048,42 @@ class MainWindow(QMainWindow):
 
         self.resources_dock.setWidget(resources_widget)
         self.addDockWidget(Qt.RightDockWidgetArea, self.resources_dock)
-        self.resources_dock.hide()  # по умолчанию скрыта
+#        self.resources_dock.hide()  
+        self.resources_dock.show()
 
         self.resources_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.resources_tree.customContextMenuRequested.connect(self.show_resources_context_menu)
 
 #======================панель==================
         
+
+#======================панель2==================
+        # ========== Панель существующих проектов ==========
+        self.projects_dock = QDockWidget(PROJECTS_PANEL_NAME, self)
+        self.projects_dock.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
+        self.projects_dock.setFeatures(QDockWidget.DockWidgetClosable | QDockWidget.DockWidgetMovable)
+
+        projects_widget = QWidget()
+        projects_layout = QVBoxLayout(projects_widget)
+
+        # Кнопка для ручного скрытия/показа (если нужно)
+        # Но док-виджет уже имеет кнопку закрытия, достаточно её.
+
+        # Список проектов (QListWidget или QTableWidget)
+        self.projects_list = QListWidget()
+        projects_font = QFont()
+        projects_font.setPointSize(PROJECTS_FONT_SIZE)
+        self.projects_list.setFont(projects_font)
+        self.projects_list.setSelectionMode(QListWidget.SingleSelection)
+        self.projects_list.itemClicked.connect(self.on_project_selected)
+        projects_layout.addWidget(self.projects_list)
+
+        self.projects_dock.setWidget(projects_widget)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.projects_dock)
+        self.projects_dock.show()
+#        self.projects_dock.hide()  
+
+#======================панель2==================
 
         # Создаём контейнер для лога
         log_container = QWidget()
@@ -1929,10 +2127,24 @@ class MainWindow(QMainWindow):
 
         # Кнопки управления
         control_layout = QHBoxLayout()
-        self.btn_start = QPushButton("Start")
+        self.btn_start = QPushButton("Create")
         self.btn_start.clicked.connect(self.start_processing)
         self.btn_start.setEnabled(False)
         control_layout.addWidget(self.btn_start)
+
+        self.btn_open = QPushButton("Open")
+        self.btn_open.clicked.connect(self.open_selected_shot)
+        self.btn_open.setEnabled(False)   # активна только когда выбран один шот
+        control_layout.addWidget(self.btn_open)
+
+        # Подключаем сигнал изменения выделения
+        self.tree.itemSelectionChanged.connect(self.update_open_button_state)
+
+        self.open_mode_combo = QComboBox()
+        self.open_mode_combo.addItem("create")  # первый пункт
+        self.open_mode_combo.setEnabled(False)  # пока нет шота
+        control_layout.addWidget(self.open_mode_combo)
+        
         self.btn_pause = QPushButton("Pause")
         self.btn_pause.clicked.connect(self.pause_processing)
         self.btn_pause.setEnabled(False)
@@ -1956,7 +2168,123 @@ class MainWindow(QMainWindow):
             self.btn_logs.setVisible(False)
             self.btn_select_all.setVisible(False)
             self.btn_deselect_all.setVisible(False)
+            self.btn_pause.setVisible(False)
+            self.btn_stop.setVisible(False)
+            self.btn_abort.setVisible(False)
+            self.cb_logging.setVisible(False)
 
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not hasattr(self, '_dock_splitter_set'):
+            # Разделяем панели вертикально (если ещё не разделены)
+            self.splitDockWidget(self.resources_dock, self.projects_dock, Qt.Vertical)
+            # Находим сплиттер, который управляет этими двумя панелями
+            splitters = self.findChildren(QSplitter)
+            for splitter in splitters:
+                if splitter.count() == 2:
+                    w0 = splitter.widget(0)
+                    w1 = splitter.widget(1)
+                    # Проверяем, что это наши док-виджеты
+                    if (w0 is self.resources_dock and w1 is self.projects_dock) or \
+                    (w0 is self.projects_dock and w1 is self.resources_dock):
+                        # Устанавливаем пропорцию 70:30 (верхний элемент — ресурсы)
+                        if w0 is self.resources_dock:
+                            splitter.setStretchFactor(0, 70)
+                            splitter.setStretchFactor(1, 30)
+                        else:
+                            splitter.setStretchFactor(0, 30)
+                            splitter.setStretchFactor(1, 70)
+                        break
+            self._dock_splitter_set = True
+
+
+    def update_open_button_state(self):
+        selected_items = self.tree.selectedItems()
+        selected_shots = [item for item in selected_items if item.parent() is None]
+        enabled = len(selected_shots) == 1
+        self.btn_open.setEnabled(enabled)
+        self.open_mode_combo.setEnabled(enabled)
+        if enabled:
+            shot = selected_shots[0].data(0, Qt.UserRole)
+            self.update_projects_panel(shot)
+        else:
+            # В режиме forced_path панель не скрываем, а показываем проекты первого шота
+            if self.forced_path and self.shots:
+                self.update_projects_panel(self.shots[0])
+            else:
+                self.projects_dock.hide()
+            self.open_mode_combo.clear()
+            self.open_mode_combo.addItem("create")
+
+    def update_projects_panel(self, shot):
+        """Сканирует tracking-папку шота на наличие всех .3de файлов и обновляет панель и combo."""
+        tracking_dir = os.path.join(shot.path, "tracking")
+        if not os.path.exists(tracking_dir):
+            self.projects_dock.hide()
+            self.open_mode_combo.clear()
+            self.open_mode_combo.addItem("create")
+            return
+
+        # Ищем ВСЕ .3de файлы (не только с именем шота)
+        project_files = glob.glob(os.path.join(tracking_dir, "*.3de"))
+        if not project_files:
+            self.projects_dock.hide()
+            self.open_mode_combo.clear()
+            self.open_mode_combo.addItem("create")
+            return
+
+        # Сортируем по имени (по умолчанию) или по дате
+        project_files.sort(key=os.path.basename)
+
+        # Заполняем список в панели
+        self.projects_list.clear()
+        for proj in project_files:
+            name = os.path.basename(proj)
+            mtime = datetime.fromtimestamp(os.path.getmtime(proj)).strftime("%Y-%m-%d %H:%M:%S")
+            item_text = f"{name} ({mtime})"
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.UserRole, proj)  # сохраняем полный путь
+            self.projects_list.addItem(item)
+
+        # Заполняем выпадающий список
+        self.open_mode_combo.clear()
+        self.open_mode_combo.addItem("create")
+        for proj in project_files:
+            name = os.path.basename(proj)
+            self.open_mode_combo.addItem(name, proj)  # текст = имя файла, данные = путь
+
+        self.projects_dock.show()
+
+
+    def on_project_selected(self, item):
+        """При клике на проект в панели – выбираем его в выпадающем списке."""
+        proj_path = item.data(Qt.UserRole)
+        if proj_path:
+            # Находим индекс в combo
+            idx = self.open_mode_combo.findData(proj_path)
+            if idx >= 0:
+                self.open_mode_combo.setCurrentIndex(idx)
+
+
+
+    def open_selected_shot(self):
+        selected = self.tree.selectedItems()
+        if not selected:
+            return
+        shot_item = selected[0]
+        while shot_item.parent():
+            shot_item = shot_item.parent()
+        shot = shot_item.data(0, Qt.UserRole)
+        if shot:
+            # Определяем, какой режим выбран
+            if self.open_mode_combo.currentIndex() == 0:  # create
+                self._open_shot(shot)  # без project_path – создаст новый
+            else:
+                # Выбран существующий проект
+                proj_path = self.open_mode_combo.currentData()
+                if proj_path:
+                    self._open_existing_shot(shot, proj_path)
 
     def show_resources_context_menu(self, position):
         item = self.resources_tree.itemAt(position)
@@ -3308,6 +3636,14 @@ class MainWindow(QMainWindow):
         msg = f"Scan complete. Found shots: {len(self.shots)}"
         self.log_info(msg)
 
+        # В режиме forced_path выделяем первый шот, чтобы активировать кнопки и показать панель проектов
+        if self.forced_path and self.shots:
+            first_item = self.tree.topLevelItem(0)
+            if first_item:
+                self.tree.setCurrentItem(first_item)
+                self.projects_dock.show()
+
+
     def find_shot_item(self, shot_name):
         for i in range(self.tree.topLevelItemCount()):
             item = self.tree.topLevelItem(i)
@@ -3361,6 +3697,7 @@ class MainWindow(QMainWindow):
         self.log_window.raise_()
 
     def start_processing(self):
+        self.btn_open.setEnabled(False)
         selected_shots = [s for s in self.shots if s.selected]
         if not selected_shots:
             QMessageBox.warning(self, "Warning", "No shots selected.")
@@ -3442,6 +3779,9 @@ class MainWindow(QMainWindow):
         self.global_progress.reset()
         self.shot_progress.reset()
         self.seq_progress.reset()
+
+        self.btn_open.setEnabled(True)
+
         if processed_projects:
             self.log_success("Processing finished. Created projects:")
             for shot_name, proj_path in processed_projects.items():
@@ -3507,39 +3847,36 @@ class MainWindow(QMainWindow):
                 print(f"  ОШИБКА: не удалось создать проект для {shot.name}")
 
         print(f"\n=== Обработка завершена. Успешно: {success_count} из {len(self.shots)} ===")
-        QApplication.quit()  # на случай, если есть активные события
+        QApplication.quit()
         sys.exit(0 if success_count == len(self.shots) else 1)
 
     def process_shot_headless(self, shot):
         """Синхронное создание проекта для одного шота без добавления моделей."""
-        # 1. Проверка на пропуски кадров
         if shot.has_gaps:
             print(f"  Предупреждение: шот {shot.name} имеет пропуски кадров")
 
-        # 2. Подготовка директории tracking
         tracking_dir = os.path.join(shot.path, "tracking")
         if not os.path.exists(tracking_dir):
-            os.makedirs(tracking_dir)
+#            os.makedirs(tracking_dir)
+            pass
 
-        # 3. Фиксированная версия v000 (перезапись)
-        version = 0
+        version = get_next_version(tracking_dir, shot.name)
         project_filename = f"{shot.name}_track_v{version:03d}.3de"
         project_path = os.path.join(tracking_dir, project_filename)
 
-        # 4. Генерация bc-файлов для всех последовательностей
-        selected_seqs = shot.sequences  # все
-        bc_files = []          # для передачи в скрипт
-        bc_files_paths = []    # для установки прав
+        bc_files = []
+        bc_files_paths = []
+        selected_seqs = shot.sequences
         for seq in selected_seqs:
             print(f"  Генерация bc для {seq.full_name}...")
-            bc_path = self.generate_bc_headless(seq, tracking_dir)
+            bc_path = generate_bc_file(seq, tracking_dir, self.settings,
+                                    log_func=lambda msg, level: print(msg))
             if bc_path:
                 bc_files.append((seq, bc_path))
                 bc_files_paths.append(bc_path)
             else:
                 print(f"  Не удалось сгенерировать bc для {seq.full_name}")
 
-        # 5. Определение основной последовательности
         main_seq = next((s for s in shot.sequences if s.is_main), None)
         if main_seq is None and shot.sequences:
             main_seq = shot.sequences[0]
@@ -3550,20 +3887,21 @@ class MainWindow(QMainWindow):
 
         proxy_seqs = [seq for seq in selected_seqs if seq != main_seq]
 
-        # 6. Генерация скрипта 3DE (без моделей)
-        script_content = self.generate_tde4_script_headless(shot, main_seq, proxy_seqs, bc_files, project_path)
+        script_content = generate_tde4_script(
+            shot, main_seq, proxy_seqs, bc_files, project_path, self.settings,
+            exit_at_end=True
+        )
         if script_content is None:
             print(f"  Ошибка: не удалось сгенерировать скрипт для {shot.name}")
             return False, None
 
-        script_filename = f"_temp_{shot.name}_v000_create_project.py"
+        script_filename = f"_temp_{shot.name}_v{version:03d}_create_project.py"
         script_file = os.path.join(tracking_dir, script_filename)
         with open(script_file, 'w', encoding='utf-8') as f:
             f.write(script_content)
         os.chmod(script_file, int(self.settings.data.get("file_permissions", "664"), 8))
         print(f"  Временный скрипт сохранён: {script_file}")
 
-        # 7. Запуск 3DE4
         tde4_path = self.settings.data["path_tde4"]
         if not os.path.isfile(tde4_path):
             print(f"  Ошибка: 3DE4 не найден: {tde4_path}")
@@ -3592,7 +3930,6 @@ class MainWindow(QMainWindow):
             proc.wait()
             if proc.returncode == 0:
                 print(f"  Проект успешно создан: {project_path}")
-                # Собираем все созданные файлы
                 created_files = [script_file, project_path]
                 screenshot_path = project_path + ".jpg"
                 if os.path.exists(screenshot_path):
@@ -3607,179 +3944,11 @@ class MainWindow(QMainWindow):
             print(f"  Ошибка при запуске 3DE4: {e}")
             return False, None
 
-    def get_next_version_headless(self, tracking_dir, shot_name):
-        """Определение следующего номера версии для проекта."""
-        pattern = os.path.join(tracking_dir, f"{shot_name}_track_v*.3de")
-        files = glob.glob(pattern)
-        max_v = 0
-        for f in files:
-            base = os.path.basename(f)
-            match = re.search(r'_v(\d+)\.3de$', base)
-            if match:
-                v = int(match.group(1))
-                if v > max_v:
-                    max_v = v
-        return max_v + 1
 
-    def generate_bc_headless(self, seq, out_dir):
-        """Генерация bc-файла (синхронно, без сигналов)."""
-        makebc = self.settings.data["path_makeBCFile"]
-        if not os.path.isfile(makebc):
-            print(f"  makeBCFile не найден: {makebc}")
-            return None
 
-        if not seq.files:
-            print(f"  Нет файлов для {seq.full_name}")
-            return None
 
-        pattern = make_pattern_from_file(seq.files[0])
-        if not pattern:
-            print(f"  Не удалось создать шаблон из {seq.files[0]}")
-            return None
 
-        cmd = [
-            makebc,
-            "-source", pattern,
-            "-start", str(seq.first_frame),
-            "-end", str(seq.last_frame),
-            "-out", out_dir,
-            "-quality", str(self.settings.data["bc_quality"]),
-            "-black", str(self.settings.data["bc_black"]),
-            "-white", str(self.settings.data["bc_white"]),
-            "-gamma", str(self.settings.data["bc_gamma"]),
-            "-softclip", str(self.settings.data["bc_softclip"])
-        ]
-        if self.settings.data["import_exr_display_window"]:
-            cmd.append("-import_exr_display_window")
-        if self.settings.data["import_sxr_right_eye"]:
-            cmd.append("-import_sxr_right_eye")
 
-        print(f"  Запуск: {' '.join(cmd)}")
-        try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    universal_newlines=True, bufsize=1)
-            for line in iter(proc.stdout.readline, ''):
-                line = line.strip()
-                if line:
-                    print(f"    {line}")
-            proc.wait()
-            if proc.returncode != 0:
-                print(f"  makeBCFile завершился с ошибкой (код {proc.returncode})")
-                return None
-        except Exception as e:
-            print(f"  Ошибка при запуске makeBCFile: {e}")
-            return None
-
-        expected_name = expected_bc_name(seq.files[0])
-        expected_path = os.path.join(out_dir, expected_name)
-        if os.path.isfile(expected_path):
-            return expected_path
-        else:
-            bc_files = glob.glob(os.path.join(out_dir, "*.3de_bcompress"))
-            if bc_files:
-                latest = max(bc_files, key=os.path.getmtime)
-                print(f"  Найден bc-файл: {os.path.basename(latest)}")
-                return latest
-            else:
-                print(f"  Файл {expected_path} не найден после генерации")
-                return None
-
-    def generate_tde4_script_headless(self, shot, main_seq, proxy_seqs, bc_files, project_path):
-        """Генерация скрипта 3DE (без моделей)."""
-        if not main_seq.files:
-            print(f"Ошибка: основная последовательность {main_seq.full_name} не содержит файлов")
-            return None
-        if main_seq.first_frame is None or main_seq.last_frame is None:
-            print(f"Ошибка: основная последовательность {main_seq.full_name} имеет неверный диапазон кадров")
-            return None
-
-        main_pattern = make_pattern_from_file(main_seq.files[0])
-        if not main_pattern:
-            print(f"Ошибка: не удалось создать шаблон из {main_seq.files[0]}")
-            return None
-
-        default_sensor_width = self.settings.data.get("sensor_width", 35.0)
-        default_sensor_height = self.settings.data.get("sensor_height", 24.0)
-        default_focal = self.settings.data.get("focal", 24.0)
-
-        sensor_width = shot.user_sensor_width if shot.user_sensor_width is not None else (
-            main_seq.sensor_width if main_seq.sensor_width is not None else default_sensor_width)
-        sensor_height = shot.user_sensor_height if shot.user_sensor_height is not None else (
-            main_seq.sensor_height if main_seq.sensor_height is not None else default_sensor_height)
-        focal = shot.user_focal if shot.user_focal is not None else (
-            main_seq.focal if main_seq.focal is not None else default_focal)
-
-        lines = []
-        lines.append("import tde4")
-        lines.append("import os")
-        lines.append("print('=== 3DE Project Setup ===')")
-        lines.append("")
-
-        # 1. Линза
-        lines.append("lens = tde4.getFirstLens()")
-        lines.append(f"print('Setting lens: sensor {sensor_width:.1f} x {sensor_height:.1f} mm, focal {focal:.1f} mm')")
-        lines.append(f"tde4.setLensFBackWidth(lens, {sensor_width / 10:.2f})")
-        lines.append(f"tde4.setLensFBackHeight(lens, {sensor_height / 10:.2f})")
-        lines.append(f"tde4.setLensFocalLength(lens, {focal / 10:.2f})")
-        lines.append("tde4.setLensPixelAspect(lens, 1.0)")
-        lines.append(f"tde4.setLensFBackWidth(lens, {sensor_width / 10:.2f})")
-        lines.append("tde4.setParameterAdjustFlag(lens, 'ADJUST_LENS_FOCAL_LENGTH', '', 1)")
-        lines.append("tde4.setParameterAdjustFlag(lens, 'ADJUST_LENS_DISTORTION_PARAMETER', 'Distortion - Degree 2', 1)")
-        lines.append("tde4.setParameterAdjustFlag(lens, 'ADJUST_LENS_DISTORTION_PARAMETER', 'Quartic Distortion - Degree 4', 1)")
-        lines.append("")
-
-        # 2. Камера
-        lines.append("cam = tde4.getFirstCamera()")
-        lines.append(f"tde4.setCameraName(cam, '{main_seq.full_name}')")
-        lines.append("tde4.setCameraLens(cam, lens)")
-        lines.append(f"tde4.setCameraPath(cam, r'{main_pattern}')")
-        lines.append(f"tde4.setCameraSequenceAttr(cam, {main_seq.first_frame}, {main_seq.last_frame}, 1)")
-        offset = self.settings.data["start_frame"]
-        lines.append(f"tde4.setCameraFrameOffset(cam, {offset})")
-        lines.append(f"tde4.setCamera8BitColorBlackWhite(cam, {self.settings.data['bc_black']}, {self.settings.data['bc_white']})")
-        lines.append(f"tde4.setCamera8BitColorGamma(cam, {self.settings.data['bc_gamma']})")
-        lines.append(f"tde4.setCamera8BitColorSoftclip(cam, {self.settings.data['bc_softclip']})")
-        lines.append("")
-
-        # 3. Ближняя плоскость отсечения
-        lines.append("tde4.setNearClippingPlane(0.1)")
-        lines.append("tde4.setNearClippingPlaneF6(0.1)")
-        lines.append("")
-
-        # 4. Прокси-последовательности
-        if proxy_seqs:
-            lines.append("# Прокси-последовательности")
-            for idx, seq in enumerate(proxy_seqs, start=1):
-                if not seq.files:
-                    continue
-                proxy_pattern = make_pattern_from_file(seq.files[0])
-                if not proxy_pattern:
-                    continue
-                lines.append(f"tde4.setCameraProxyFootage(cam, {idx})")
-                lines.append(f"tde4.setCameraPath(cam, r'{proxy_pattern}')")
-                lines.append(f"tde4.setCameraSequenceAttr(cam, {seq.first_frame}, {seq.last_frame}, 1)")
-                lines.append(f"print('Added proxy slot {idx}: {seq.full_name}')")
-            lines.append("tde4.setCameraProxyFootage(cam, 0)")
-            lines.append("")
-
-        # 5. МОДЕЛИ НЕ ДОБАВЛЯЮТСЯ
-
-        # 6. Сохранение и скриншот
-        lines.append("print('Saving project...')")
-        lines.append(f"tde4.saveProject(r'{project_path}')")
-        lines.append("tde4.flushEventQueue()")
-        lines.append("print('Project saved')")
-        lines.append("tde4.updateGUI()")
-        screenshot_path = project_path + ".jpg"
-        lines.append("resx, resy = tde4.getMainWindowResolution()")
-        lines.append(f"tde4.saveMainWindowScreenShot(r'{screenshot_path}', 'IMAGE_JPEG', 0, 0, resx, resy)")
-        lines.append("tde4.flushEventQueue()")
-        lines.append("print('Screenshot saved')")
-        lines.append("tde4.updateGUI()")
-        lines.append("print('=== Done ===')")
-        lines.append("raise SystemExit(0)")
-
-        return "\n".join(lines)
 
 # ================== Settings Dialog ==================
 class SettingsDialog(QDialog):
