@@ -187,7 +187,7 @@ def generate_bc_file(seq, out_dir, settings, log_func=None, progress_callback=No
             return None
 
 
-def generate_tde4_script(shot, main_seq, proxy_seqs, bc_files, project_path, settings, exit_at_end=True):
+def generate_tde4_script(shot, project_path, settings, exit_at_end=True, main_seq=None, proxy_seqs=None):
     """
     Генерирует Python-скрипт для 3DE4.
     :param shot: объект Shot
@@ -199,6 +199,15 @@ def generate_tde4_script(shot, main_seq, proxy_seqs, bc_files, project_path, set
     :param exit_at_end: добавлять ли raise SystemExit(0) в конце
     :return: текст скрипта или None при ошибке
     """
+    if main_seq is None:
+        main_seq = shot.get_main_sequence()
+    if proxy_seqs is None:
+        proxy_seqs = shot.get_proxy_sequences()
+
+    if main_seq is None:
+        return None
+
+
     if not main_seq.files:
         return None
     if main_seq.first_frame is None or main_seq.last_frame is None:
@@ -288,8 +297,7 @@ def generate_tde4_script(shot, main_seq, proxy_seqs, bc_files, project_path, set
             lines.append(f"tde4.setPGroupName({pgroup_line}, '{group_name}')")
             lines.append(f"print('Created group {group_name}')")
         for model_dict in models:
-            if not model_dict["enabled"]:
-                continue
+
             model_path = model_dict["path"]
             safe_path = repr(model_path.replace('\\', '/'))
             model_name = os.path.splitext(os.path.basename(model_path))[0]
@@ -312,7 +320,9 @@ def generate_tde4_script(shot, main_seq, proxy_seqs, bc_files, project_path, set
                 lines.append("tde4.flushEventQueue()")
             else:
                 lines.append(f'print("    No texture set for model {model_name}")')
-            lines.append(f"tde4.set3DModelVisibleFlag({pgroup_line}, model, 1)")
+            # Set visibility based on 'enabled' flag
+            visible_flag = 1 if model_dict["enabled"] else 0
+            lines.append(f"tde4.set3DModelVisibleFlag({pgroup_line}, model, 1{visible_flag})")
         if group_name != "CAMERA":
             lines.append("")
 
@@ -878,7 +888,7 @@ class Sequence:
         return None
 
 class Shot:
-    def __init__(self, path, name, layer_folder, log_func=None):
+    def __init__(self, path, name, layer_folder, main_window=None, log_func=None):
         self.path = path
         self.base_item = os.path.basename(path)
         self.name = name
@@ -896,7 +906,6 @@ class Shot:
         self.processed_success = False  # True - успех, False - ошибка
         self.mismatched_frame_count = False   # новый атрибут
         self._saving_config = False  # новый флаг
-        self._save_timer = None
         self.log_func = log_func
         self._dirty = False
         self.project_path = None          # путь к созданному проекту .3de
@@ -904,22 +913,23 @@ class Shot:
         self.error_log = None             # текст ошибок, если обработка не удалась
         self.processing_timestamp = None  # временная метка обработки
 
+        self.main_window = main_window
+
         # New attributes for point groups and layer selection
         self.sequence_selected = {}       # seq.full_name -> bool
         # NEW: point_groups stores dict: group_name -> list of model dicts
         self.point_groups = {}            # group name -> list of model dicts
         self.point_groups["CAMERA"] = []  # default group
 
+
+
+
+
+
     def get_config_path(self):
         return os.path.join(self.path, "tracking", f"{self.name}_config.json")
     
-    def schedule_save(self, delay_ms = TIMER_DELAY_TO_SAVE):
-        if self._save_timer is None:
-            self._save_timer = QTimer()
-            self._save_timer.setSingleShot(True)
-            self._save_timer.timeout.connect(self.save_config)
-        self._save_timer.stop()
-        self._save_timer.start(delay_ms)
+
 
     def save_config(self):
         if not self._dirty:
@@ -943,7 +953,6 @@ class Shot:
                 "error_log": self.error_log,
                 "processing_timestamp": self.processing_timestamp,
             }
-            # Удаляем None-значения, чтобы не хранить лишнее
             for key in ["user_sensor_width", "user_sensor_height", "user_focal",
                         "project_path", "script_path", "error_log", "processing_timestamp"]:
                 if config[key] is None:
@@ -952,14 +961,12 @@ class Shot:
                 def default(self, obj):
                     if isinstance(obj, (dict, list, str, int, float, bool, type(None))):
                         return super().default(obj)
-                    return str(obj)  # преобразуем всё остальное в строку
-                    
+                    return str(obj)
+                        
             try:
                 with open(self.get_config_path(), 'w') as f:
                     json.dump(config, f, indent=2, cls=SafeEncoder)
                     self._dirty = False
-                    print ({self.name})  #смотрим что записываем
-
             except Exception as e:
                 print(f"Error saving config for {self.name}: {e}")
         finally:
@@ -1026,20 +1033,23 @@ class Shot:
             self.point_groups[group_name] = []
         self.point_groups[group_name].append(model_dict)
         self._dirty = True
-        self.schedule_save()
+        if self.main_window:
+            self.main_window._mark_shot_dirty(self)
 
     def remove_model_from_group(self, group_name, model_path):
         if group_name in self.point_groups:
             self.point_groups[group_name] = [m for m in self.point_groups[group_name] if m["path"] != model_path]
             self._dirty = True
-            self.schedule_save()
+            if self.main_window:
+                self.main_window._mark_shot_dirty(self)
 
     def set_model_enabled(self, group_name, model_path, enabled):
         for m in self.point_groups.get(group_name, []):
             if m["path"] == model_path:
                 m["enabled"] = enabled
                 self._dirty = True
-                self.schedule_save()
+                if self.main_window:
+                    self.main_window._mark_shot_dirty(self)
                 break
 
     def set_texture_path(self, group_name, model_path, texture_path, enabled=None):
@@ -1049,7 +1059,8 @@ class Shot:
                 if enabled is not None:
                     m["texture"]["enabled"] = enabled
                 self._dirty = True
-                self.schedule_save()
+                if self.main_window:
+                    self.main_window._mark_shot_dirty(self)
                 break
 
     def set_texture_enabled(self, group_name, model_path, enabled):
@@ -1057,7 +1068,8 @@ class Shot:
             if m["path"] == model_path:
                 m["texture"]["enabled"] = enabled
                 self._dirty = True
-                self.schedule_save()
+                if self.main_window:
+                    self.main_window._mark_shot_dirty(self)
                 break
 
     def scan(self, default_metadata, camera_db=None, exr_viewer_rules=None, log_func=None):
@@ -1166,6 +1178,29 @@ class Shot:
             return int(match.group(1))
         return None
 
+    def get_selected_sequences(self):
+        """Возвращает список выбранных последовательностей."""
+        return [seq for seq in self.sequences if self.sequence_selected.get(seq.full_name, True)]
+
+    def get_main_sequence(self):
+        """Возвращает основную последовательность из выбранных."""
+        selected = self.get_selected_sequences()
+        if not selected:
+            return None
+        main = next((seq for seq in selected if seq.is_main), None)
+        if main is None:
+            main = selected[0]  # первая как основная
+        return main
+
+    def get_proxy_sequences(self):
+        """Возвращает список прокси-последовательностей (выбранные, кроме основной)."""
+        main = self.get_main_sequence()
+        if main is None:
+            return []
+        selected = self.get_selected_sequences()
+        return [seq for seq in selected if seq != main]
+
+
 # ================== Settings ==================
 class Settings:
     def __init__(self, config_path=None):
@@ -1266,40 +1301,8 @@ class ProcessingWorker(QThread):
         self.pause_condition.wakeAll()
         self.mutex.unlock()
 
-    def run(self):
-        total_shots = len(self.shots)
-        self.emit_log(f"Start processing {total_shots} shots", "info")
-        for idx, shot in enumerate(self.shots):
-            self.mutex.lock()
-            if self._is_aborted:
-                self.mutex.unlock()
-                self.emit_log("Processing aborted by user", "error")
-                break
-            if self._is_stopped:
-                self.mutex.unlock()
-                self.emit_log("Processing stopped by user", "info")
-                break
-            while self._is_paused:
-                self.pause_condition.wait(self.mutex)
-            self.mutex.unlock()
-
-            self.progress_global.emit(idx, total_shots)
-            self.shot_started.emit(shot.name)
-            self.emit_log(f"Processing shot {shot.name}...", "info")
-            self.emit_log(f"DEBUG: point_groups = {shot.point_groups}", "info")
-            success, project_path = self.process_shot(shot)
-            self.shot_finished.emit(shot.name, success, project_path)
-            if success and project_path:
-                self.processed_projects[shot.name] = project_path
-
-        self.progress_global.emit(total_shots, total_shots)
-        self.finished.emit(self.processed_projects)
-
-    def emit_log(self, msg, level="info"):
-        self.log_signal.emit(msg, level)
-
     def process_shot(self, shot):
-        error_messages = []  # список для сбора ошибок
+        error_messages = []
         self.emit_log(f"Point groups for {shot.name}: {shot.point_groups}", "info")
         if shot.has_gaps:
             self.emit_log(f"Warning: shot {shot.name} has frame number gaps", "error")
@@ -1307,17 +1310,18 @@ class ProcessingWorker(QThread):
 
         tracking_dir = os.path.join(shot.path, "tracking")
         if not os.path.exists(tracking_dir):
-#            os.makedirs(tracking_dir)
+            # os.makedirs(tracking_dir)  # при необходимости
             pass
 
         version = get_next_version(tracking_dir, shot.name)
         project_filename = f"{shot.name}_track_v{version:03d}.3de"
         project_path = os.path.join(tracking_dir, project_filename)
 
-        bc_files = []          # для передачи в скрипт
-        bc_files_paths = []    # для установки прав
-        selected_seqs = [seq for seq in shot.sequences if shot.sequence_selected.get(seq.full_name, True)]
+        bc_files = []
+        bc_files_paths = []
+        selected_seqs = shot.get_selected_sequences()
         total_seqs = len(selected_seqs)
+        bc_errors = False  # <-- добавить флаг
         for seq_idx, seq in enumerate(selected_seqs):
             self.progress_shot.emit(seq_idx, total_seqs)
             self.emit_log(f"  Generating bc for {seq.full_name}...", "info")
@@ -1332,28 +1336,24 @@ class ProcessingWorker(QThread):
             else:
                 self.emit_log(f"  Failed to generate bc for {seq.full_name}", "error")
                 error_messages.append(f"Failed to generate bc for {seq.full_name}")
-
-        main_seq = next((s for s in shot.sequences if s.is_main), None)
-        if main_seq is None and shot.sequences:
-            main_seq = shot.sequences[0]
-            self.emit_log(f"  Warning: no exact main sequence, using first: {main_seq.full_name}", "info")
-        if main_seq is None:
-            self.emit_log(f"  Error: no sequences for shot {shot.name}", "error")
+                bc_errors = True  # <-- отметить ошибку
+        # Если были ошибки, не создаём проект
+        if bc_errors:
+            self.emit_log("Aborting project creation due to BC generation errors.", "error")
+            shot.error_log = "\n".join(error_messages)
+            shot._dirty = True
             return False, None
-
-        proxy_seqs = [seq for seq in selected_seqs if seq != main_seq]
-
+    
         self.emit_log(f"  Creating project {project_filename}...", "info")
-        created_files = self.create_3de_project(shot, main_seq, proxy_seqs, bc_files, project_path, version)
+        created_files = self.create_3de_project(shot, bc_files, project_path, version)
 
         if created_files is not None:
             if error_messages:
-                shot.error_log = "\n".join(error_messages)  # сохраняем предупреждения
+                shot.error_log = "\n".join(error_messages)
             else:
                 shot.error_log = None
 
             shot._dirty = True
-
             self.emit_log(f"  Project created: {project_path}", "success")
             all_files = bc_files_paths + created_files
             self.fix_permissions(all_files)
@@ -1366,7 +1366,64 @@ class ProcessingWorker(QThread):
             return False, None
         
         
+    def create_3de_project(self, shot, bc_files, project_path, version):
+        """
+        Создаёт 3DE-проект для шота, используя методы шота для получения последовательностей.
+        Возвращает список созданных файлов (скрипт, проект, скриншот) или None при ошибке.
+        """
+        main_seq = shot.get_main_sequence()
+        if main_seq is None:
+            self.emit_log(f"  Error: no main sequence for shot {shot.name}", "error")
+            return None
 
+        proxy_seqs = shot.get_proxy_sequences()
+
+        script_content = generate_tde4_script(
+            shot, project_path, self.settings,
+            exit_at_end=True   # в рабочем потоке скрипт сам завершит 3DE4
+        )
+        if script_content is None:
+            self.emit_log(f"  Failed to generate script for {shot.name}", "error")
+            return None
+
+        script_filename = f"_temp_{shot.name}_v{version:03d}_create_project.py"
+        script_file = os.path.join(os.path.dirname(project_path), script_filename)
+        with open(script_file, 'w', encoding='utf-8') as f:
+            f.write(script_content)
+        os.chmod(script_file, int(self.settings.data.get("file_permissions", "664"), 8))
+
+        tde4_path = self.settings.data["path_tde4"]
+        if not os.path.isfile(tde4_path):
+            self.emit_log(f"  3DE4 not found: {tde4_path}", "error")
+            return None
+
+        cmd = [tde4_path, "-run_script", script_file]
+        self.emit_log(f"  Running: {' '.join(cmd)}", "info")
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    bufsize=1, encoding='utf-8', text=True)
+            for line in iter(proc.stdout.readline, ''):
+                line = line.strip()
+                if line:
+                    self.emit_log(f"    3DE4: {line}", "info")
+            proc.wait()
+            if proc.returncode != 0:
+                self.emit_log(f"  3DE4 finished with error code {proc.returncode}", "error")
+                return None
+        except Exception as e:
+            self.emit_log(f"  Error running 3DE4: {e}", "error")
+            return None
+
+        # Проверяем, что проект создан
+        if not os.path.exists(project_path):
+            self.emit_log(f"  Project file not created: {project_path}", "error")
+            return None
+
+        screenshot = project_path + ".jpg"
+        created_files = [script_file, project_path]
+        if os.path.exists(screenshot):
+            created_files.append(screenshot)
+        return created_files
 
 
 
@@ -1558,12 +1615,109 @@ class MainWindow(QMainWindow):
         self._disable_saving = False
         self.copied_model_data = None   # хранит (group_name, model_dict) для копирования
 
+        self._save_timer = QTimer()
+        self._save_timer.setSingleShot(True)
+        self._save_timer.timeout.connect(self._flush_all_saves)
+        self._dirty_shots = set()
+
 
         # Восстанавливаем состояние сплиттера, если оно сохранено
         if hasattr(self, 'splitter') and "splitter_state" in self.settings.data:
             state_str = self.settings.data["splitter_state"]
             state = QByteArray.fromBase64(state_str.encode())
             self.splitter.restoreState(state)
+
+
+    def _mark_shot_dirty(self, shot):
+        self._dirty_shots.add(shot)
+        self._save_timer.start(TIMER_DELAY_TO_SAVE)
+
+    def _flush_all_saves(self):
+        for shot in list(self._dirty_shots):
+            if shot._dirty:
+                shot.save_config()
+        self._dirty_shots.clear()
+
+    def flush_pending_saves(self):
+        if self._save_timer.isActive():
+            self._save_timer.stop()
+        self._flush_all_saves()
+
+
+    def update_shot_item(self, shot_item, shot):
+        """Обновляет текстовые данные и чекбокс шота."""
+        # Обновляем текст в колонках
+        main_seq = next((s for s in shot.sequences if s.is_main), shot.sequences[0] if shot.sequences else None)
+        if main_seq:
+            sensor_w = str(shot.user_sensor_width if shot.user_sensor_width is not None else main_seq.sensor_width if main_seq.sensor_width is not None else '')
+            sensor_h = str(shot.user_sensor_height if shot.user_sensor_height is not None else main_seq.sensor_height if main_seq.sensor_height is not None else '')
+            focal_val = str(shot.user_focal if shot.user_focal is not None else main_seq.focal if main_seq.focal is not None else '')
+        else:
+            sensor_w = str(shot.user_sensor_width if shot.user_sensor_width is not None else '')
+            sensor_h = str(shot.user_sensor_height if shot.user_sensor_height is not None else '')
+            focal_val = str(shot.user_focal if shot.user_focal is not None else '')
+        shot_item.setText(1, sensor_w)
+        shot_item.setText(2, sensor_h)
+        shot_item.setText(3, focal_val)
+        shot_item.setText(4, f"Frames: {shot.frame_count}")
+        # Обновляем чекбокс
+        shot_item.setCheckState(0, Qt.Checked if shot.selected else Qt.Unchecked)
+        # Обновляем tooltip
+        self.update_shot_tooltip(shot_item, shot)
+
+    def update_layer_item(self, layer_item, seq, shot):
+        """Обновляет чекбокс слоя."""
+        if shot:
+            layer_item.setCheckState(0, Qt.Checked if shot.sequence_selected.get(seq.full_name, True) else Qt.Unchecked)
+
+
+    def find_shot_item(self, shot):
+        """Возвращает QTreeWidgetItem для шота."""
+        for i in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(i)
+            if item.data(0, Qt.UserRole) == shot:
+                return item
+        return None
+
+    def find_layer_item(self, shot_item, seq):
+        """Возвращает элемент слоя внутри shot_item."""
+        layers_item = self._find_child_by_text(shot_item, "Layers")
+        if layers_item:
+            for i in range(layers_item.childCount()):
+                child = layers_item.child(i)
+                data = child.data(0, Qt.UserRole)
+                if isinstance(data, tuple) and data[0] == "seq" and data[1] == seq.full_name:
+                    return child
+        return None
+
+    def find_group_item(self, shot_item, group_name):
+        """Возвращает элемент группы внутри shot_item."""
+        groups_item = self._find_child_by_text(shot_item, "Point Groups")
+        if groups_item:
+            for i in range(groups_item.childCount()):
+                child = groups_item.child(i)
+                data = child.data(0, Qt.UserRole)
+                if isinstance(data, tuple) and data[0] == "group" and data[1] == group_name:
+                    return child
+        return None
+
+    def find_model_root_item(self, group_item, model_path):
+        """Возвращает корневой элемент модели внутри group_item."""
+        for i in range(group_item.childCount()):
+            child = group_item.child(i)
+            data = child.data(0, Qt.UserRole)
+            if isinstance(data, tuple) and data[0] == "model_root" and data[2] == model_path:
+                return child
+        return None
+
+    def _find_child_by_text(self, parent, text):
+        """Поиск дочернего элемента по тексту в первой колонке."""
+        for i in range(parent.childCount()):
+            if parent.child(i).text(0) == text:
+                return parent.child(i)
+        return None
+
+
 
     def _log_adapter(self, msg, level=None):
         if level == 'error':
@@ -1637,7 +1791,7 @@ class MainWindow(QMainWindow):
             self._open_existing_shot(shot, existing_project_path)
             return
 
-        # Создание нового проекта
+
         # Инициализация прогресс-баров
         self.global_progress.setMaximum(1)
         self.global_progress.setValue(0)
@@ -1653,6 +1807,7 @@ class MainWindow(QMainWindow):
         bc_files_paths = []
         total_seqs = len(shot.sequences)
         self.shot_progress.setMaximum(total_seqs)
+        bc_errors = False  # <-- добавить флаг
 
         for seq_idx, seq in enumerate(shot.sequences):
             self.update_shot_progress(seq_idx, total_seqs)
@@ -1667,20 +1822,17 @@ class MainWindow(QMainWindow):
                 bc_files_paths.append(bc_path)
             else:
                 self.log_error(f"Failed to generate bc for {seq.full_name}")
-
-        main_seq = next((s for s in shot.sequences if s.is_main), None)
-        if main_seq is None and shot.sequences:
-            main_seq = shot.sequences[0]
-            self.log_info(f"No exact main sequence, using {main_seq.full_name}")
-        if main_seq is None:
-            self.log_error(f"No sequences for shot {shot.name}")
+                bc_errors = True   # <-- отметить ошибку
+#
+        # Если были ошибки, прерываем создание проекта
+        if bc_errors:
+            self.log_error("Aborting project creation due to BC generation errors.")
+            QMessageBox.critical(self, "Error", "Failed to generate one or more BC files.\nProject will not be created.")
             return
 
-        proxy_seqs = [seq for seq in shot.sequences if seq != main_seq]
-
         script_content = generate_tde4_script(
-            shot, main_seq, proxy_seqs, bc_files, project_path, self.settings,
-            exit_at_end=False
+            shot, project_path, self.settings,
+            exit_at_end=False   # не завершать 3DE4, так как будем ждать проект
         )
         if script_content is None:
             self.log_error(f"Failed to generate script for {shot.name}")
@@ -1729,14 +1881,15 @@ class MainWindow(QMainWindow):
             QApplication.quit()
 
     def _wait_for_project(self, shot, project_path):
-        """Запускает таймер для проверки появления проекта (бесконечное ожидание)."""
         self._project_check_timer = QTimer()
         self._project_check_timer.timeout.connect(self._check_project)
         self._project_check_shot = shot
         self._project_check_path = project_path
-        self._project_check_timer.start(5000)  # проверяем каждую секунду
+        self._project_check_counter = 0
+        self._project_check_timer.start(5000)  # каждую 5 секунду
 
     def _check_project(self):
+        self._project_check_counter += 1
         if os.path.exists(self._project_check_path):
             self._project_check_timer.stop()
             self.fix_permissions([self._project_check_path])
@@ -1747,6 +1900,10 @@ class MainWindow(QMainWindow):
             self._project_check_shot._dirty = True
             self._project_check_shot.save_config()
             self.log_info(f"Project created successfully: {self._project_check_path}")
+            QApplication.quit()
+        elif self._project_check_counter > 600:  # 600 секунд
+            self._project_check_timer.stop()
+            self.log_error(f"Timeout waiting for project: {self._project_check_path}")
             QApplication.quit()
         else:
             self.log_info(f"Waiting for project: {self._project_check_path} (not yet created)")
@@ -2553,13 +2710,9 @@ class MainWindow(QMainWindow):
             self.resources_dock.show()
 
     def closeEvent(self, event):
-        for shot in self.shots:
-            if hasattr(shot, '_save_timer') and shot._save_timer and shot._save_timer.isActive():
-                shot._save_timer.stop()
-            if shot._dirty:
-                shot.save_config()
+
+        self.flush_pending_saves()  # сохраняем всё перед массовой операцией
         if hasattr(self, 'splitter'):
-            # Сохраняем состояние сплиттера как base64-строку
             state_bytes = self.splitter.saveState().toBase64().data()
             self.settings.data["splitter_state"] = state_bytes.decode()
             self.settings.save()
@@ -2617,44 +2770,43 @@ class MainWindow(QMainWindow):
 
     def recolor_shots(self):
         self._disable_saving = True
-        
-        # Получаем цвета из настроек
-        mismatch_color = QColor(*self.settings.data.get("color_mismatch", (255, 165, 0)))
-        success_color = QColor(*self.settings.data.get("color_success", (144, 238, 144)))
-        failure_color = QColor(*self.settings.data.get("color_failure", (255, 182, 193)))
-        not_processed_color = QColor(*self.settings.data.get("color_not_processed", (173, 216, 230)))
-        
-        for idx in range(self.tree.topLevelItemCount()):
-            shot_item = self.tree.topLevelItem(idx)
-            shot = shot_item.data(0, Qt.UserRole)
-            if not shot:
-                continue
-            
-            # Определяем базовый цвет в зависимости от состояния шота
-            if shot.processed:
-                base_color = success_color if shot.processed_success else failure_color
-            else:
-                # Необработанный шот
-                if shot.mismatched_frame_count or shot.has_gaps:
-                    base_color = mismatch_color
+        try:
+            mismatch_color = QColor(*self.settings.data.get("color_mismatch", (255, 165, 0)))
+            success_color = QColor(*self.settings.data.get("color_success", (144, 238, 144)))
+            failure_color = QColor(*self.settings.data.get("color_failure", (255, 182, 193)))
+            not_processed_color = QColor(*self.settings.data.get("color_not_processed", (173, 216, 230)))
+
+            for idx in range(self.tree.topLevelItemCount()):
+                shot_item = self.tree.topLevelItem(idx)
+                shot = shot_item.data(0, Qt.UserRole)
+                if not shot:
+                    continue
+
+                if shot.processed:
+                    base_color = success_color if shot.processed_success else failure_color
                 else:
-                    base_color = not_processed_color
-            
-            # Применяем затемнение, если галочка снята
-            if not shot.selected:
-                darken = DARKEN_FACTOR
-                r = max(base_color.red() - darken, 0)
-                g = max(base_color.green() - darken, 0)
-                b = max(base_color.blue() - darken, 0)
-                color = QColor(r, g, b)
-            else:
-                color = base_color
-            
-            self._set_item_background_recursive(shot_item, color)
-        
-        
-        self.tree.viewport().update()
-        self._disable_saving = False
+                    if shot.mismatched_frame_count or shot.has_gaps:
+                        base_color = mismatch_color
+                    else:
+                        base_color = not_processed_color
+
+                if not shot.selected:
+                    darken = DARKEN_FACTOR
+                    r = max(base_color.red() - darken, 0)
+                    g = max(base_color.green() - darken, 0)
+                    b = max(base_color.blue() - darken, 0)
+                    color = QColor(r, g, b)
+                else:
+                    color = base_color
+
+                # Устанавливаем фон только для корневого элемента шота
+                for col in range(self.tree.columnCount()):
+                    shot_item.setBackground(col, QBrush(color))
+
+                # Для дочерних элементов фон не устанавливаем, чтобы они наследовали фон от шота
+                # Если нужно, чтобы дочерние элементы имели другой фон, можно установить, но сейчас не требуется
+        finally:
+            self._disable_saving = False
 
 
     def init_external_modules(self):
@@ -2789,21 +2941,11 @@ class MainWindow(QMainWindow):
             self.root_path = dir_path
             self.btn_scan.setEnabled(True)
 
-    def flush_pending_saves(self):
-        """Немедленно сохранить все изменённые шоты."""
-        for shot in self.shots:
-            if shot._dirty:
-                if shot._save_timer and shot._save_timer.isActive():
-                    shot._save_timer.stop()
-                shot.save_config()
 
     def select_all_shots(self):
+        # Сохраняем всё, что накопилось
         self.flush_pending_saves()
-        # Останавливаем таймеры всех шотов
-        for shot in self.shots:
-            if shot._save_timer and shot._save_timer.isActive():
-                shot._save_timer.stop()
-
+        
         # Отключаем обработчик изменения элементов
         self.tree.itemChanged.disconnect(self.on_tree_item_changed)
         self._disable_saving = True
@@ -2814,20 +2956,16 @@ class MainWindow(QMainWindow):
                 shot = item.data(0, Qt.UserRole)
                 if shot:
                     shot.selected = True
+                    # Помечаем как dirty, но не сохраняем сразу
+                    self._mark_shot_dirty(shot)
         finally:
-            # Восстанавливаем обработчик
             self.tree.itemChanged.connect(self.on_tree_item_changed)
             self._disable_saving = False
-        self._disable_saving = True
         self.recolor_shots()
-        self._disable_saving = False
 
     def deselect_all_shots(self):
         self.flush_pending_saves()
-        for shot in self.shots:
-            if shot._save_timer and shot._save_timer.isActive():
-                shot._save_timer.stop()
-
+        
         self.tree.itemChanged.disconnect(self.on_tree_item_changed)
         self._disable_saving = True
         try:
@@ -2837,12 +2975,11 @@ class MainWindow(QMainWindow):
                 shot = item.data(0, Qt.UserRole)
                 if shot:
                     shot.selected = False
+                    self._mark_shot_dirty(shot)
         finally:
             self.tree.itemChanged.connect(self.on_tree_item_changed)
             self._disable_saving = False
-        self._disable_saving = True
         self.recolor_shots()
-        self._disable_saving = False
 
     def _set_item_background_recursive(self, root_item, color):
         """Итеративный обход дерева с отслеживанием посещённых элементов по id."""
@@ -2953,20 +3090,48 @@ class MainWindow(QMainWindow):
             target_shot.point_groups[target_group_name] = []
             self.log_info(f"Created group '{target_group_name}' in shot '{target_shot.name}'")
 
-        # Добавляем модель (глубокую копию)
+        
+        # Добавляем модель
         import copy
         new_model = copy.deepcopy(model_dict)
-        # Если у модели нет имени, создаём из пути
         if "name" not in new_model:
             new_model["name"] = os.path.splitext(os.path.basename(new_model["path"]))[0]
 
         target_shot.point_groups[target_group_name].append(new_model)
         target_shot._dirty = True
-        target_shot.schedule_save()
+        self._mark_shot_dirty(target_shot)
         self.log_info(f"Pasted model '{new_model['name']}' into group '{target_group_name}' of shot '{target_shot.name}'")
 
-        # Обновляем дерево
-        self.populate_tree()
+        # Добавляем модель в дерево без полного перестроения
+        shot_item = self.find_shot_item(target_shot)
+        if shot_item:
+            group_item = self.find_group_item(shot_item, target_group_name)
+            if group_item:
+                model_root = QTreeWidgetItem([new_model["name"], "", "", "", ""])
+                model_root.setFlags(model_root.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
+                model_root.setCheckState(0, Qt.Checked if new_model["enabled"] else Qt.Unchecked)
+                model_root.setData(0, Qt.UserRole, ("model_root", target_group_name, new_model["path"]))
+                self._set_child_font(model_root)
+                group_item.addChild(model_root)
+                
+                # Путь модели
+                model_path_item = QTreeWidgetItem([new_model["path"], "", ""])
+                model_path_item.setFlags(model_path_item.flags() | Qt.ItemIsEditable)
+                model_path_item.setData(0, Qt.UserRole, ("model_path", target_group_name, new_model["path"]))
+                self._set_child_font(model_path_item)
+                model_root.addChild(model_path_item)
+                
+                # Текстура
+                texture_item = QTreeWidgetItem([new_model["texture"]["path"], "", ""])
+                texture_item.setFlags(texture_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
+                texture_item.setCheckState(0, Qt.Checked if new_model["texture"]["enabled"] else Qt.Unchecked)
+                texture_item.setData(0, Qt.UserRole, ("texture_path", target_group_name, new_model["path"]))
+                self._set_child_font(texture_item)
+                model_root.addChild(texture_item)
+                
+                # Обновляем счётчик моделей в группе
+                group_item.setText(4, f"{len(target_shot.point_groups[target_group_name])} model(s)")
+                group_item.setExpanded(True)
 
     def populate_tree(self):
         self._store_tree_state()                     
@@ -3079,13 +3244,14 @@ class MainWindow(QMainWindow):
             return
         if self._updating_tree:
             return
+
         # Шот (нет родителя)
         if item.parent() is None:
             shot = item.data(0, Qt.UserRole)
             if shot:
                 if column == 0:  # чекбокс
                     shot.selected = item.checkState(0) == Qt.Checked
-                    self.recolor_shots()   # всегда перекрашиваем, не только для необработанных
+                    self.recolor_shots()   # перекрашиваем шот
                     self.update_shot_tooltip(item, shot)
                 elif column == 1:  # sensor W
                     text = item.text(1).strip()
@@ -3094,12 +3260,9 @@ class MainWindow(QMainWindow):
                     except ValueError:
                         shot.user_sensor_width = None
                     shot._dirty = True
-                    shot.schedule_save()
-                    if shot.user_sensor_width is not None:
-                        item.setText(1, str(shot.user_sensor_width))
-                    else:
-                        item.setText(1, "")
-                    self.update_shot_tooltip(item, shot)
+                    self._mark_shot_dirty(shot)
+                    # Обновляем остальные колонки (на случай, если они зависят от изменённого)
+                    self.update_shot_item(item, shot)
                 elif column == 2:  # sensor H
                     text = item.text(2).strip()
                     try:
@@ -3107,12 +3270,8 @@ class MainWindow(QMainWindow):
                     except ValueError:
                         shot.user_sensor_height = None
                     shot._dirty = True
-                    shot.schedule_save()
-                    if shot.user_sensor_height is not None:
-                        item.setText(2, str(shot.user_sensor_height))
-                    else:
-                        item.setText(2, "")
-                    self.update_shot_tooltip(item, shot)
+                    self._mark_shot_dirty(shot)
+                    self.update_shot_item(item, shot)
                 elif column == 3:  # focal
                     text = item.text(3).strip()
                     try:
@@ -3120,127 +3279,154 @@ class MainWindow(QMainWindow):
                     except ValueError:
                         shot.user_focal = None
                     shot._dirty = True
-                    shot.schedule_save()
-                    if shot.user_focal is not None:
-                        item.setText(3, str(shot.user_focal))
-                    else:
-                        item.setText(3, "")
-                    self.update_shot_tooltip(item, shot)
+                    self._mark_shot_dirty(shot)
+                    self.update_shot_item(item, shot)
             return
 
         # Слой (Layers)
         parent = item.parent()
         if parent and parent.text(0) == "Layers":
             shot_item = parent.parent()
-            if shot_item:
-                shot = shot_item.data(0, Qt.UserRole)
-                if shot and column == 0:
-                    seq_name = item.text(0)
-                    selected = item.checkState(0) == Qt.Checked
-                    shot.sequence_selected[seq_name] = selected
-                    shot._dirty = True
-                    shot.schedule_save()
+            shot = shot_item.data(0, Qt.UserRole)
+            if shot and column == 0:
+                seq_name = item.text(0)
+                selected = item.checkState(0) == Qt.Checked
+                shot.sequence_selected[seq_name] = selected
+                shot._dirty = True
+                self._mark_shot_dirty(shot)
+                # Дополнительных обновлений не требуется, так как отображение уже обновлено
             return
 
-        # Группа, модель, текстура
+        # Остальные элементы (группы, модели, текстуры) – данные в item.data
         data = item.data(0, Qt.UserRole)
-        if isinstance(data, tuple):
-            if data[0] == "group" and column == 0:
-                # Переименование группы
-                group_name = data[1]
-                new_name = item.text(0)
-                if new_name != group_name:
-                    shot_item = item.parent().parent()
-                    if shot_item:
-                        shot = shot_item.data(0, Qt.UserRole)
-                        if shot:
-                            models = shot.point_groups.pop(group_name, [])
-                            shot.point_groups[new_name] = models
-                            shot._dirty = True
-                            shot.schedule_save()
-                            item.setData(0, Qt.UserRole, ("group", new_name))
-            elif data[0] == "model_root":
-                # Корневой элемент модели: чекбокс включения или редактирование имени
-                group_name = data[1]
-                model_path = data[2]
-                shot_item = item.parent().parent().parent()
+        if not isinstance(data, tuple):
+            return
+
+        # Группа (переименование)
+        if data[0] == "group" and column == 0:
+            group_name = data[1]
+            new_name = item.text(0)
+            if new_name != group_name:
+                shot_item = item.parent().parent()  # groups_item -> shot_item
                 shot = shot_item.data(0, Qt.UserRole)
                 if shot:
-                    if column == 0:
-                        enabled = item.checkState(0) == Qt.Checked
-                        shot.set_model_enabled(group_name, model_path, enabled)
-                    elif column == 0 and item.isSelected():
-                        new_name = item.text(0)
-                        for m in shot.point_groups.get(group_name, []):
-                            if m["path"] == model_path:
-                                m["name"] = new_name
-                                shot._dirty = True
-                                shot.schedule_save()
-                                break
-            elif data[0] == "model_path":
-                # Путь модели (колонка 0 редактируется)
-                group_name = data[1]
-                model_path = data[2]
-                shot_item = item.parent().parent().parent().parent()
-                shot = shot_item.data(0, Qt.UserRole)
-                if shot and column == 0:
-                    new_path = item.text(0)
+                    models = shot.point_groups.pop(group_name, [])
+                    shot.point_groups[new_name] = models
+                    shot._dirty = True
+                    self._mark_shot_dirty(shot)
+                    item.setData(0, Qt.UserRole, ("group", new_name))
+                    # Обновляем счётчик моделей в группе
+                    item.setText(4, f"{len(models)} model(s)")
+            return
+
+        # Корневой элемент модели (включение/выключение или переименование)
+        if data[0] == "model_root":
+            group_name = data[1]
+            model_path = data[2]
+            shot_item = item.parent().parent().parent()  # group_item -> groups_item -> shot_item
+            shot = shot_item.data(0, Qt.UserRole)
+            if shot:
+                if column == 0:
+                    enabled = item.checkState(0) == Qt.Checked
+                    shot.set_model_enabled(group_name, model_path, enabled)
+                elif column == 0 and item.isSelected():  # редактирование имени (двойной щелчок или F2)
+                    new_name = item.text(0)
                     for m in shot.point_groups.get(group_name, []):
                         if m["path"] == model_path:
-                            m["path"] = new_path
-                            # Обновляем имя, если оно совпадало со старым именем файла
-                            old_name = m["name"]
-                            old_base = os.path.splitext(os.path.basename(old_name))[0]
-                            new_base = os.path.splitext(os.path.basename(new_path))[0]
-                            if old_name == old_base or old_name == "":
-                                m["name"] = new_base
+                            m["name"] = new_name
                             shot._dirty = True
-                            shot.schedule_save()
+                            self._mark_shot_dirty(shot)
                             break
-            elif data[0] == "texture_path":
-                # Текстура: чекбокс включения (колонка 0) или редактирование пути (колонка 0)
-                group_name = data[1]
-                model_path = data[2]
-                shot_item = item.parent().parent().parent().parent()
-                shot = shot_item.data(0, Qt.UserRole)
-                if shot:
-                    # Для различения: если изменился текст пути, то item.text(0) не равен текущему пути в модели
-                    new_path = item.text(0)
-                    for m in shot.point_groups.get(group_name, []):
-                        if m["path"] == model_path:
-                            if new_path != m["texture"]["path"]:
-                                # Редактирование пути
-                                m["texture"]["path"] = new_path
-                                m["texture"]["enabled"] = bool(new_path)
-                                shot._dirty = True
-                                shot.schedule_save()
-                            else:
-                                # Изменение чекбокса
-                                enabled = item.checkState(0) == Qt.Checked
-                                m["texture"]["enabled"] = enabled
-                                shot._dirty = True
-                                shot.schedule_save()
-                            break
+            return
+
+        # Путь модели
+        if data[0] == "model_path":
+            group_name = data[1]
+            model_path = data[2]
+            shot_item = item.parent().parent().parent().parent()  # model_root -> group_item -> groups_item -> shot_item
+            shot = shot_item.data(0, Qt.UserRole)
+            if shot and column == 0:
+                new_path = item.text(0)
+                for m in shot.point_groups.get(group_name, []):
+                    if m["path"] == model_path:
+                        m["path"] = new_path
+                        # Обновляем имя, если оно совпадало со старым именем файла
+                        old_name = m.get("name", "")
+                        old_base = os.path.splitext(os.path.basename(old_name))[0] if old_name else ""
+                        new_base = os.path.splitext(os.path.basename(new_path))[0]
+                        if old_name == old_base or old_name == "":
+                            m["name"] = new_base
+                        shot._dirty = True
+                        self._mark_shot_dirty(shot)
+                        # Обновляем отображение имени модели в корневом элементе
+                        model_root = item.parent()
+                        if model_root:
+                            model_root.setText(0, m["name"])
+                        break
+            return
+
+        # Текстура (путь или чекбокс)
+        if data[0] == "texture_path":
+            group_name = data[1]
+            model_path = data[2]
+            shot_item = item.parent().parent().parent().parent()  # model_root -> group_item -> groups_item -> shot_item
+            shot = shot_item.data(0, Qt.UserRole)
+            if shot:
+                new_path = item.text(0)
+                for m in shot.point_groups.get(group_name, []):
+                    if m["path"] == model_path:
+                        # Определяем, что изменилось: текст или чекбокс?
+                        # Текст пути изменился, если new_path != m["texture"]["path"]
+                        if new_path != m["texture"]["path"]:
+                            # Редактирование пути
+                            m["texture"]["path"] = new_path
+                            m["texture"]["enabled"] = bool(new_path)
+                            shot._dirty = True
+                            self._mark_shot_dirty(shot)
+                        else:
+                            # Изменение чекбокса (столбец 0)
+                            enabled = item.checkState(0) == Qt.Checked
+                            m["texture"]["enabled"] = enabled
+                            shot._dirty = True
+                            self._mark_shot_dirty(shot)
+                        break
+            return
 
     def browse_model_for_model(self, group_name, model):
-        """Обработчик кнопки Browse для пути модели."""
         path, _ = QFileDialog.getOpenFileName(self, "Select OBJ model", "", "OBJ files (*.obj)")
         if path:
+            old_path = model["path"]
             model["path"] = path
-            # Если имя модели не задано или равно старому имени файла, обновляем
-            old_name = model["name"]
-            old_base = os.path.splitext(os.path.basename(old_name))[0]
+            old_name = model.get("name", "")
+            old_base = os.path.splitext(os.path.basename(old_name))[0] if old_name else ""
             new_base = os.path.splitext(os.path.basename(path))[0]
             if old_name == old_base or old_name == "":
                 model["name"] = new_base
-            shot = self.find_shot_for_model(group_name, model["path"])
+            shot = self.find_shot_for_model(group_name, old_path)
             if shot:
                 shot._dirty = True
-                shot.schedule_save()
-                self.populate_tree()
+                self._mark_shot_dirty(shot)
+                
+                # Обновляем дерево
+                shot_item = self.find_shot_item(shot)
+                if shot_item:
+                    group_item = self.find_group_item(shot_item, group_name)
+                    if group_item:
+                        model_root = self.find_model_root_item(group_item, old_path)
+                        if model_root:
+                            # Обновляем данные модели в дереве
+                            model_root.setText(0, model["name"])
+                            model_root.setData(0, Qt.UserRole, ("model_root", group_name, model["path"]))
+                            # Обновляем путь модели
+                            for i in range(model_root.childCount()):
+                                child = model_root.child(i)
+                                child_data = child.data(0, Qt.UserRole)
+                                if isinstance(child_data, tuple) and child_data[0] == "model_path":
+                                    child.setText(0, path)
+                                    child.setData(0, Qt.UserRole, ("model_path", group_name, path))
+                                    break
 
     def browse_texture_for_model(self, group_name, model):
-        """Обработчик кнопки Browse для текстуры."""
         path, _ = QFileDialog.getOpenFileName(self, "Select texture", "", "Image files (*.jpg *.png *.tif *.exr)")
         if path:
             model["texture"]["path"] = path
@@ -3248,8 +3434,24 @@ class MainWindow(QMainWindow):
             shot = self.find_shot_for_model(group_name, model["path"])
             if shot:
                 shot._dirty = True
-                shot.schedule_save()
-                self.populate_tree()
+                self._mark_shot_dirty(shot)
+                
+                # Обновляем дерево
+                shot_item = self.find_shot_item(shot)
+                if shot_item:
+                    group_item = self.find_group_item(shot_item, group_name)
+                    if group_item:
+                        model_root = self.find_model_root_item(group_item, model["path"])
+                        if model_root:
+                            # Обновляем путь текстуры
+                            for i in range(model_root.childCount()):
+                                child = model_root.child(i)
+                                child_data = child.data(0, Qt.UserRole)
+                                if isinstance(child_data, tuple) and child_data[0] == "texture_path":
+                                    child.setText(0, path)
+                                    child.setCheckState(0, Qt.Checked)
+                                    child.setData(0, Qt.UserRole, ("texture_path", group_name, model["path"]))
+                                    break
 
     def find_shot_for_model(self, group_name, model_path):
         """Находит шот, содержащий данную модель в указанной группе."""
@@ -3402,14 +3604,38 @@ class MainWindow(QMainWindow):
                     model_dict["texture"]["enabled"],
                     name=model_dict["name"] if model_dict["name"] else None
                 )
-                self.populate_tree()
+                # Добавляем модель в дерево без полного перестроения
+                model_root = QTreeWidgetItem([model_dict["name"], "", "", "", ""])
+                model_root.setFlags(model_root.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
+                model_root.setCheckState(0, Qt.Checked if model_dict["enabled"] else Qt.Unchecked)
+                model_root.setData(0, Qt.UserRole, ("model_root", group_name, model_dict["path"]))
+                self._set_child_font(model_root)
+                group_item.addChild(model_root)
+                
+                # Путь модели
+                model_path_item = QTreeWidgetItem([model_dict["path"], "", ""])
+                model_path_item.setFlags(model_path_item.flags() | Qt.ItemIsEditable)
+                model_path_item.setData(0, Qt.UserRole, ("model_path", group_name, model_dict["path"]))
+                self._set_child_font(model_path_item)
+                model_root.addChild(model_path_item)
+                
+                # Текстура
+                texture_item = QTreeWidgetItem([model_dict["texture"]["path"], "", ""])
+                texture_item.setFlags(texture_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
+                texture_item.setCheckState(0, Qt.Checked if model_dict["texture"]["enabled"] else Qt.Unchecked)
+                texture_item.setData(0, Qt.UserRole, ("texture_path", group_name, model_dict["path"]))
+                self._set_child_font(texture_item)
+                model_root.addChild(texture_item)
+                
+                # Обновляем счётчик моделей в группе
+                group_item.setText(4, f"{len(shot.point_groups[group_name])} model(s)")
+                group_item.setExpanded(True)
 
     def edit_model(self, group_item, group_name, model_path):
         shot_item = group_item.parent().parent()
         shot = shot_item.data(0, Qt.UserRole)
         if not shot:
             return
-        # Находим model_dict
         model_dict = None
         for m in shot.point_groups.get(group_name, []):
             if m["path"] == model_path:
@@ -3422,8 +3648,21 @@ class MainWindow(QMainWindow):
                 idx = shot.point_groups[group_name].index(model_dict)
                 shot.point_groups[group_name][idx] = new_dict
                 shot._dirty = True
-                shot.schedule_save()
-                self.populate_tree()
+                self._mark_shot_dirty(shot)
+                # Обновляем дерево: находим модель и обновляем её элементы
+                model_root = self.find_model_root_item(group_item, model_path)
+                if model_root:
+                    model_root.setText(0, new_dict["name"])
+                    model_root.setCheckState(0, Qt.Checked if new_dict["enabled"] else Qt.Unchecked)
+                    # Обновляем дочерние элементы
+                    for i in range(model_root.childCount()):
+                        child = model_root.child(i)
+                        data = child.data(0, Qt.UserRole)
+                        if isinstance(data, tuple) and data[0] == "model_path":
+                            child.setText(0, new_dict["path"])
+                        elif isinstance(data, tuple) and data[0] == "texture_path":
+                            child.setText(0, new_dict["texture"]["path"])
+                            child.setCheckState(0, Qt.Checked if new_dict["texture"]["enabled"] else Qt.Unchecked)
 
     def rename_group(self, group_item, old_name):
         # Inline edit is already handled by on_tree_item_changed, but keep dialog as fallback
@@ -3440,12 +3679,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Warning", "Cannot delete the default CAMERA group.")
             return
         reply = QMessageBox.question(self, "Delete group", f"Delete group '{group_name}' and all its models?",
-                                     QMessageBox.Yes | QMessageBox.No)
+                                    QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
             shot.point_groups.pop(group_name, None)
             shot._dirty = True
-            shot.schedule_save()
-            self.populate_tree()
+            self._mark_shot_dirty(shot)
+            # Удаляем узел группы из дерева
+            parent = group_item.parent()
+            if parent:
+                parent.removeChild(group_item)
 
     def remove_model_from_group(self, group_item, group_name, model_path, model_item):
         shot_item = group_item.parent().parent()
@@ -3453,7 +3695,11 @@ class MainWindow(QMainWindow):
         if not shot:
             return
         shot.remove_model_from_group(group_name, model_path)
-        self.populate_tree()
+        # Удаляем узел модели из дерева
+        if model_item and model_item.parent():
+            model_item.parent().removeChild(model_item)
+        # Обновляем счётчик моделей в группе
+        group_item.setText(4, f"{len(shot.point_groups[group_name])} model(s)")
 
     def on_item_double_clicked(self, item, column):
         # Шот: редактирование сенсора/фокусного
@@ -3475,8 +3721,19 @@ class MainWindow(QMainWindow):
                 return
             shot.point_groups[name] = []
             shot._dirty = True
-            shot.schedule_save()
-            self.populate_tree()
+            self._mark_shot_dirty(shot)
+            
+            # Добавляем группу в дерево без полного перестроения
+            shot_item = self.find_shot_item(shot)
+            if shot_item:
+                groups_item = self._find_child_by_text(shot_item, "Point Groups")
+                if groups_item:
+                    group_item = QTreeWidgetItem([name, "", "", "", "0 model(s)"])
+                    group_item.setFlags(group_item.flags() | Qt.ItemIsEditable)
+                    group_item.setData(0, Qt.UserRole, ("group", name))
+                    self._set_child_font(group_item)
+                    groups_item.addChild(group_item)
+                    groups_item.setExpanded(True)
 
     def add_point_group(self):
         selected = self.tree.selectedItems()
@@ -3577,7 +3834,7 @@ class MainWindow(QMainWindow):
                     suffix = match.group(1)
                     shot_name = base_item + suffix if suffix else base_item
                     self.log_info(f"  Found layer folder: {sub} -> shot name '{shot_name}'")
-                    shot = Shot(path, shot_name, sub, log_func=self.log_with_level)
+                    shot = Shot(path, shot_name, sub, main_window=self, log_func=self.log_with_level)
                     shot.scan(self.settings.data, camera_db=self.camera_db,
                             exr_viewer_rules=self.exr_viewer_rules, log_func=self.log_with_level)
                     for seq in shot.sequences:
@@ -3616,7 +3873,7 @@ class MainWindow(QMainWindow):
                     suffix = match.group(1)
                     shot_name = item + suffix if suffix else item
                     self.log_info(f"  Found layer folder: {sub} -> shot name '{shot_name}'")
-                    shot = Shot(full_path, shot_name, sub, log_func=self.log_with_level)
+                    shot = Shot(full_path, shot_name, sub, main_window=self, log_func=self.log_with_level)
                     shot.scan(self.settings.data, camera_db=self.camera_db,
                             exr_viewer_rules=self.exr_viewer_rules, log_func=self.log_with_level)
                     for seq in shot.sequences:
@@ -3667,7 +3924,9 @@ class MainWindow(QMainWindow):
             if shot:
                 shot.processed = True
                 shot.processed_success = success
-                shot.save_config()
+
+                self._mark_shot_dirty(shot)
+                self._flush_all_saves()  # немедленно сохраняем результат обработки
                 # Снимаем галочку
                 item.setCheckState(0, Qt.Unchecked)
                 # Устанавливаем цвет в зависимости от успеха
@@ -3818,7 +4077,6 @@ class MainWindow(QMainWindow):
 
 
     def run_headless(self):
-        """Безголовый режим: сканирование и создание проектов без GUI."""
         print("=== Запуск безголового режима ===")
         try:
             self.scan_shots()
@@ -3866,7 +4124,8 @@ class MainWindow(QMainWindow):
 
         bc_files = []
         bc_files_paths = []
-        selected_seqs = shot.sequences
+        selected_seqs = shot.get_selected_sequences()
+        bc_errors = False
         for seq in selected_seqs:
             print(f"  Генерация bc для {seq.full_name}...")
             bc_path = generate_bc_file(seq, tracking_dir, self.settings,
@@ -3876,19 +4135,15 @@ class MainWindow(QMainWindow):
                 bc_files_paths.append(bc_path)
             else:
                 print(f"  Не удалось сгенерировать bc для {seq.full_name}")
-
-        main_seq = next((s for s in shot.sequences if s.is_main), None)
-        if main_seq is None and shot.sequences:
-            main_seq = shot.sequences[0]
-            print(f"  Предупреждение: нет точной основной последовательности, используем {main_seq.full_name}")
-        if main_seq is None:
-            print(f"  Ошибка: нет последовательностей для шота {shot.name}")
+                bc_errors = True
+                
+        if bc_errors:
+            print("  Aborting project creation due to BC generation errors.")
             return False, None
 
-        proxy_seqs = [seq for seq in selected_seqs if seq != main_seq]
 
         script_content = generate_tde4_script(
-            shot, main_seq, proxy_seqs, bc_files, project_path, self.settings,
+            shot, project_path, self.settings,
             exit_at_end=True
         )
         if script_content is None:
