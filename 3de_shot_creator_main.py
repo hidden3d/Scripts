@@ -8,6 +8,7 @@ import re
 import ast
 import time
 import importlib.util
+import textwrap
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -70,6 +71,13 @@ CHILD_ROW_HEIGHT = 15            # высота строки дочернего 
 BOLD_FONT_SIZE_OFFSET = 0      # на сколько пунктов увеличить жирный шрифт для шотов
 SHOT_FONT_SIZE_OFFSET = 0       # на сколько пунктов увеличить шрифт шота относительно базового
 CHILD_FONT_SIZE_OFFSET = -2     # на сколько пунктов уменьшить шрифт дочерних элементов
+
+
+# ================== Константы раскраски дочерних элементов ==================
+COLOR_CHILDREN = True          # раскрашивать ли дочерние элементы (слои, группы, модели)
+CHILD_COLOR_FACTOR = 0.3       # интенсивность цвета дочерних элементов (0.0 - белый/серый, 1.0 - полный цвет шота)
+
+
 
 # --- в начало файла после импортов добавим список стоп-слов ---
 STOP_WORDS = {
@@ -237,11 +245,11 @@ def generate_tde4_script(shot, project_path, settings, exit_at_end=True, main_se
     # Линза
     lines.append("lens = tde4.getFirstLens()")
     lines.append(f"print('Setting lens: sensor {sensor_width:.1f} x {sensor_height:.1f} mm, focal {focal:.1f} mm')")
-    lines.append(f"tde4.setLensFBackWidth(lens, {sensor_width / 10:.2f})")
-    lines.append(f"tde4.setLensFBackHeight(lens, {sensor_height / 10:.2f})")
-    lines.append(f"tde4.setLensFocalLength(lens, {focal / 10:.2f})")
+    lines.append(f"tde4.setLensFBackWidth(lens, {sensor_width / 10:.4f})")
+    lines.append(f"tde4.setLensFBackHeight(lens, {sensor_height / 10:.4f})")
+    lines.append(f"tde4.setLensFocalLength(lens, {focal / 10:.4f})")
     lines.append("tde4.setLensPixelAspect(lens, 1.0)")
-    lines.append(f"tde4.setLensFBackWidth(lens, {sensor_width / 10:.2f})")
+    lines.append(f"tde4.setLensFBackWidth(lens, {sensor_width / 10:.4f})")
     lines.append("tde4.setParameterAdjustFlag(lens, 'ADJUST_LENS_FOCAL_LENGTH', '', 1)")
     lines.append("tde4.setParameterAdjustFlag(lens, 'ADJUST_LENS_DISTORTION_PARAMETER', 'Distortion - Degree 2', 1)")
     lines.append("tde4.setParameterAdjustFlag(lens, 'ADJUST_LENS_DISTORTION_PARAMETER', 'Quartic Distortion - Degree 4', 1)")
@@ -322,7 +330,7 @@ def generate_tde4_script(shot, project_path, settings, exit_at_end=True, main_se
                 lines.append(f'print("    No texture set for model {model_name}")')
             # Set visibility based on 'enabled' flag
             visible_flag = 1 if model_dict["enabled"] else 0
-            lines.append(f"tde4.set3DModelVisibleFlag({pgroup_line}, model, 1{visible_flag})")
+            lines.append(f"tde4.set3DModelVisibleFlag({pgroup_line}, model, {visible_flag})")
         if group_name != "CAMERA":
             lines.append("")
 
@@ -1179,26 +1187,38 @@ class Shot:
         return None
 
     def get_selected_sequences(self):
-        """Возвращает список выбранных последовательностей."""
-        return [seq for seq in self.sequences if self.sequence_selected.get(seq.full_name, True)]
+        """Возвращает выбранные последовательности, отсортированные: основные (is_main) сначала, затем остальные по суффиксу."""
+        selected = [seq for seq in self.sequences if self.sequence_selected.get(seq.full_name, True)]
+        if not selected:
+            return []
+        # Сначала последовательности, помеченные как is_main (обычно без суффикса)
+        main_seqs = [seq for seq in selected if seq.is_main]
+        # Остальные
+        other_seqs = [seq for seq in selected if not seq.is_main]
+        # Сортируем остальные по числовому суффиксу (01, 02, …)
+        other_seqs.sort(key=self._seq_sort_key)
+        return main_seqs + other_seqs
 
     def get_main_sequence(self):
-        """Возвращает основную последовательность из выбранных."""
+        """Возвращает основную последовательность из выбранных (первую в отсортированном списке)."""
         selected = self.get_selected_sequences()
         if not selected:
             return None
-        main = next((seq for seq in selected if seq.is_main), None)
-        if main is None:
-            main = selected[0]  # первая как основная
-        return main
+        # Если есть явно помеченная is_main, она будет первой в списке, иначе первая — с наименьшим суффиксом
+        return selected[0]
 
     def get_proxy_sequences(self):
-        """Возвращает список прокси-последовательностей (выбранные, кроме основной)."""
-        main = self.get_main_sequence()
-        if main is None:
-            return []
+        """Возвращает прокси-последовательности (все выбранные, кроме основной)."""
         selected = self.get_selected_sequences()
-        return [seq for seq in selected if seq != main]
+        return selected[1:] if len(selected) > 1 else []
+    
+    def _seq_sort_key(self, seq):
+        """Ключ для сортировки: (0, суффикс) для последовательностей с числовым суффиксом, (1, имя) для остальных."""
+        match = re.search(r'_(\d+)$', seq.full_name)
+        if match:
+            return (0, int(match.group(1)))   # суффиксные идут первыми, сортируются по числу
+        else:
+            return (1, seq.full_name)         # остальные — после, по алфавиту
 
 
 # ================== Settings ==================
@@ -1628,6 +1648,34 @@ class MainWindow(QMainWindow):
             self.splitter.restoreState(state)
 
 
+    def _mix_color(self, base_color, factor):
+        """Смешивает base_color с белым цветом в пропорции factor."""
+        if not COLOR_CHILDREN or factor <= 0:
+            return QColor(255, 255, 255)
+        if factor >= 1:
+            return base_color
+        r = int(base_color.red() * factor + 255 * (1 - factor))
+        g = int(base_color.green() * factor + 255 * (1 - factor))
+        b = int(base_color.blue() * factor + 255 * (1 - factor))
+        return QColor(r, g, b)
+
+    def _recolor_children(self, shot_item, shot_color):
+        """Рекурсивно перекрашивает все дочерние элементы шота в смешанный цвет."""
+        if not COLOR_CHILDREN:
+            return
+        child_color = self._mix_color(shot_color, CHILD_COLOR_FACTOR)
+        for i in range(shot_item.childCount()):
+            child = shot_item.child(i)
+            self._apply_color_to_item(child, child_color)
+
+    def _apply_color_to_item(self, item, color):
+        """Устанавливает фон для всех колонок элемента и рекурсивно для его детей."""
+        for col in range(self.tree.columnCount()):
+            item.setBackground(col, QBrush(color))
+        for i in range(item.childCount()):
+            self._apply_color_to_item(item.child(i), color)
+
+
     def _mark_shot_dirty(self, shot):
         self._dirty_shots.add(shot)
         self._save_timer.start(TIMER_DELAY_TO_SAVE)
@@ -1728,22 +1776,15 @@ class MainWindow(QMainWindow):
             self.log_info(msg)
 
     def _open_existing_shot(self, shot, project_path):
-        """Открывает существующий проект в 3DE4, автоматически загружает BC-файл и завершает приложение через 60 секунд."""
+        """Открывает существующий проект в 3DE4, автоматически загружает BC-файл
+        и перезагружает все 3D-модели с флагом Reference Only и видимостью."""
         self.log_info(f"Opening existing project: {os.path.basename(project_path)}")
         self.log_info(f"Full path: {project_path}")
 
         tracking_dir = os.path.join(shot.path, "tracking")
         os.makedirs(tracking_dir, exist_ok=True)
 
-        # Поиск BC-файла для логирования (необязательно)
-        bc_files = glob.glob(os.path.join(tracking_dir, f"{shot.name}_track_v*_track.3de_bcompress"))
-        if bc_files:
-            self.log_info(f"Found BC file: {os.path.basename(bc_files[0])}")
-        else:
-            self.log_info("No BC file found for automatic import (will still try)")
-
-        # Генерируем скрипт, который загрузит проект и импортирует BC
-        import textwrap
+        # Формируем Python-скрипт для 3DE4
         script_content = textwrap.dedent(f"""\
             import tde4
             print('Loading project: {project_path}')
@@ -1751,7 +1792,25 @@ class MainWindow(QMainWindow):
             cam = tde4.getFirstCamera()
             tde4.importBufferCompressionFile(cam)
             print('Buffer compression file imported (if existed)')
+
+            print('Reloading 3D models that are reference-only and visible...')
+            pg = tde4.getFirstPGroup()
+            while pg:
+                models = tde4.get3DModelList(pg, 0)          # 0 = all models, not only selected
+                for m in models:
+                    is_ref = tde4.get3DModelReferenceFlag(pg, m)
+                    is_vis = tde4.get3DModelVisibleFlag(pg, m)
+                    if is_ref and is_vis:
+                        path = tde4.get3DModelFilepath(pg, m)
+                        if path:
+                            name = tde4.get3DModelName(pg, m)
+                            print(f'  Reloading model: {{name}}')
+                            tde4.importOBJ3DModel(pg, m, path)
+                pg = tde4.getNextPGroup(pg)
+            tde4.updateGUI()
+            print('All reference-only visible models reloaded.')
         """)
+
         script_filename = f"_temp_{shot.name}_open_project.py"
         script_file = os.path.join(tracking_dir, script_filename)
         with open(script_file, 'w', encoding='utf-8') as f:
@@ -2799,12 +2858,13 @@ class MainWindow(QMainWindow):
                 else:
                     color = base_color
 
-                # Устанавливаем фон только для корневого элемента шота
+                # Устанавливаем фон для корневого элемента шота
                 for col in range(self.tree.columnCount()):
                     shot_item.setBackground(col, QBrush(color))
 
-                # Для дочерних элементов фон не устанавливаем, чтобы они наследовали фон от шота
-                # Если нужно, чтобы дочерние элементы имели другой фон, можно установить, но сейчас не требуется
+                # Перекрашиваем дочерние элементы
+                self._recolor_children(shot_item, color)
+
         finally:
             self._disable_saving = False
 
@@ -3025,7 +3085,6 @@ class MainWindow(QMainWindow):
         self.log_info("No model selected to copy")
 
     def paste_model_to_selected(self):
-        """Вставить скопированную модель в выбранный элемент."""
         if not self.copied_model_data:
             self.log_info("Nothing to paste")
             return
@@ -3039,6 +3098,7 @@ class MainWindow(QMainWindow):
             self.log_info("No target selected for paste")
             return
         item = selected[0]
+
         # Определяем целевой шот и целевую группу
         target_shot = None
         target_group_name = None
@@ -3076,8 +3136,15 @@ class MainWindow(QMainWindow):
                     if isinstance(group_data, tuple) and group_data[0] == "group":
                         target_group_name = group_data[1]
             else:
-                # Если выбран "Point Groups" или другой элемент, ищем первую группу?
-                target_group_name = "CAMERA"
+                # Если выбран "Point Groups" или другой элемент, используем первую группу
+                groups_item = self._find_child_by_text(shot_item, "Point Groups")
+                if groups_item and groups_item.childCount() > 0:
+                    first_group = groups_item.child(0)
+                    group_data = first_group.data(0, Qt.UserRole)
+                    if isinstance(group_data, tuple) and group_data[0] == "group":
+                        target_group_name = group_data[1]
+                if not target_group_name:
+                    target_group_name = "CAMERA"
 
         if not target_shot:
             self.log_info("Could not determine target shot")
@@ -3090,7 +3157,6 @@ class MainWindow(QMainWindow):
             target_shot.point_groups[target_group_name] = []
             self.log_info(f"Created group '{target_group_name}' in shot '{target_shot.name}'")
 
-        
         # Добавляем модель
         import copy
         new_model = copy.deepcopy(model_dict)
@@ -3102,36 +3168,75 @@ class MainWindow(QMainWindow):
         self._mark_shot_dirty(target_shot)
         self.log_info(f"Pasted model '{new_model['name']}' into group '{target_group_name}' of shot '{target_shot.name}'")
 
-        # Добавляем модель в дерево без полного перестроения
+        # Добавляем модель в дерево, создавая недостающие узлы
         shot_item = self.find_shot_item(target_shot)
         if shot_item:
-            group_item = self.find_group_item(shot_item, target_group_name)
-            if group_item:
-                model_root = QTreeWidgetItem([new_model["name"], "", "", "", ""])
-                model_root.setFlags(model_root.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
-                model_root.setCheckState(0, Qt.Checked if new_model["enabled"] else Qt.Unchecked)
-                model_root.setData(0, Qt.UserRole, ("model_root", target_group_name, new_model["path"]))
-                self._set_child_font(model_root)
-                group_item.addChild(model_root)
-                
-                # Путь модели
-                model_path_item = QTreeWidgetItem([new_model["path"], "", ""])
-                model_path_item.setFlags(model_path_item.flags() | Qt.ItemIsEditable)
-                model_path_item.setData(0, Qt.UserRole, ("model_path", target_group_name, new_model["path"]))
-                self._set_child_font(model_path_item)
-                model_root.addChild(model_path_item)
-                
-                # Текстура
-                texture_item = QTreeWidgetItem([new_model["texture"]["path"], "", ""])
-                texture_item.setFlags(texture_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
-                texture_item.setCheckState(0, Qt.Checked if new_model["texture"]["enabled"] else Qt.Unchecked)
-                texture_item.setData(0, Qt.UserRole, ("texture_path", target_group_name, new_model["path"]))
-                self._set_child_font(texture_item)
-                model_root.addChild(texture_item)
-                
-                # Обновляем счётчик моделей в группе
-                group_item.setText(4, f"{len(target_shot.point_groups[target_group_name])} model(s)")
+            # Ищем или создаём узел "Point Groups"
+            groups_item = self._find_child_by_text(shot_item, "Point Groups")
+            if not groups_item:
+                groups_item = QTreeWidgetItem(["Point Groups", "", "", "", ""])
+                self._set_child_font(groups_item)
+                shot_item.addChild(groups_item)
+                groups_item.setExpanded(True)
+
+            # Ищем или создаём узел группы
+            group_item = None
+            for i in range(groups_item.childCount()):
+                child = groups_item.child(i)
+                data = child.data(0, Qt.UserRole)
+                if isinstance(data, tuple) and data[0] == "group" and data[1] == target_group_name:
+                    group_item = child
+                    break
+            if not group_item:
+                group_item = QTreeWidgetItem([target_group_name, "", "", "", "0 model(s)"])
+                group_item.setFlags(group_item.flags() | Qt.ItemIsEditable)
+                group_item.setData(0, Qt.UserRole, ("group", target_group_name))
+                self._set_child_font(group_item)
+                groups_item.addChild(group_item)
                 group_item.setExpanded(True)
+
+            # Создаём элементы модели
+            model_root = QTreeWidgetItem([new_model["name"], "", "", "", ""])
+            model_root.setFlags(model_root.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
+            model_root.setCheckState(0, Qt.Checked if new_model["enabled"] else Qt.Unchecked)
+            model_root.setData(0, Qt.UserRole, ("model_root", target_group_name, new_model["path"]))
+            self._set_child_font(model_root)
+            group_item.addChild(model_root)
+
+            model_path_item = QTreeWidgetItem([new_model["path"], "", ""])
+            model_path_item.setFlags(model_path_item.flags() | Qt.ItemIsEditable)
+            model_path_item.setData(0, Qt.UserRole, ("model_path", target_group_name, new_model["path"]))
+            self._set_child_font(model_path_item)
+            model_root.addChild(model_path_item)
+
+            texture_item = QTreeWidgetItem([new_model["texture"]["path"], "", ""])
+            texture_item.setFlags(texture_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
+            texture_item.setCheckState(0, Qt.Checked if new_model["texture"]["enabled"] else Qt.Unchecked)
+            texture_item.setData(0, Qt.UserRole, ("texture_path", target_group_name, new_model["path"]))
+            self._set_child_font(texture_item)
+            model_root.addChild(texture_item)
+
+            # Обновляем счётчик моделей в группе
+            group_item.setText(4, f"{len(target_shot.point_groups[target_group_name])} model(s)")
+
+            # Раскрываем все узлы
+            shot_item.setExpanded(True)
+            groups_item.setExpanded(True)
+            group_item.setExpanded(True)
+
+            # Принудительное обновление
+            self.tree.model().layoutChanged.emit()
+            self.tree.update()
+            self.tree.viewport().update()
+            self.tree.repaint()
+            self.tree.scrollToItem(model_root)
+
+            # Если модель всё ещё не видна — перестраиваем всё дерево
+            if not self.find_model_root_item(group_item, new_model["path"]):
+                self.populate_tree()
+        else:
+            # Шот не найден — перестраиваем дерево
+            self.populate_tree()
 
     def populate_tree(self):
         self._store_tree_state()                     
@@ -3604,21 +3709,45 @@ class MainWindow(QMainWindow):
                     model_dict["texture"]["enabled"],
                     name=model_dict["name"] if model_dict["name"] else None
                 )
-                # Добавляем модель в дерево без полного перестроения
+                # Заново находим shot_item в дереве
+                shot_item = self.find_shot_item(shot)
+                if not shot_item:
+                    self.populate_tree()
+                    return
+                groups_item = self._find_child_by_text(shot_item, "Point Groups")
+                if not groups_item:
+                    groups_item = QTreeWidgetItem(["Point Groups", "", "", "", ""])
+                    self._set_child_font(groups_item)
+                    shot_item.addChild(groups_item)
+                    groups_item.setExpanded(True)
+                # Ищем или создаём узел группы
+                group_item = None
+                for i in range(groups_item.childCount()):
+                    child = groups_item.child(i)
+                    data = child.data(0, Qt.UserRole)
+                    if isinstance(data, tuple) and data[0] == "group" and data[1] == group_name:
+                        group_item = child
+                        break
+                if not group_item:
+                    group_item = QTreeWidgetItem([group_name, "", "", "", "0 model(s)"])
+                    group_item.setFlags(group_item.flags() | Qt.ItemIsEditable)
+                    group_item.setData(0, Qt.UserRole, ("group", group_name))
+                    self._set_child_font(group_item)
+                    groups_item.addChild(group_item)
+                    group_item.setExpanded(True)
+                # Добавляем модель
                 model_root = QTreeWidgetItem([model_dict["name"], "", "", "", ""])
                 model_root.setFlags(model_root.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
                 model_root.setCheckState(0, Qt.Checked if model_dict["enabled"] else Qt.Unchecked)
                 model_root.setData(0, Qt.UserRole, ("model_root", group_name, model_dict["path"]))
                 self._set_child_font(model_root)
                 group_item.addChild(model_root)
-                
-                # Путь модели
+                # Путь
                 model_path_item = QTreeWidgetItem([model_dict["path"], "", ""])
                 model_path_item.setFlags(model_path_item.flags() | Qt.ItemIsEditable)
                 model_path_item.setData(0, Qt.UserRole, ("model_path", group_name, model_dict["path"]))
                 self._set_child_font(model_path_item)
                 model_root.addChild(model_path_item)
-                
                 # Текстура
                 texture_item = QTreeWidgetItem([model_dict["texture"]["path"], "", ""])
                 texture_item.setFlags(texture_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
@@ -3626,10 +3755,21 @@ class MainWindow(QMainWindow):
                 texture_item.setData(0, Qt.UserRole, ("texture_path", group_name, model_dict["path"]))
                 self._set_child_font(texture_item)
                 model_root.addChild(texture_item)
-                
-                # Обновляем счётчик моделей в группе
+                # Обновляем счётчик
                 group_item.setText(4, f"{len(shot.point_groups[group_name])} model(s)")
+                # Раскрываем всё
+                shot_item.setExpanded(True)
+                groups_item.setExpanded(True)
                 group_item.setExpanded(True)
+                # Принудительное обновление
+                self.tree.model().layoutChanged.emit()
+                self.tree.update()
+                self.tree.viewport().update()
+                self.tree.repaint()
+                self.tree.scrollToItem(model_root)
+                # Если модель не появилась — перестраиваем дерево
+                if not self.find_model_root_item(group_item, model_dict["path"]):
+                    self.populate_tree()
 
     def edit_model(self, group_item, group_name, model_path):
         shot_item = group_item.parent().parent()
@@ -3723,7 +3863,6 @@ class MainWindow(QMainWindow):
             shot._dirty = True
             self._mark_shot_dirty(shot)
             
-            # Добавляем группу в дерево без полного перестроения
             shot_item = self.find_shot_item(shot)
             if shot_item:
                 groups_item = self._find_child_by_text(shot_item, "Point Groups")
@@ -3733,7 +3872,17 @@ class MainWindow(QMainWindow):
                     group_item.setData(0, Qt.UserRole, ("group", name))
                     self._set_child_font(group_item)
                     groups_item.addChild(group_item)
+                    
+                    # Раскрываем все родительские узлы
+                    shot_item.setExpanded(True)
                     groups_item.setExpanded(True)
+                    group_item.setExpanded(True)
+                    
+                    self.tree.update()
+                else:
+                    self.populate_tree()
+            else:
+                self.populate_tree()
 
     def add_point_group(self):
         selected = self.tree.selectedItems()
