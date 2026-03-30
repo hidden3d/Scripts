@@ -21,8 +21,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QLineEdit, QDoubleSpinBox, QSpinBox, QDialogButtonBox, 
                              QSizePolicy, QStyledItemDelegate, QInputDialog, QColorDialog, QSplitter, QMenu,
                              QTableWidget, QTableWidgetItem, QDockWidget, QShortcut, QComboBox, QListWidget, QListWidgetItem)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QMutex, QWaitCondition, QByteArray, QTimer
-from PyQt5.QtGui import QColor, QFont, QBrush, QKeySequence, QPalette
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QMutex, QWaitCondition, QByteArray, QTimer, QMimeData, Qt
+from PyQt5.QtGui import QColor, QFont, QBrush, QKeySequence, QPalette, QDrag, QPainter, QPixmap
 
 # Попытка импорта exifread
 try:
@@ -592,6 +592,315 @@ def read_simple_exr_sensor(exr_path, camera_db):
     except:
         pass
     return None, None
+
+
+
+class ResourceTree(QTreeWidget):
+    def __init__(self, main_window, parent=None):
+        super().__init__(parent)
+        self.main_window = main_window
+        self.setAcceptDrops(False)
+        self.setDragEnabled(True)
+        self.drag_start_pos = None
+        self.drag_start_item = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.drag_start_pos = event.pos()
+            self.drag_start_item = self.itemAt(event.pos())
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not (event.buttons() & Qt.LeftButton):
+            return
+        if not self.drag_start_pos:
+            return
+        distance = (event.pos() - self.drag_start_pos).manhattanLength()
+        if distance < QApplication.startDragDistance():
+            return
+        if not self.drag_start_item:
+            return
+
+        # Проверяем, что это корневой элемент модели
+        data = self.drag_start_item.data(0, Qt.UserRole)
+        if not isinstance(data, tuple) or data[0] != "model":
+            return
+        idx = data[1]
+        if not self.main_window.project_resources or idx >= len(self.main_window.project_resources.models):
+            return
+        m = self.main_window.project_resources.models[idx]
+
+        # Создаём drag
+        drag = QDrag(self)
+        mime = QMimeData()
+        data_dict = {
+            "type": "resource",
+            "index": idx,
+            "model": {
+                "name": m["name"],
+                "model_path": m["model_path"],
+                "texture_path": m["texture_path"]
+            }
+        }
+        mime.setData("application/x-3de-model", json.dumps(data_dict).encode())
+        drag.setMimeData(mime)
+
+        # Пиксмап с именем модели
+        text = m["name"]
+        pixmap = QPixmap(100, 30)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setPen(Qt.black)
+        painter.drawText(pixmap.rect(), Qt.AlignCenter, text)
+        painter.end()
+        drag.setPixmap(pixmap)
+
+        drag.exec_(Qt.CopyAction)   # копирование из ресурсов
+
+        # Сброс
+        self.drag_start_pos = None
+        self.drag_start_item = None
+
+
+class ShotTree(QTreeWidget):
+    def __init__(self, main_window, parent=None):
+        super().__init__(parent)
+        self.main_window = main_window
+        self.setAcceptDrops(True)
+        self.setDragEnabled(True)
+        self.drag_start_pos = None
+        self.drag_start_item = None
+        self.highlighted_item = None
+        self._original_backgrounds = {}       # (id(item), col) -> QBrush
+
+    def drawRow(self, painter, options, index):
+        """Рисуем жёлтый фон для всей строки, если элемент подсвечен."""
+        item = self.itemFromIndex(index)
+        if item == self.highlighted_item:
+            painter.fillRect(options.rect, QColor(255, 255, 150))
+        super().drawRow(painter, options, index)
+
+    def _save_backgrounds(self, item):
+        """Сохраняет текущие кисти фона для всех колонок элемента."""
+        item_id = id(item)
+        for col in range(self.columnCount()):
+            brush = item.background(col)
+            if brush != QBrush():
+                self._original_backgrounds[(item_id, col)] = brush
+            else:
+                self._original_backgrounds[(item_id, col)] = None
+
+    def _restore_backgrounds(self, item):
+        """Восстанавливает сохранённые кисти фона для элемента."""
+        item_id = id(item)
+        for col in range(self.columnCount()):
+            brush = self._original_backgrounds.get((item_id, col))
+            if brush is not None:
+                item.setBackground(col, brush)
+            else:
+                item.setBackground(col, QBrush())
+        # Удаляем сохранённые данные для этого элемента
+        keys_to_del = [k for k in self._original_backgrounds if k[0] == item_id]
+        for k in keys_to_del:
+            del self._original_backgrounds[k]
+
+    def _clear_backgrounds(self, item):
+        """Временно очищает фон для всех колонок элемента."""
+        for col in range(self.columnCount()):
+            item.setBackground(col, QBrush())
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.drag_start_pos = event.pos()
+            self.drag_start_item = self.itemAt(event.pos())
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not (event.buttons() & Qt.LeftButton):
+            return
+        if not self.drag_start_pos:
+            return
+        distance = (event.pos() - self.drag_start_pos).manhattanLength()
+        if distance < QApplication.startDragDistance():
+            return
+        if not self.drag_start_item:
+            return
+
+        data = self.drag_start_item.data(0, Qt.UserRole)
+        if not isinstance(data, tuple) or data[0] != "model_root":
+            return
+        group_name = data[1]
+        model_path = data[2]
+
+        shot_item = self.drag_start_item
+        while shot_item.parent():
+            shot_item = shot_item.parent()
+        shot = shot_item.data(0, Qt.UserRole)
+        if not shot:
+            return
+
+        model_dict = None
+        for m in shot.point_groups.get(group_name, []):
+            if m["path"] == model_path:
+                model_dict = m.copy()
+                break
+        if not model_dict:
+            return
+
+        drag = QDrag(self)
+        mime = QMimeData()
+        data_dict = {
+            "type": "shot_model",
+            "source_shot_path": shot.path,
+            "source_group_name": group_name,
+            "model_path": model_path,
+            "model_dict": model_dict
+        }
+        mime.setData("application/x-3de-model", json.dumps(data_dict).encode())
+        drag.setMimeData(mime)
+
+        text = model_dict.get("name", os.path.basename(model_path))
+        pixmap = QPixmap(100, 30)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setPen(Qt.black)
+        painter.drawText(pixmap.rect(), Qt.AlignCenter, text)
+        painter.end()
+        drag.setPixmap(pixmap)
+
+        drag.exec_(Qt.MoveAction)
+        self.drag_start_pos = None
+        self.drag_start_item = None
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat("application/x-3de-model"):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if self.highlighted_item:
+            self._restore_backgrounds(self.highlighted_item)
+            self.highlighted_item = None
+            self.viewport().update()
+
+        item = self.itemAt(event.pos())
+        if item:
+            if item.parent() is None:          # шот
+                self.highlighted_item = item
+            else:
+                data = item.data(0, Qt.UserRole)
+                if isinstance(data, tuple) and data[0] == "group":
+                    self.highlighted_item = item
+
+        if self.highlighted_item:
+            self._save_backgrounds(self.highlighted_item)
+            self._clear_backgrounds(self.highlighted_item)
+            self.viewport().update()
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        if self.highlighted_item:
+            self._restore_backgrounds(self.highlighted_item)
+            self.highlighted_item = None
+            self.viewport().update()
+
+    def dropEvent(self, event):
+        if self.highlighted_item:
+            self._restore_backgrounds(self.highlighted_item)
+            self.highlighted_item = None
+            self.viewport().update()
+
+        target_item = self.itemAt(event.pos())
+        if not target_item:
+            event.ignore()
+            return
+
+        target_shot = None
+        target_group = None
+        if target_item.parent() is None:
+            target_shot = target_item.data(0, Qt.UserRole)
+            target_group = "CAMERA"
+        else:
+            data = target_item.data(0, Qt.UserRole)
+            if isinstance(data, tuple) and data[0] == "group":
+                target_group = data[1]
+                shot_item = target_item
+                while shot_item.parent():
+                    shot_item = shot_item.parent()
+                target_shot = shot_item.data(0, Qt.UserRole)
+
+        if not target_shot:
+            event.ignore()
+            return
+
+        mime_data = event.mimeData()
+        if not mime_data.hasFormat("application/x-3de-model"):
+            event.ignore()
+            return
+
+        data_bytes = mime_data.data("application/x-3de-model")
+        data_dict = json.loads(data_bytes.data().decode())
+        data_type = data_dict.get("type")
+
+        if data_type == "resource":
+            model_info = data_dict["model"]
+            model_dict = {
+                "name": model_info["name"],
+                "path": model_info["model_path"],
+                "enabled": True,
+                "texture": {
+                    "path": model_info["texture_path"],
+                    "enabled": bool(model_info["texture_path"])
+                }
+            }
+            target_shot.add_model_to_group(
+                target_group,
+                model_dict["path"],
+                model_dict["enabled"],
+                model_dict["texture"]["path"],
+                model_dict["texture"]["enabled"],
+                name=model_dict["name"]
+            )
+            self.main_window._mark_shot_dirty(target_shot)
+            self.main_window.populate_tree()
+            event.acceptProposedAction()
+
+        elif data_type == "shot_model":
+            source_shot_path = data_dict["source_shot_path"]
+            source_group = data_dict["source_group_name"]
+            model_path = data_dict["model_path"]
+            model_dict = data_dict["model_dict"]
+
+            source_shot = None
+            for shot in self.main_window.shots:
+                if shot.path == source_shot_path:
+                    source_shot = shot
+                    break
+            if not source_shot:
+                event.ignore()
+                return
+
+            if source_shot == target_shot and source_group == target_group:
+                event.ignore()
+                return
+
+            source_shot.remove_model_from_group(source_group, model_path)
+            target_shot.add_model_to_group(
+                target_group,
+                model_dict["path"],
+                model_dict["enabled"],
+                model_dict["texture"]["path"],
+                model_dict["texture"]["enabled"],
+                name=model_dict["name"]
+            )
+            self.main_window._mark_shot_dirty(source_shot)
+            self.main_window._mark_shot_dirty(target_shot)
+            self.main_window.populate_tree()
+            event.acceptProposedAction()
+
 
 
 class ProjectResources:
@@ -1410,7 +1719,7 @@ class ProcessingWorker(QThread):
         script_file = os.path.join(os.path.dirname(project_path), script_filename)
         with open(script_file, 'w', encoding='utf-8') as f:
             f.write(script_content)
-        os.chmod(script_file, int(self.settings.data.get("file_permissions", "664"), 8))
+        self.fix_permissions([script_file])
 
         tde4_path = self.settings.data["path_tde4"]
         if not os.path.isfile(tde4_path):
@@ -1475,7 +1784,7 @@ class ProcessingWorker(QThread):
 
     def fix_permissions(self, file_list):
         try:
-            file_perm = int(self.settings.data.get("file_permissions", "664"), 8)
+            file_perm = int(self.settings.data.get("file_permissions", "666"), 8)
             for file_path in file_list:
                 if os.path.exists(file_path):
                     os.chmod(file_path, file_perm)
@@ -1815,7 +2124,7 @@ class MainWindow(QMainWindow):
         script_file = os.path.join(tracking_dir, script_filename)
         with open(script_file, 'w', encoding='utf-8') as f:
             f.write(script_content)
-        os.chmod(script_file, int(self.settings.data.get("file_permissions", "664"), 8))
+        self.fix_permissions([script_file])
 
         tde4_path = self.settings.data["path_tde4"]
         if not os.path.isfile(tde4_path) or not os.access(tde4_path, os.X_OK):
@@ -1901,7 +2210,7 @@ class MainWindow(QMainWindow):
         script_file = os.path.join(tracking_dir, script_filename)
         with open(script_file, 'w', encoding='utf-8') as f:
             f.write(script_content)
-        os.chmod(script_file, int(self.settings.data.get("file_permissions", "664"), 8))
+        self.fix_permissions([script_file])
 
         # Сохраняем информацию в шоте
         shot.project_path = project_path
@@ -2056,7 +2365,7 @@ class MainWindow(QMainWindow):
     def fix_permissions(self, file_list):
         """Установка прав на файлы (для головного режима)."""
         try:
-            file_perm = int(self.settings.data.get("file_permissions", "664"), 8)
+            file_perm = int(self.settings.data.get("file_permissions", "666"), 8)
             for file_path in file_list:
                 if os.path.exists(file_path):
                     os.chmod(file_path, file_perm)
@@ -2164,7 +2473,7 @@ class MainWindow(QMainWindow):
 
 
         # Tree widget: Name + чекбокс в колонке 0, остальное в 1-4
-        self.tree = QTreeWidget()
+        self.tree = ShotTree(self)
         self.tree.setHeaderLabels(["Name", "Sensor W", "Sensor H", "Focal", "Info"])
         self.tree.setColumnCount(5)
 
@@ -2238,7 +2547,7 @@ class MainWindow(QMainWindow):
         resources_layout.addLayout(btn_layout)
 
         # Дерево ресурсов (2 колонки: путь, кнопка)
-        self.resources_tree = QTreeWidget()
+        self.resources_tree = ResourceTree(self, resources_widget)
         self.resources_tree.setColumnCount(2)
         self.resources_tree.setHeaderLabels(["", ""])
         self.resources_tree.setIndentation(20)
@@ -2620,6 +2929,7 @@ class MainWindow(QMainWindow):
         for idx, m in enumerate(self.project_resources.models):
             # Корневой элемент – модель (имя)
             model_item = QTreeWidgetItem([m["name"]])
+            model_item.setFlags(model_item.flags() | Qt.ItemIsDragEnabled)
             model_item.setFlags(model_item.flags() | Qt.ItemIsEditable)
             model_item.setData(0, Qt.UserRole, ("model", idx))
 
@@ -3304,6 +3614,7 @@ class MainWindow(QMainWindow):
                 for model in models:
                     # Корневой элемент модели (имя)
                     model_root_item = QTreeWidgetItem([model["name"], "", "", "", ""])
+                    model_root_item.setFlags(model_root_item.flags() | Qt.ItemIsDragEnabled)
                     model_root_item.setFlags(model_root_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
                     model_root_item.setCheckState(0, Qt.Checked if model["enabled"] else Qt.Unchecked)
                     model_root_item.setData(0, Qt.UserRole, ("model_root", group_name, model["path"]))
@@ -4303,7 +4614,7 @@ class MainWindow(QMainWindow):
         script_file = os.path.join(tracking_dir, script_filename)
         with open(script_file, 'w', encoding='utf-8') as f:
             f.write(script_content)
-        os.chmod(script_file, int(self.settings.data.get("file_permissions", "664"), 8))
+        self.fix_permissions([script_file])
         print(f"  Временный скрипт сохранён: {script_file}")
 
         tde4_path = self.settings.data["path_tde4"]
@@ -4481,7 +4792,7 @@ class SettingsDialog(QDialog):
         btn_browse_exr_viewer.clicked.connect(lambda: self.browse_file(self.edit_exr_viewer))
         layout.addRow("", btn_browse_exr_viewer)
 
-        self.edit_file_perm = QLineEdit(settings.data.get("file_permissions", "664"))
+        self.edit_file_perm = QLineEdit(settings.data.get("file_permissions", "666"))
         layout.addRow("File permissions (octal):", self.edit_file_perm)
 
         self.edit_dir_perm = QLineEdit(settings.data.get("dir_permissions", "775"))
